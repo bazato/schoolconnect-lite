@@ -1,0 +1,35 @@
+-- Development-only seed identities and relationships. Production onboarding must use controlled import APIs.
+\connect schoolconnect_identity
+
+INSERT INTO users (id, phone_e164, display_name) VALUES
+  ('10000000-0000-4000-8000-000000000000', '+919876543200', 'Platform Owner'),
+  ('10000000-0000-4000-8000-000000000001', '+919876543210', 'Ahmed Ali'),
+  ('10000000-0000-4000-8000-000000000002', '+919876543211', 'Ms. Priya');
+INSERT INTO memberships (id, user_id, school_id, role) VALUES
+  ('11000000-0000-4000-8000-000000000000', '10000000-0000-4000-8000-000000000000', NULL, 'PLATFORM_OWNER'),
+  ('11000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000001', 'PARENT'),
+  ('11000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000002', '20000000-0000-4000-8000-000000000001', 'TEACHER');
+INSERT INTO invitations (id, school_id, invitation_code_hash, phone_hash, role, expires_at) VALUES
+  ('12000000-0000-4000-8000-000000000000', NULL, encode(digest('OWNER-INVITE', 'sha256'), 'hex'), encode(digest('+919876543200', 'sha256'), 'hex'), 'PLATFORM_OWNER', '2035-01-01'),
+  ('12000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000001', encode(digest('PARENT-INVITE', 'sha256'), 'hex'), encode(digest('+919876543210', 'sha256'), 'hex'), 'PARENT', '2035-01-01'),
+  ('12000000-0000-4000-8000-000000000002', '20000000-0000-4000-8000-000000000001', encode(digest('TEACHER-INVITE', 'sha256'), 'hex'), encode(digest('+919876543211', 'sha256'), 'hex'), 'TEACHER', '2035-01-01');
+
+\connect schoolconnect_school
+
+INSERT INTO schools (id, school_code, display_name, timezone) VALUES
+  ('20000000-0000-4000-8000-000000000001', 'TJHS', 'Thomas Jefferson High School', 'Asia/Riyadh');
+INSERT INTO school_configurations (school_id) VALUES ('20000000-0000-4000-8000-000000000001');
+INSERT INTO school_classes (id, school_id, class_code, display_name, academic_year) VALUES
+  ('21000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000001', 'G5A', 'Grade 5A', '2026-2027'),
+  ('21000000-0000-4000-8000-000000000002', '20000000-0000-4000-8000-000000000001', 'G2B', 'Grade 2B', '2026-2027');
+INSERT INTO students (id, school_id, admission_number, display_name) VALUES
+  ('22000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000001', 'TJ-0001', 'Jenny Wilson'),
+  ('22000000-0000-4000-8000-000000000002', '20000000-0000-4000-8000-000000000001', 'TJ-0002', 'Leslie Alexander');
+INSERT INTO enrollments (school_id, class_id, student_id, started_on) VALUES
+  ('20000000-0000-4000-8000-000000000001', '21000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000001', '2026-08-01'),
+  ('20000000-0000-4000-8000-000000000001', '21000000-0000-4000-8000-000000000002', '22000000-0000-4000-8000-000000000002', '2026-08-01');
+INSERT INTO guardian_links (school_id, guardian_user_id, student_id, relationship) VALUES
+  ('20000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000001', 'Parent'),
+  ('20000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002', 'Parent');
+INSERT INTO teacher_assignments (school_id, teacher_membership_id, class_id, subject_code, subject_name, can_publish_results, can_publish_announcements) VALUES
+  ('20000000-0000-4000-8000-000000000001', '11000000-0000-4000-8000-000000000002', '21000000-0000-4000-8000-000000000001', 'MATH', 'Mathematics', true, true);

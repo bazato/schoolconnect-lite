@@ -1,0 +1,23 @@
+{
+  "name": "schoolconnect-lite",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.15.1",
+  "scripts": {
+    "figma:inspect": "node scripts/inspect-fig.mjs && node scripts/summarize-fig.mjs",
+    "dev:mobile": "pnpm --filter @schoolconnect/mobile start",
+    "dev:api": "pnpm --filter @schoolconnect/api start:dev",
+    "dev:services": "pnpm --parallel --filter @schoolconnect/api --filter @schoolconnect/identity --filter @schoolconnect/school --filter @schoolconnect/content --filter @schoolconnect/attendance --filter @schoolconnect/files --filter @schoolconnect/notifications --filter @schoolconnect/audit run start:dev",
+    "infra:up": "docker compose up -d postgres",
+    "infra:down": "docker compose down",
+    "infra:status": "docker compose ps",
+    "db:verify": "node scripts/verify-databases.mjs",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "build": "pnpm -r build"
+  },
+  "devDependencies": {
+    "openfig-core": "0.4.1"
+  }
+}

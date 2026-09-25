@@ -1,0 +1,149 @@
+import { Test } from '@nestjs/testing';
+import request from 'supertest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { AppModule, ServiceClient } from './app.module';
+import type { INestApplication } from '@nestjs/common';
+
+const parent = { userId: 'parent-1', displayName: 'Parent', membershipId: 'membership-parent', schoolId: 'school-1', role: 'PARENT' };
+const teacher = { userId: 'teacher-1', displayName: 'Teacher', membershipId: 'membership-teacher', schoolId: 'school-1', role: 'TEACHER' };
+const owner = { userId: 'owner-1', displayName: 'Owner', membershipId: 'membership-owner', schoolId: null, role: 'PLATFORM_OWNER' };
+const schoolAdmin = { userId: 'admin-1', displayName: 'School Admin', membershipId: 'membership-admin', schoolId: 'school-1', role: 'SCHOOL_ADMIN' };
+
+describe('API gateway authorization and service boundaries', () => {
+  let app: INestApplication;
+  const serviceClient = { request: vi.fn() };
+
+  beforeEach(async () => {
+    serviceClient.request.mockReset();
+    serviceClient.request.mockImplementation((service: string, path: string, init?: RequestInit) => {
+      if (service === 'identity' && path.includes('/sessions/context')) {
+        const token = JSON.parse(String(init?.body)).accessToken as string;
+        return Promise.resolve(token === 'teacher-token' ? teacher : token === 'owner-token' ? owner : token === 'admin-token' ? schoolAdmin : parent);
+      }
+      if (service === 'school' && path === '/internal/v1/schools' && init?.method === 'POST') return Promise.resolve({ id: 'school-created', schoolCode: 'NEW1', displayName: 'New School', timezone: 'Asia/Riyadh', status: 'ACTIVE', created: true });
+      if (service === 'school' && path === '/internal/v1/schools') return Promise.resolve([{ id: 'school-1', schoolCode: 'S1', displayName: 'School One' }]);
+      if (service === 'school' && path.endsWith('/classes') && init?.method === 'POST') return Promise.resolve({ id: 'class-created', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027' });
+      if (service === 'school' && path.endsWith('/classes')) return Promise.resolve([{ id: 'class-1', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027' }]);
+      if (service === 'school' && path.endsWith('/teacher-assignments')) return Promise.resolve({ assignmentId: 'assignment-1', classId: 'class-1', subjectCode: 'MATH' });
+      if (service === 'identity' && path === '/internal/v1/provisioning/accounts') {
+        const body = JSON.parse(String(init?.body)) as { role: string };
+        return Promise.resolve({ userId: 'new-user', membershipId: body.role === 'SCHOOL_ADMIN' ? 'new-admin-membership' : 'new-teacher-membership', role: body.role, invitationCode: 'SC-TEST', expiresAt: '2026-10-25T00:00:00.000Z' });
+      }
+      if (service === 'school' && path.includes('/authorization/guardian')) return Promise.resolve({ allowed: !path.includes('student-denied') });
+      if (service === 'school' && path.includes('/authorization/teacher')) return Promise.resolve({ allowed: !path.includes('class-denied') });
+      if (service === 'school' && path.includes('/recipients')) return Promise.resolve([{ studentId: 'student-1', guardianUserId: 'parent-1', snapshot: {} }]);
+      if (service === 'content' && path.startsWith('/internal/v1/timeline')) return Promise.resolve([{ id: 'post-1', title: 'Homework' }]);
+      if (service === 'content' && path.startsWith('/internal/v1/teacher-posts')) return Promise.resolve([{ id: 'post-2', postType: 'ANNOUNCEMENT', title: 'School closed' }]);
+      if (service === 'content' && path === '/internal/v1/posts') return Promise.resolve({ id: 'post-created', status: 'PUBLISHED' });
+      if (service === 'content' && path.startsWith('/internal/v1/posts/post-owned?')) return Promise.resolve({ id: 'post-owned', classId: 'class-1', postType: 'ANNOUNCEMENT', authorMembershipId: 'membership-teacher' });
+      if (service === 'content' && path.startsWith('/internal/v1/posts/post-other?')) return Promise.resolve({ id: 'post-other', classId: 'class-1', postType: 'ANNOUNCEMENT', authorMembershipId: 'another-teacher' });
+      if (service === 'content' && path === '/internal/v1/posts/post-owned/revisions') return Promise.resolve({ id: 'post-owned', revisionNumber: 2, status: 'UPDATED' });
+      if (path === '/internal/v1/health') return Promise.resolve({ status: 'ok' });
+      return Promise.resolve({});
+    });
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(ServiceClient).useValue(serviceClient).compile();
+    app = moduleRef.createNestApplication();
+    app.setGlobalPrefix('api/v1');
+    await app.init();
+  });
+
+  it('aggregates service health without authentication', async () => {
+    const response = await request(app.getHttpServer()).get('/api/v1/health').expect(200);
+    expect(response.body.status).toBe('ok');
+    expect(response.body.services).toHaveLength(7);
+  });
+
+  it('authorizes the parent-child relationship before fetching a timeline', async () => {
+    const response = await request(app.getHttpServer()).get('/api/v1/timeline/student-1').set('Authorization', 'Bearer parent-token').expect(200);
+    expect(response.body[0].id).toBe('post-1');
+    expect(serviceClient.request.mock.calls.some((call) => call[0] === 'school' && call[1].includes('/authorization/guardian'))).toBe(true);
+  });
+
+  it('denies an unrelated child before calling content', async () => {
+    await request(app.getHttpServer()).get('/api/v1/timeline/student-denied').set('Authorization', 'Bearer parent-token').expect(403);
+    expect(serviceClient.request.mock.calls.some((call) => call[0] === 'content')).toBe(false);
+  });
+
+  it('checks teacher assignment before publishing', async () => {
+    const payload = { classId: 'class-1', postType: 'HOMEWORK', title: 'Fractions', body: 'Complete exercise', dueDate: '2026-09-25', audienceType: 'CLASS', idempotencyKey: 'key-1', recipients: [{ studentId: 'student-1', guardianUserId: 'parent-1' }] };
+    const response = await request(app.getHttpServer()).post('/api/v1/posts').set('Authorization', 'Bearer teacher-token').send(payload).expect(201);
+    expect(response.body.status).toBe('PUBLISHED');
+    const downstream = serviceClient.request.mock.calls.find((call) => call[0] === 'content' && call[1] === '/internal/v1/posts');
+    expect(JSON.parse(String(downstream?.[2]?.body)).authorMembershipId).toBe('membership-teacher');
+  });
+
+  it('rejects a teacher outside the assigned class', async () => {
+    await request(app.getHttpServer()).post('/api/v1/posts').set('Authorization', 'Bearer teacher-token').send({ classId: 'class-denied', postType: 'HOMEWORK' }).expect(403);
+  });
+
+  it('lists persisted posts for the authenticated teacher membership', async () => {
+    const response = await request(app.getHttpServer()).get('/api/v1/teacher-posts').set('Authorization', 'Bearer teacher-token').expect(200);
+    expect(response.body[0]).toMatchObject({ postType: 'ANNOUNCEMENT', title: 'School closed' });
+    expect(serviceClient.request).toHaveBeenCalledWith('content', expect.stringContaining('authorMembershipId=membership-teacher'));
+  });
+
+  it('does not expose the teacher publishing feed to a parent', async () => {
+    await request(app.getHttpServer()).get('/api/v1/teacher-posts').set('Authorization', 'Bearer parent-token').expect(403);
+  });
+
+  it('publishes an announcement after resolving recipients on the server', async () => {
+    const payload = { classId: 'class-1', postType: 'ANNOUNCEMENT', title: 'School closed', body: 'School will be closed tomorrow.', audienceType: 'CLASS', idempotencyKey: 'key-2' };
+    await request(app.getHttpServer()).post('/api/v1/posts').set('Authorization', 'Bearer teacher-token').send(payload).expect(201);
+    const downstream = serviceClient.request.mock.calls.find((call) => call[0] === 'content' && call[1] === '/internal/v1/posts');
+    const forwarded = JSON.parse(String(downstream?.[2]?.body)) as { recipients: Array<{ studentId: string }>; authorMembershipId: string };
+    expect(forwarded.recipients).toEqual([{ studentId: 'student-1', guardianUserId: 'parent-1', snapshot: {} }]);
+    expect(forwarded.authorMembershipId).toBe('membership-teacher');
+  });
+
+  it('lets a teacher create a correction revision for their own post', async () => {
+    const payload = { expectedRevisionNumber: 1, title: 'Corrected notice', body: 'Updated details', changeKind: 'MATERIAL' };
+    const response = await request(app.getHttpServer()).post('/api/v1/posts/post-owned/revisions').set('Authorization', 'Bearer teacher-token').send(payload).expect(201);
+    expect(response.body).toMatchObject({ revisionNumber: 2, status: 'UPDATED' });
+    const downstream = serviceClient.request.mock.calls.find((call) => call[0] === 'content' && call[1] === '/internal/v1/posts/post-owned/revisions');
+    expect(JSON.parse(String(downstream?.[2]?.body))).toMatchObject({
+      expectedRevisionNumber: 1,
+      authorMembershipId: 'membership-teacher',
+      schoolId: 'school-1',
+    });
+  });
+
+  it('prevents a teacher from editing another teacher’s post', async () => {
+    await request(app.getHttpServer()).post('/api/v1/posts/post-other/revisions').set('Authorization', 'Bearer teacher-token').send({ expectedRevisionNumber: 1, title: 'Changed', body: 'Changed' }).expect(403);
+    expect(serviceClient.request.mock.calls.some((call) => call[1] === '/internal/v1/posts/post-other/revisions')).toBe(false);
+  });
+
+  it('does not expose post correction to a parent', async () => {
+    await request(app.getHttpServer()).post('/api/v1/posts/post-owned/revisions').set('Authorization', 'Bearer parent-token').send({ expectedRevisionNumber: 1, title: 'Changed', body: 'Changed' }).expect(403);
+  });
+
+  it('lets only the platform owner create a school and its first administrator', async () => {
+    const payload = { schoolCode: 'NEW1', displayName: 'New School', timezone: 'Asia/Riyadh', adminDisplayName: 'New Admin', adminPhoneE164: '+919800000001' };
+    const response = await request(app.getHttpServer()).post('/api/v1/admin/schools').set('Authorization', 'Bearer owner-token').send(payload).expect(201);
+    expect(response.body.school.id).toBe('school-created');
+    expect(response.body.administrator.role).toBe('SCHOOL_ADMIN');
+    const provision = serviceClient.request.mock.calls.find((call) => call[0] === 'identity' && call[1] === '/internal/v1/provisioning/accounts');
+    expect(JSON.parse(String(provision?.[2]?.body))).toMatchObject({ schoolId: 'school-created', role: 'SCHOOL_ADMIN' });
+    await request(app.getHttpServer()).post('/api/v1/admin/schools').set('Authorization', 'Bearer parent-token').send(payload).expect(403);
+  });
+
+  it('locks class creation to the school administrator school context', async () => {
+    await request(app.getHttpServer()).post('/api/v1/admin/classes').set('Authorization', 'Bearer admin-token').send({ classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027', schoolId: 'school-other' }).expect(201);
+    expect(serviceClient.request).toHaveBeenCalledWith('school', '/internal/v1/schools/school-1/classes', expect.objectContaining({ method: 'POST' }));
+  });
+
+  it('lets a school administrator provision a teacher with an assignment', async () => {
+    const payload = { displayName: 'Teacher Two', phoneE164: '+919800000002', classId: 'class-1', subjectCode: 'MATH', subjectName: 'Mathematics', canPublishResults: false, canPublishAnnouncements: true, canRecordAttendance: true, schoolId: 'school-other' };
+    const response = await request(app.getHttpServer()).post('/api/v1/admin/teachers').set('Authorization', 'Bearer admin-token').send(payload).expect(201);
+    expect(response.body.teacher).toMatchObject({ role: 'TEACHER', membershipId: 'new-teacher-membership' });
+    const provision = serviceClient.request.mock.calls.find((call) => call[0] === 'identity' && call[1] === '/internal/v1/provisioning/accounts');
+    expect(JSON.parse(String(provision?.[2]?.body))).toMatchObject({ schoolId: 'school-1', role: 'TEACHER' });
+    expect(serviceClient.request).toHaveBeenCalledWith('school', '/internal/v1/schools/school-1/teacher-assignments', expect.objectContaining({ method: 'POST' }));
+  });
+
+  it('rejects a teacher assignment to a class outside the administrator school before creating the identity', async () => {
+    const payload = { displayName: 'Teacher Two', phoneE164: '+919800000002', classId: 'class-from-another-school', subjectCode: 'MATH', subjectName: 'Mathematics' };
+    await request(app.getHttpServer()).post('/api/v1/admin/teachers').set('Authorization', 'Bearer admin-token').send(payload).expect(400);
+    expect(serviceClient.request.mock.calls.some((call) => call[0] === 'identity' && call[1] === '/internal/v1/provisioning/accounts')).toBe(false);
+  });
+});

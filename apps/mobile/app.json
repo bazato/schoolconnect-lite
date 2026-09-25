@@ -1,0 +1,20 @@
+{
+  "expo": {
+    "name": "SchoolConnect Lite",
+    "slug": "schoolconnect-lite",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "scheme": "schoolconnect",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.schoolconnect.lite"
+    },
+    "android": {
+      "package": "com.schoolconnect.lite",
+      "adaptiveIcon": { "backgroundColor": "#5D08C9" }
+    },
+    "web": { "bundler": "metro" },
+    "plugins": ["expo-secure-store", "expo-notifications"]
+  }
+}

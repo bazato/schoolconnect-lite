@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: schoolconnect-postgres
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: schoolconnect
+      POSTGRES_PASSWORD: schoolconnect
+    ports:
+      - "5432:5432"
+    volumes:
+      - schoolconnect_pg:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U schoolconnect -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: schoolconnect-minio
+    profiles: ["storage"]
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: schoolconnect
+      MINIO_ROOT_PASSWORD: schoolconnect-local-only
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - schoolconnect_minio:/data
+    restart: unless-stopped
+volumes:
+  schoolconnect_pg:
+  schoolconnect_minio:

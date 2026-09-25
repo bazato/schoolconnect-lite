@@ -1,0 +1,9 @@
+node_modules/
+.expo/
+dist/
+coverage/
+.env
+*.log
+reference/kaksha-structure.json
+reference/kaksha-screens.json
+reference/kaksha.figctx/

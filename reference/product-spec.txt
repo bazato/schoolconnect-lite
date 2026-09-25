@@ -1,0 +1,300 @@
+PRODUCT CONCEPT • BUSINESS REQUIREMENTS • FIGMA-STYLE UX
+SchoolConnect Lite
+A simple, beautiful single mobile app for school communication, homework, results and parent absence acknowledgement.
+
+
+
+01 • EXECUTIVE SUMMARY
+One app. Two role experiences. Four daily jobs.
+SchoolConnect Lite is deliberately smaller than a full school ERP. It solves the high-frequency communication loop between teachers and parents using one role-aware mobile application. Teachers publish homework, result attachments and announcements; parents view these items for their linked children and acknowledge absence alerts.
+
+
+Success criteria for the pilot
+90%+ of published homework and announcements delivered to intended parents.
+80%+ parent view rate within 24 hours for urgent announcements.
+Absence acknowledgements visible to the school with timestamp and optional reason.
+No cross-class or cross-child content exposure.
+Teacher can publish a normal post in under 60 seconds.
+
+02 • SCOPE & PRODUCT BOUNDARY
+Simple by design, extensible by architecture
+
+Business rules
+A single account may have one or more roles, but the UI exposes only actions allowed for the active role.
+A parent can see only children explicitly linked to that guardian account.
+A teacher can publish only to classes/subjects assigned by the school.
+Result attachments are private content; URLs must not be public or guessable.
+Every post has created-by, audience, created-at, publish status, and attachment metadata.
+Absence acknowledgement does not overwrite the official attendance record. It records parent response alongside it.
+Deleted or corrected official content should retain an audit trail.
+
+03 • USERS, PERSONAS & JOBS-TO-BE-DONE
+Design around two people, not ten modules
+
+Jobs-to-be-done
+“When class ends, I want to publish homework with the right attachment in under a minute.”
+“When results are ready, I want only the intended parents to access them.”
+“When the school has an announcement, I want to know parents actually received/viewed it.”
+“When my child is marked absent, I want to confirm I saw it and optionally tell the school why.”
+“When I have two children, I want to switch children without logging out.”
+
+04 • DETAILED BUSINESS SCENARIOS
+End-to-end scenarios and acceptance behavior
+SC-01 — Teacher posts homework
+
+SC-02 — Teacher publishes result attachment
+
+SC-03 — Teacher posts announcement
+
+SC-04 — Parent acknowledges absence
+
+SC-05 — Parent has two children
+
+SC-06 — Teacher posts wrong homework
+
+SC-07 — Attachment upload fails
+
+SC-08 — Parent does not acknowledge absence
+
+
+05 • MOBILE INFORMATION ARCHITECTURE
+Same shell, role-aware navigation
+
+
+Content model
+
+
+06 • FIGMA-STYLE MOBILE DESIGN DIRECTION
+Clean, calm, action-first mobile UI
+The following screens are high-fidelity business wireframes intended as a Figma handoff baseline. They define information hierarchy, actions, states and component behavior; final brand colors, typography and icons can be mapped to the school brand system.
+
+
+06 • FIGMA-STYLE MOBILE DESIGN DIRECTION
+Teacher publishing flows
+
+06 • FIGMA-STYLE MOBILE DESIGN DIRECTION
+Parent timeline and attendance action
+
+06 • FIGMA-STYLE MOBILE DESIGN DIRECTION
+Content detail and notifications
+
+07 • SCREEN-BY-SCREEN UX SPECIFICATION
+Figma handoff requirements
+
+
+08 • WORKFLOWS & STATE MODELS
+Explicit states prevent confusion
+
+Post lifecycle
+
+
+08 • WORKFLOWS & STATE MODELS
+Absence acknowledgement lifecycle
+
+
+
+09 • NOTIFICATIONS & COMMUNICATION POLICY
+Useful without becoming noisy
+
+Notification opens the exact child and exact content item.
+Do not put result details or sensitive marks in push-notification text; use a generic “Result published” message.
+Keep delivery status separate from view status and acknowledgement status.
+Support school quiet hours for non-urgent posts in later iterations.
+
+10 • SECURITY, PRIVACY & AUDIT
+The product is simple; permissions cannot be simple-minded
+
+
+
+11 • NON-FUNCTIONAL REQUIREMENTS
+Pilot-ready quality expectations
+
+
+12 • HIGH-LEVEL API & INTEGRATION VIEW
+Enough structure for estimation and engineering handoff
+
+
+13 • DELIVERY PLAN & ESTIMATION BASELINE
+A focused 10–12 week MVP is realistic for a small product team
+
+Suggested MVP team
+1 Product/Business Analyst (part-time after discovery)
+1 UX/UI designer (heavy in weeks 1–3, then support)
+1–2 mobile engineers (Flutter or React Native)
+1 backend engineer
+1 QA engineer (ramping from week 5)
+DevOps/cloud support part-time
+
+14 • MVP ACCEPTANCE CHECKLIST
+What must be true before the first school pilot
+☐  01  Teacher can create homework with title, instructions, due date and attachment.
+☐  02  Teacher can publish a result attachment only to authorized audience.
+☐  03  Teacher can publish class/grade/school announcement with optional attachment.
+☐  04  Parent timeline shows only linked child content and supports multiple-child switching.
+☐  05  Parent receives an absence alert and can explicitly acknowledge it.
+☐  06  Parent can enter an optional reason or submit a leave note path.
+☐  07  School can distinguish Delivered vs Viewed vs Acknowledged.
+☐  08  Attachment errors never result in a published broken file link.
+☐  09  Cross-class, cross-child and cross-school negative authorization tests pass.
+☐  10  Material edits show an Updated state and are audit-traceable.
+☐  11  Push deep links open the correct child/content item.
+☐  12  Basic analytics report publish counts, view rates, failure rate and acknowledgement rate.
+
+APPENDIX • ALIGNMENT WITH THE ATTACHED SCHOOL PLATFORM HLD
+Narrow product, compatible foundation
+This concept intentionally extracts only the communication, academic-content and attendance-follow-up slice from the larger AI School Platform high-level design supplied with this request. The proposed app remains compatible with that foundation rather than recreating the full ERP scope.
+
+
+PRODUCT THESIS
+Keep the first release intentionally narrow: teachers publish the information parents need every day; parents see it in one child-centric timeline and can acknowledge attendance alerts without using separate apps.
+Product shape	Single mobile app	Primary users	Teacher + Parent
+Pilot focus	Homework • Results • Announcements • Absence	Design status	Business & UX baseline
+Daily job	Teacher experience	Parent experience	Business outcome
+Homework	Create, attach file/photo, select class, publish	See due date, instructions, attachment, view status	Less confusion and fewer WhatsApp follow-ups
+Results	Publish controlled result attachment to class/child audience	Open result securely for linked child	Faster, auditable result delivery
+Announcements	Publish school/class notice with optional attachment	See announcement in timeline and notifications	One official source for school updates
+Absence	Mark/confirm absence through attendance workflow	Receive alert, acknowledge, optionally add reason/leave note	Closed-loop attendance follow-up
+Why a single app matters
+The same install supports both roles. After sign-in, the navigation, actions and permissions change based on role. A teacher never sees parent-only child views; a parent never receives teacher publishing controls.
+In MVP	Not in MVP
+Role-aware login: Teacher / Parent	Fees and online payments
+Teacher class/subject assignments	Transport tracking
+Homework post + attachments	Student chat/social feed
+Result attachment publishing	AI tutor or generative student assistant
+School/class announcements	Complex examinations/mark entry engine
+Parent child switcher	Full school ERP replacement
+Attendance alert + acknowledgement	HR, library, inventory
+Push/in-app notifications	Open parent-to-parent messaging
+View/delivery/acknowledgement status	Unrestricted file sharing
+Persona	Typical situation	Needs	Pain today
+Teacher – Ms. Priya	Moves between classes; publishes from phone after class	Fast compose flow, reusable audience, camera/PDF attach, clear publish confirmation	Repeated WhatsApp messages, unclear who received content
+Parent – Mr. Ahmed	Checks updates after work; has multiple children	One timeline, child switcher, strong unread indicators, simple acknowledgement	Updates spread across groups, missed messages, no official history
+School coordinator – optional support role	Configures classes, teacher assignments and guardian links	Simple setup/admin web later; not required as a daily app persona	Manual onboarding and permission errors
+Precondition	User flow	System behavior	Acceptance
+Teacher is signed in; assigned to Grade 5A Mathematics.	Select Create → Homework; select class/subject; enter title, instructions, due date; attach PDF/photo; preview audience; publish.	System stores post + attachment, sends push/in-app notification, records delivery/view status.	Parents of Grade 5A see the homework under the correct child; no other class can access it.
+Precondition	User flow	System behavior	Acceptance
+Teacher has permission for Grade 5A result publishing.	Select Results; choose class/exam/subject; attach PDF/image; confirm privacy check; publish.	Private attachment is stored securely and linked to the audience; parents are notified.	Only guardians of eligible students can open the result; access is logged.
+Precondition	User flow	System behavior	Acceptance
+Teacher has announcement permission.	Choose audience (class/grade/whole school); add title/message; optional attachment; publish now or save draft.	Announcement enters parent timeline and notification inbox.	Parent sees source, published time, audience context and attachment.
+Precondition	User flow	System behavior	Acceptance
+Student is marked absent; parent is linked to child.	Parent taps alert → Acknowledge; optionally enters reason or chooses Leave Note; confirms.	Acknowledgement is timestamped with parent identity and becomes visible to authorized school staff.	Official attendance stays “Absent”; a separate parent response state becomes “Acknowledged”.
+Precondition	User flow	System behavior	Acceptance
+Guardian is linked to two students in different grades.	Use child switcher from home; timeline refreshes to selected child.	Queries and notifications are child-scoped; unread counts remain attributable.	No content from Child A appears under Child B.
+Precondition	User flow	System behavior	Acceptance
+Published post is incorrect.	Teacher opens own post → Edit/Correct; changes attachment/instructions; confirms update.	System versions the change and notifies parents if material.	Parents see “Updated” label; previous version retained for audit/support.
+Precondition	User flow	System behavior	Acceptance
+Network drops during upload.	App shows upload state and retry; draft remains local/server-side as applicable.	Post cannot publish until required attachment is safely stored.	No broken attachment is sent to parents.
+Precondition	User flow	System behavior	Acceptance
+Alert is delivered but parent takes no action.	No parent action.	System keeps status as Pending; school can filter unacknowledged absences.	No false acknowledgement is inferred from notification delivery or opening the app.
+Navigation area	Teacher	Parent
+Home	Quick actions, recent posts, class summary	Child timeline, urgent actions, recent updates
+Posts	Homework, Results, Announcements; create + manage	Homework, Results, Announcements; read-only
+Attendance	Class attendance view; absent follow-up status	Child attendance alerts; acknowledge/leave note
+Notifications	Delivery/publishing events	All child/school updates
+Profile	School, role, notification preferences	Guardian profile, linked children, notification preferences
+Design convention
+Do not ask the user to choose “Teacher App” or “Parent App.” Authentication resolves the role. If a person has both roles, provide a controlled role switch inside Profile.
+Entity	Key fields	Notes
+Post	id, type, title, body, school_id, audience, author, status, created_at, published_at	type = HOMEWORK / RESULT / ANNOUNCEMENT
+Attachment	id, post_id, file_name, mime_type, size, storage_key, checksum	Private object storage; signed access
+Audience	school, grade, class, subject, selected students	Resolved at publish time and authorization time
+View receipt	post_id, guardian_id, student_id, first_viewed_at, last_viewed_at	Useful for school visibility; not same as acknowledgement
+Attendance event	student_id, date, status, teacher, source, version	Official transactional record
+Absence acknowledgement	attendance_event_id, guardian_id, status, reason, timestamp	Separate record; does not mutate attendance
+Design token	Recommendation
+Frame	390 × 844 px logical mobile frame; Android/iOS responsive
+Grid	8 pt spacing system; 16–20 px page gutters
+Primary color	Deep navy for headers + trust; teal for primary actions
+Cards	16–18 px radius; subtle neutral border; minimal shadow
+Typography	Readable sans serif; 24–28 px page titles; 16–18 px body
+Accessibility	Minimum 44 px tap targets; strong contrast; semantic status text, not color alone
+Attachments	Show file type, file size, open/download action and error state
+Status	Draft, Uploading, Published, Updated, Viewed, Acknowledged, Pending
+
+F01 • Teacher home	
+F02 • Post homework
+
+F03 • Publish result	
+F04 • New announcement
+
+F05 • Parent home / child timeline	
+F06 • Absence acknowledgement
+
+F07 • Content detail	
+F08 • Notification center
+Screen	Primary components	Key states / interactions
+F01 Teacher Home	Greeting, class context, summary cards, quick actions, recent activity, bottom nav	Loading; no assigned class; draft count; successful publish
+F02 Post Homework	Class, subject, title, due date, instructions, attachment uploader, publish CTA	Draft; uploading; upload failed; validation error; published
+F03 Publish Result	Class/exam/subject, private file, privacy notice, notification toggle, publish CTA	File scan pending; publish blocked; published; corrected
+F04 Announcement	Audience picker, title, message, optional attachment, publish/save draft	Class/grade/school audience; urgent flag optional
+F05 Parent Home	Child switcher, Today timeline, action required card, unread badges	Single child; multiple children; no updates; offline cached view
+F06 Absence Ack	Attendance facts, acknowledge action, optional reason, leave-note route	Pending; acknowledged; leave requested; already acknowledged
+F07 Content Detail	Title, author/time, due date, body, attachment, view status	Attachment unavailable; updated content; viewed
+F08 Notifications	Typed notification rows, timestamps, read/unread state	Deep link to exact child + content item
+State	Meaning	Allowed next state
+Draft	Teacher has saved but not published	Uploading / Published / Deleted
+Uploading	Required attachment is being stored	Draft / Ready / Failed
+Ready	Validation and upload complete	Published
+Published	Visible to resolved audience	Updated / Archived
+Updated	Material change after publish	Updated / Archived
+Archived	Hidden from normal feed but retained for history	—
+Attendance	Parent response	Meaning
+Absent	Pending	Alert exists; no guardian acknowledgement
+Absent	Acknowledged	Guardian confirmed alert seen
+Absent	Leave note submitted	Guardian sent reason/request; school may review
+Corrected to Present	Historical acknowledgement retained	Attendance correction never deletes response history
+Implementation note
+An acknowledgement is append-only evidence of parent response. If attendance is corrected later, the original absence event and the parent response remain traceable for support and audit.
+Event	In-app	Push	Suggested urgency
+New homework	Yes	Yes	Normal
+Homework updated materially	Yes	Yes	Normal
+Result published	Yes	Yes	High privacy
+Announcement – normal	Yes	Yes	Normal
+Announcement – urgent	Yes	Yes	Urgent
+Student marked absent	Yes	Yes	Action required
+Acknowledgement accepted	Yes	Optional confirmation	Normal
+Control	Requirement
+Guardian-child access	Parent requests are authorized using explicit guardian ↔ student relationship, not only class membership.
+Teacher scope	Teacher publishing is restricted to assigned school/classes/subjects and permission level.
+Tenant isolation	Every content and attendance request carries school context; cross-school access is denied by default.
+Attachments	Store privately; malware/file validation; size/type limits; time-limited signed download/open URLs.
+Results	Never expose a public attachment URL; log access; minimize sensitive details in notifications.
+Authentication	Short-lived access tokens, refresh/session controls, device logout, optional staff MFA.
+Audit	Capture publish/edit/archive, attendance corrections, acknowledgement, attachment access, permission changes.
+Data retention	Define retention separately for posts, attachments, attendance, audit events and notifications.
+Important product distinction
+“Viewed” means the parent opened the item. “Acknowledged” is an explicit parent action. The system must never automatically convert a view into an acknowledgement.
+Area	Target / requirement
+Performance	Home timeline p95 < 2 sec on ordinary 4G; normal publish action confirmation < 2 sec excluding large upload.
+Availability	Target 99.9% monthly for core authenticated APIs, excluding third-party push provider outages.
+Offline behavior	Parents can see recent cached content; teacher drafts must not be lost if connection drops during compose.
+File upload	Resume/retry where practical; clear progress; publish blocked on failed required upload.
+Scalability	Stateless API tier; attachment/object storage independent; notification worker can scale separately.
+Observability	Track publish failures, push failures, attachment errors, auth denials, acknowledgement completion rate.
+Accessibility	Dynamic text support where feasible, meaningful labels, large tap targets, adequate contrast.
+Localization	Design should allow English + regional languages without breaking layout; RTL support can be planned if required.
+Capability	Illustrative API	Notes
+Login / session	POST /auth/login • POST /auth/refresh	Role and school context returned after auth
+Teacher assignments	GET /me/teaching-scope	Classes/subjects teacher may publish to
+Posts	POST /posts • GET /timeline • GET /posts/{id}	Type-driven payload and authorization
+Attachments	POST /attachments/presign • POST /attachments/complete	Private object storage pattern
+Views	POST /posts/{id}/view	Idempotent first-view capture
+Attendance	GET /students/{id}/attendance • POST /attendance/events	Official events versioned/audited
+Acknowledgement	POST /attendance/{eventId}/acknowledgements	Separate parent-response record
+Notifications	GET /notifications • POST /notifications/{id}/read	Deep-link metadata included
+Phase	Weeks	Scope	Exit evidence
+Discovery + UX	1–2	Final workflows, Figma component system, permissions, data model, API contract	Clickable prototype signed off; edge cases agreed
+Foundation	3–4	Auth, role scope, school/class/child relationships, navigation shell, notifications foundation	Teacher/parent login and correct scoped home
+Publishing	5–7	Homework, results, announcements, attachments, timeline	Teacher publishes all 3 post types; parent views securely
+Attendance loop	8–9	Absent alert, acknowledgement, reason/leave note, school status view	End-to-end acknowledgement visible and audited
+Hardening + Pilot	10–12	QA, security, analytics, retry/error states, store builds, pilot support	Pilot-ready build with acceptance checklist
+HLD principle used	How it appears here
+Role, school and child scope before access	Single role-aware app; teacher assignment scope; explicit guardian-child permissions
+Operational records remain authoritative	Attendance stays official transactional data; parent acknowledgement is separate
+Object storage for attachments	Homework/result/announcement files are private, versioned attachments
+Academic module includes homework and report workflows	MVP narrows this to homework posts and result attachments
+Communication module owns notices and delivery status	Announcements + notification status are first-class
+Auditable corrections and state transitions	Post updates and attendance acknowledgements keep history
+Scale workers separately	Push notifications and attachment processing can scale independently
+Recommended next artifact
+Create a clickable Figma prototype from screens F01–F08, then produce a component inventory (buttons, cards, fields, child switcher, status chips, attachment tile, confirmation sheet) and developer-ready redlines.

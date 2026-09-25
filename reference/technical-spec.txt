@@ -1,0 +1,964 @@
+SchoolConnect Lite
+FINAL DEVELOPMENT TECHNICAL SPECIFICATION
+Single mobile application | Teacher + Parent | School communication and attendance
+Version 1.0  •  07 September 2026  •  Implementation baseline
+Executive technical decision
+Build one React Native mobile app with Expo and TypeScript, a Node.js/NestJS modular backend, PostgreSQL, private S3-compatible object storage and asynchronous notification/file workers. Use a small restricted administration console for school onboarding and support. Start with independently scalable API and worker deployments, not a full microservice estate. Extract domain services only when measured scaling, isolation or team ownership justifies it.
+This document turns the approved business baseline into concrete implementation decisions. Values marked “proposed” are engineering defaults requiring confirmation during discovery; they are not claims that the school has already approved them.
+Contents
+1. Scope and traceability
+2. Decisions and assumptions
+3. Technology and architecture
+4. Identity and authorization
+5. Data model and migrations
+6. Publishing and attachment workflows
+7. Attendance and acknowledgement
+8. API contracts
+9. Mobile and Figma handoff
+10. Notifications and offline behavior
+11. Security and privacy
+12. Infrastructure and operations
+13. Quality, testing and acceptance
+14. Delivery plan and backlog
+15. Implementation appendices
+
+1. Scope and traceability
+The approved business specification defines one role-aware application, four daily jobs, eight mobile wireframes and a 10–12 week indicative MVP. This technical baseline preserves that scope. The larger HLD contributes tenant isolation, authoritative records, private attachments, auditable corrections and independently scalable workers; its fees, AI and ERP expansion are not imported into this release.
+1.1 Included and excluded
+Included: authentication, role switching, school/class/subject setup, guardian links, teacher assignments, three post types, secure attachments, parent timeline, attendance entry/correction, acknowledgement/leave note, push/in-app inbox, delivery/view reporting, audit and pilot support.
+Excluded: fee collection, transport, chat, AI tutor, automated mark calculation, report-card generation, student social accounts, payment integration and unrestricted school-wide file sharing.
+An operational admin console is necessary for roster import, account activation, assignment management, result-publishing permissions and correction review. It is not a second mobile application or a full ERP.
+2. Decisions and assumptions
+Open decisions must be recorded in an ADR register with owner, decision date, alternatives and impact. Do not silently substitute a different product rule during development.
+3. Technology and architecture
+Use a supported Node.js LTS release and compatible maintained NestJS, Prisma and Expo versions. Pin exact versions and lockfiles during repository initialization; verify current support and security patches before deployment. Do not upgrade major versions during pilot hardening.
+3.1 Logical architecture
+Android / iOS (one app)       Restricted admin web
+          |                            |
+          +--------- HTTPS / JWT -----+
+                         |
+                 API / NestJS security guards
+                         |
+       +-----------------+-----------------+
+       |                 |                 |
+ Identity & scope   School domains   File access service
+       |                 |                 |
+       +----------- PostgreSQL -----------+
+                         |
+                Transactional outbox
+                         |
+             Notification / scan workers
+                    |           |
+                 FCM/APNs   Private object storage
+                         |
+                Audit / metrics / backups
+3.2 Backend module boundaries
+Modules communicate through exported application services and domain events, not direct access to another module’s repositories. Use one deployable API and one relational database initially. Every write transaction commits business changes and outbox events together. Workers run as independently scalable processes from the same codebase.
+3.3 Repository and environments
+schoolconnect/
+  apps/mobile/              # Expo application
+  apps/admin/               # Restricted Next.js console
+  services/api/             # NestJS modular application
+  packages/api-contract/    # OpenAPI and generated TypeScript client
+  infra/                    # IaC, Docker, deployment manifests
+  docs/                     # ADRs, runbooks, API and UX specifications
+  tests/                    # E2E fixtures and load scenarios
+  .github/workflows/        # CI/CD
+
+Use development, staging and production environments with separate databases, storage, credentials, authentication credentials and push configuration. No production student data in development. Seed synthetic schools and anonymized test fixtures.
+4. Identity and authorization
+4.1 Authentication and session design
+School administrator imports or creates a staff/guardian account, links it to the correct school and issues an invitation. Phone verification is completed through a rate-limited OTP provider adapter. The NestJS authentication module owns identity verification and session lifecycle; domain modules own school membership, teacher assignments and guardian relationships. Store only hashed OTP challenges and hashed refresh credentials. Do not store plaintext passwords, OTPs or tokens.
+Use a native OTP login flow over HTTPS. The backend verifies the challenge and issues a short-lived access token plus an opaque rotating refresh token. If an external identity provider is introduced later, use Authorization Code with PKCE and the system browser.
+Access token proposed lifetime 5–15 minutes. Use opaque, cryptographically random refresh tokens stored only as keyed hashes server-side, rotated atomically on use. Enforce idle and absolute session expiry, refresh-token reuse detection, revocation and device-level logout. Never issue perpetual refresh credentials.
+Store refresh credentials in OS-backed secure storage. Clear local sensitive cache on logout, account revocation or role/school switch.
+API validates issuer, audience, signature, expiry and token type. Never trust a client-supplied role, school ID or student ID as proof of authorization.
+OTP: proposed 6 digits, 5-minute validity, maximum 5 attempts, resend cooldown and per-phone/IP rate limits. Store only keyed hashes of challenges if managed internally; do not log codes.
+Staff MFA is required for school administrators and result-publishing approvers; rollout to teachers can be configured by school policy.
+4.2 Context and policy evaluation
+Authenticated principal
+  -> active school membership
+  -> active role permission
+  -> resource school/ownership
+  -> teacher assignment OR guardian-child link
+  -> audience / publication / consent checks
+  -> allow or deny (default deny)
+A user may hold both Teacher and Parent roles. Role switching changes navigation and active context, not identity. Each request carries an active membership identifier; the server resolves the membership and rejects inactive or mismatched context. A teacher’s parent role never grants access to other students.
+4.3 Tenant isolation
+Every tenant-owned table contains school_id. Foreign keys and unique constraints must prevent cross-school references. Repository queries require explicit school scope; PostgreSQL RLS is recommended as defense in depth with transaction-local tenant context and a non-bypass application role. Background jobs establish tenant context explicitly. Integration tests must attempt cross-school access with valid IDs and valid tokens.
+Guardian relationship revocation takes effect on the next request, including existing signed-download issuance. Use short-lived download URLs and revoke cached sensitive data on the next authenticated sync. Never authorize a result solely because the parent belongs to the same class.
+5. Data model and migrations
+Use UUID primary keys, timestamptz in UTC, optimistic version columns for mutable aggregates and explicit foreign keys. Store school-local dates separately from timestamps. All unique constraints involving tenant-owned entities include school_id where appropriate. Avoid generic JSON blobs for authoritative attendance, relationships or permissions.
+5.1 Entity inventory
+5.2 Critical relational rules
+Use composite foreign keys (school_id, referenced_id) where tenant-owned relationships cross tables. Add corresponding unique keys to referenced tables. Reject cross-tenant references at the database boundary.
+Posts and post revisions are separate. A published revision is immutable; corrections create a new revision and atomically update current_revision_id.
+Result attachments are associated with a student-private recipient or explicitly approved class-public classification. A single result file must never be inferred to be private merely because its post has a class audience.
+Attendance_current points to the authoritative latest event. Historical attendance_events are append-only. Parent responses reference the original event and remain intact after correction.
+Store notification recipient snapshots so publication reporting is reproducible. Re-check live guardian authorization when content is opened; a snapshot is not an access grant.
+Do not put binary files, access tokens, OTPs, raw push tokens or full student documents in audit/outbox payloads.
+5.3 Migration strategy
+Prisma Migrate migrations are immutable after release. Use expand–migrate–contract for schema changes, including nullable additions, backfill, application compatibility and later constraint enforcement. CI runs migrations against a clean database and a copy of the previous schema. Production migrations require backup verification, review and a rollback plan; destructive migrations are not automatically reversed.
+V001__school_identity.sql
+V002__academic_registry.sql
+V003__guardian_and_teacher_scope.sql
+V004__posts_and_revisions.sql
+V005__attachments_and_uploads.sql
+V006__attendance_and_responses.sql
+V007__notifications_outbox_audit.sql
+V008__indexes_and_tenant_policies.sql
+5.4 Representative SQL constraints
+CREATE UNIQUE INDEX uq_attendance_current
+ ON attendance_current(school_id, student_id, attendance_date);
+CREATE UNIQUE INDEX uq_post_view
+ ON post_views(post_id, student_id, guardian_user_id);
+CREATE INDEX ix_outbox_pending
+ ON outbox_events(created_at) WHERE processed_at IS NULL;
+CREATE INDEX ix_post_recipients_guardian
+ ON post_recipients(school_id, guardian_user_id, post_id);
+Actual DDL must include all foreign keys, check constraints, tenant policies and migration tests. The abbreviated SQL above illustrates key invariants, not a complete executable schema.
+6. Publishing and attachment workflows
+6.1 Post lifecycle
+DRAFT -> UPLOADING -> READY -> PUBLISHED -> UPDATED -> ARCHIVED
+             |           |         |
+             +-> FAILED -+         +-> correction creates revision
+DRAFT -> DELETED (soft delete, retention policy)
+PUBLISHED/UPDATED -> ARCHIVED (audit retained)
+READY is an internal validation state; the user sees Draft, Uploading, Published, Updated or Archived. A post with no required attachment may become READY immediately. Publication is a transaction that validates current permissions, file readiness and audience, creates recipient snapshots, updates status and writes an outbox event.
+6.2 Homework rules
+Required: assigned section, subject, title (1–150 characters), instructions (1–5,000 characters), due date. Attachment optional unless the school config requires one.
+Due date uses school-local calendar date; optional due time is stored with timezone. Reject due dates before publication date unless an authorized historical-post override is supplied.
+Teacher may create drafts and publish only to active assigned sections/subjects. Multi-section publishing requires an explicit assignment for every selected section.
+Parent sees homework only through an eligible linked student. No student submission, grading or completion tracking is included in MVP.
+Material corrections create a new revision, Updated label and new notification. Minor metadata corrections may suppress push but remain audited.
+6.3 Results and privacy
+The business baseline allows result attachments to class/child audiences. The implementation resolves this ambiguity conservatively: student-specific marks and report cards must be distributed as individual private files. A class-wide result attachment is permitted only if school policy explicitly classifies it as safe for all recipients and an authorized publisher confirms that classification. The system must not automatically inspect a PDF and assume it is safe.
+Required: exam name, subject, audience, attachment and privacy classification. A private result requires explicit student_id association for each file.
+For batch upload, the admin/teacher maps each file to an admission number using a validated manifest. Show a preview of student name, admission number and filename before publication.
+Reject duplicate or unmatched admission numbers, missing files, unsupported types and files whose scan is incomplete. Do not publish partial batches by default.
+Require an explicit privacy confirmation and a second authorized approval if the school enables two-person result release. The author cannot approve their own batch when separation of duties is enabled.
+Result push text is generic. Never include marks, grades, student names or document URLs in push payloads. Access is reauthorized on every file-open request.
+Corrections retain prior versions and access history. A replaced result is not accessible through normal parent navigation; authorized audit retrieval remains possible.
+6.4 Announcements
+Required title and message; optional attachment. Audience is section, grade or school. School-wide publishing requires a separate permission. Urgent classification is limited to authorized staff and is audited. Save draft, preview audience count and publish now are MVP actions. Scheduled publishing and quiet-hour controls are deferred unless the pilot school explicitly requires them.
+6.5 Attachment pipeline
+1. Client requests upload session with name/type/size/checksum.
+2. API validates actor, owner, quota and allowed type; returns short-lived upload URL.
+3. Client uploads directly to private quarantine storage.
+4. Client completes session; server HEAD-checks object size and checksum.
+5. Worker validates magic bytes, scans malware and checks file structure.
+6. Clean object is copied/moved to private clean storage; metadata becomes READY.
+7. API allows publication only when every required file is READY.
+8. Parent requests file access; API rechecks live relationship and audience.
+9. API returns short-lived signed URL or authenticated streaming response.
+10. Access attempt and outcome are recorded without logging document contents.
+Signed URLs are bearer capabilities and cannot be reliably revoked after issuance. Keep them short-lived, never place them in notifications or logs, and use authenticated streaming where immediate revocation is required. File scanning is not a guarantee that a document is harmless; maintain defense-in-depth and incident procedures.
+6.6 Publish transaction pseudocode
+publish(postId, expectedVersion, idempotencyKey):
+  authenticate(); resolveActiveMembership()
+  begin transaction
+  lock post; assert version and DRAFT/READY state
+  authorize publisher for every requested audience
+  validate revision and all attachment scan states == READY
+  resolve eligible students and active guardian recipients
+  validate result privacy classification and file mappings
+  persist immutable revision + recipient snapshot
+  set PUBLISHED, publishedAt, increment version
+  insert audit event + PostPublished outbox event
+  commit
+  return postId, version, publishedAt, recipientCount
+Do not call the push provider inside the database transaction. Outbox workers are at-least-once; recipient/event deduplication must make repeated processing safe. Recipient count is a snapshot, not proof of delivery.
+7. Attendance and acknowledgement
+7.1 Official attendance model
+Attendance is recorded per student and school-local date. MVP statuses are PRESENT, ABSENT, LATE and LEAVE; schools must approve whether LATE/LEAVE count as present for reporting. The authoritative current row points to an immutable event revision. A teacher may enter or correct attendance only for an assigned class and permitted date window.
+7.2 Attendance submission
+Teacher opens assigned roster -> selects date -> marks students
+ -> submits with expected roster/date version and idempotency key
+ -> server validates enrollment, assignment and date window
+ -> transaction writes event revisions + current pointers + audit
+ -> absence transitions create notification outbox events
+ -> worker creates guardian inbox items and attempts push
+A class submission must be atomic by default: invalid students or stale versions reject the batch with row-level errors. No silent partial attendance. Duplicate requests return the original result. Repeated submission of unchanged status does not create duplicate absence alerts.
+7.3 Parent acknowledgement
+ABSENT event -> response PENDING
+  -> guardian opens alert -> explicit Acknowledge
+  -> ACKNOWLEDGED (actor + timestamp)
+  -> optional reason / leave request -> SUBMITTED
+  -> school review -> APPROVED or REJECTED
+Attendance correction -> new official event; historical response retained
+Acknowledgement means the guardian confirms seeing the absence alert. It is not a claim that the absence is justified and is not attendance approval.
+The first explicit acknowledgement per guardian/event is idempotent. Additional reason updates create append-only response revisions or a new leave-note event, not an overwrite of historical evidence.
+If two guardians are linked, each has an independent response. School-level follow-up can be configured as “any guardian acknowledged” or “all guardians acknowledged”; default is any guardian, with individual evidence retained.
+If the attendance event is corrected to PRESENT, mark the pending alert superseded and cancel unsent reminders. Preserve prior acknowledgement and show “Attendance corrected” in the history.
+Leave approval is a separate staff action and does not automatically change official attendance. Any attendance correction requires an authorized actor, reason and new event revision.
+No acknowledgement is inferred from push delivery, notification opening, content view, timeout or another guardian’s action.
+7.4 Conflict and edge-case matrix
+8. API contracts
+All endpoints use /api/v1. JSON is UTF-8, timestamps are ISO-8601 UTC, dates are YYYY-MM-DD, IDs are UUIDs and enums use uppercase snake case. Use Bearer authentication except public health endpoints. The active membership is resolved from a server-validated context; X-School-Id is a routing hint only, never an authorization grant.
+8.1 Common conventions
+{
+  "type": "https://schoolconnect.example/problems/validation",
+  "title": "Validation failed",
+  "status": 422,
+  "code": "INVALID_DUE_DATE",
+  "correlationId": "8b64...uuid",
+  "fieldErrors": [{"field":"dueDate","message":"Date is before publication"}]
+}
+8.2 Endpoint inventory
+8.3 Create homework example
+POST /api/v1/posts
+Idempotency-Key: <uuid>
+{
+ "type":"HOMEWORK",
+ "audience":[{"scopeType":"SECTION","scopeId":"<uuid>"}],
+ "subjectId":"<uuid>",
+ "title":"Fractions practice",
+ "body":"Complete questions 1–10.",
+ "dueDate":"2026-09-10",
+ "attachmentIds":["<uuid>"]
+}
+
+201 Created
+{"id":"<uuid>","status":"DRAFT","version":1,"revisionNo":1}
+8.4 Publish and timeline examples
+POST /api/v1/posts/<uuid>/publish
+If-Match: "1"
+Idempotency-Key: <uuid>
+{"confirmAudience":true,"privacyClassification":"NORMAL"}
+
+200 OK
+{"id":"<uuid>","status":"PUBLISHED","version":2,
+ "publishedAt":"2026-09-07T10:00:00Z","recipientCount":62}
+
+GET /api/v1/timeline?studentId=<uuid>&limit=20
+{"items":[{"id":"<uuid>","type":"HOMEWORK","title":"Fractions practice",
+ "studentId":"<uuid>","publishedAt":"2026-09-07T10:00:00Z",
+ "viewed":false,"attachmentCount":1}],"nextCursor":null}
+8.5 Private result mapping
+POST /api/v1/posts
+{
+ "type":"RESULT","examName":"Term 1","subjectId":"<uuid>",
+ "title":"Mathematics result",
+ "privacyClassification":"STUDENT_PRIVATE",
+ "resultFiles":[{"studentId":"<uuid>","attachmentId":"<uuid>"}],
+ "audience":[{"scopeType":"STUDENT","scopeId":"<uuid>"}]
+}
+The server validates that every resultFiles student belongs to the intended school and audience, every file is clean and ready, and no file is accidentally mapped to multiple students unless an explicitly supported shared-document policy applies. Never return another student’s result mapping in a parent response.
+8.6 Attendance and acknowledgement examples
+POST /api/v1/attendance/batches
+Idempotency-Key: <uuid>
+{"sectionId":"<uuid>","date":"2026-09-07","expectedVersion":4,
+ "entries":[{"studentId":"<uuid>","status":"ABSENT"},
+            {"studentId":"<uuid>","status":"PRESENT"}]}
+
+POST /api/v1/attendance/<eventId>/acknowledgements
+Idempotency-Key: <uuid>
+{"expectedEventRevision":1,"responseType":"ACKNOWLEDGED",
+ "reason":"Child is unwell"}
+
+201 Created
+{"id":"<uuid>","status":"ACKNOWLEDGED",
+ "attendanceStatus":"ABSENT","acknowledgedAt":"2026-09-07T10:05:00Z"}
+8.7 Upload contract
+POST /api/v1/uploads
+{"ownerType":"POST","ownerId":"<uuid>","fileName":"homework.pdf",
+ "mimeType":"application/pdf","sizeBytes":124000,"sha256":"<64 hex chars>"}
+
+201 Created
+{"uploadId":"<uuid>","uploadUrl":"<short-lived URL>",
+ "expiresAt":"<UTC timestamp>","requiredHeaders":{...}}
+
+POST /api/v1/uploads/<uuid>/complete
+{"sha256":"<64 hex chars>"}
+
+202 Accepted
+{"attachmentId":"<uuid>","scanStatus":"PENDING"}
+The final OpenAPI repository must contain full request/response schemas, required/nullable fields, enum values, field lengths, examples, error responses and security requirements for every endpoint. Generate TypeScript clients from the contract; do not maintain a separate handwritten API model.
+9. Mobile and Figma handoff
+9.1 Navigation and screen inventory
+9.2 Design tokens
+These tokens implement the existing Figma-style direction; they are not a substitute for an editable Figma file. The designer must create actual Figma components, variants, auto-layout, responsive constraints and prototype links before visual sign-off.
+9.3 Figma component inventory
+AppShell, TopBar, BottomNavigation, RoleSwitcher, SchoolBadge, ChildSwitcher, ClassSelector, SubjectSelector.
+PostCard, ResultCard, AnnouncementCard, AttendanceAlertCard, StatusChip, UnreadBadge, EmptyState, ErrorState, SkeletonLoader.
+TextField, MultilineField, DatePicker, AudiencePicker, AttachmentTile, UploadProgress, FilePreview, PrivacyConfirmationSheet.
+PrimaryButton, SecondaryButton, DestructiveButton, ConfirmationDialog, Snackbar, InlineError, RetryBanner, OfflineBanner.
+NotificationRow, AttendanceStatusSelector, GuardianResponseCard, LeaveNoteForm, VersionHistorySheet.
+9.4 Component states and accessibility
+Every interactive component requires default, pressed, disabled, loading, error and success variants where applicable. Inputs require label, helper text, required indicator and field-level error. Status must not rely on color alone. Screen readers must announce selected child, unread count, upload progress, acknowledgement result and destructive confirmation. Preserve focus after validation errors and support large text without clipping.
+9.5 Mobile application structure
+app/
+  (auth)/login.tsx
+  (teacher)/index.tsx
+  (teacher)/posts/new.tsx
+  (teacher)/attendance.tsx
+  (parent)/index.tsx
+  (parent)/attendance/[id].tsx
+  posts/[id].tsx
+  notifications.tsx
+  profile.tsx
+src/
+  features/{auth,school,posts,files,attendance,notifications}/
+  components/  theme/  api/  storage/  navigation/  i18n/
+  test/fixtures/
+Use feature-local hooks and components. TanStack Query owns remote state; Zustand owns selected child, active role and transient UI state. Do not duplicate server records into a global mutable store. Clear or partition query caches by identity, school and role; never show stale data from a previous account.
+9.6 Mobile implementation details
+Use generated API types and a centralized HTTP client with token refresh single-flight, timeout, correlation ID and normalized errors.
+Use system document picker/camera permissions only when needed. Copy selected files into app-controlled temporary storage for upload retry; remove after completion or expiry.
+Use a PDF/image viewer that does not expose sensitive files to public URLs. Disable automatic third-party analytics capture on result screens.
+Persist only minimal recent timeline metadata and explicitly permitted cached attachments. Encrypt sensitive local data where supported; do not cache result PDFs by default.
+Use optimistic UI only for reversible low-risk actions such as marking an inbox item read. Publishing, attendance and acknowledgement display success only after server confirmation.
+Deep links contain opaque resource IDs and optional child ID, never marks or signed URLs. Reauthenticate and reauthorize before opening a protected resource.
+On app resume, refresh session/context, process safe queued actions and invalidate relevant queries. Handle revoked accounts and changed guardian links by clearing protected caches.
+9.7 Figma handoff checklist
+For each screen provide frame ID, route, role, component variants, spacing/redlines, typography, color tokens, empty/loading/error/offline states, keyboard behavior, accessibility labels, API mapping, validation messages, navigation transitions and acceptance test IDs. Export icons as SVG and raster assets at platform densities. Maintain a single source of truth for design tokens and document any intentional platform differences.
+10. Notifications and offline behavior
+10.1 Notification event model
+The in-app notification row is authoritative. Push is best-effort transport. Distinguish QUEUED, PROVIDER_ACCEPTED, PROVIDER_REJECTED and UNKNOWN; do not label provider acceptance as device delivery. “Viewed” is recorded only when the content screen is opened and the server accepts the view event. “Acknowledged” requires the explicit action.
+10.2 Worker delivery algorithm
+claim pending outbox rows using FOR UPDATE SKIP LOCKED
+ -> deserialize versioned event
+ -> resolve/create recipient notification with unique event+recipient key
+ -> send push with provider-specific idempotency/deduplication
+ -> record attempt and provider response
+ -> mark event processed or schedule exponential retry
+ -> dead-letter after configured attempts; alert operations
+Proposed retries: 1, 5, 15, 60 minutes with jitter, then dead-letter review. Permanent invalid-token errors disable the device token. Never retry malformed payloads indefinitely. A scheduled reconciliation job finds stale pending events and orphaned delivery attempts.
+10.3 Offline policy
+Offline queues are encrypted where feasible, bounded by size and age, and tied to the authenticated account. Never silently overwrite server changes. Show conflicts and require user resolution. A queued acknowledgement of a superseded event is rejected and replaced by the current status display, not silently applied to another event.
+11. Security and privacy
+11.1 Threat model and controls
+11.2 Data classification
+Use TLS 1.2+ with modern cipher configuration, encryption at rest, managed secrets and least-privilege service identities. Do not embed backend secrets, storage credentials or privileged API keys in the mobile bundle. Restrict production database and storage access to approved operators; all support access must be logged.
+11.3 Privacy and legal readiness
+Before pilot, obtain school-approved privacy notice, data processing agreement, guardian-link verification procedure, retention schedule, incident contact and deletion/export process. Assess applicable Indian data-protection and child-data requirements with qualified counsel; do not assume a particular consent or retention rule is automatically satisfied by technical controls. Confirm hosting location, subprocessors and cross-border transfers.
+11.4 Audit event contract
+AuditEvent {
+ id, schoolId, actorId, actorRole, action,
+ resourceType, resourceId, occurredAt, correlationId,
+ outcome, reason, beforeHash, afterHash,
+ metadata: {revisionNo, source, approvalId}
+}
+Audit records are append-only to application users. Record publish/edit/archive, result access, attendance changes, acknowledgement, leave review, permission changes, imports and support access. Do not store full document contents or sensitive free-text reasons in generic audit metadata. Use separate restricted evidence storage where necessary.
+11.5 Retention and deletion
+Retention defaults in Section 2 are proposals only. Implement per-data-class retention policies, legal holds, export and deletion workflows. Revoking a guardian link removes access but does not automatically delete official school records. Account deletion must distinguish identity removal, school record retention and legally required audit evidence. Backups have separate expiry and documented restoration/deletion limitations.
+12. Infrastructure and operations
+12.1 Deployment topology
+Deploy the API and worker as separate container processes from one versioned image. Use managed PostgreSQL with automated backups, private object storage, a separately maintained identity deployment, a load balancer/WAF and centralized observability. A managed container platform is preferred over self-managed Kubernetes for the first pilot unless an existing operations team already supports Kubernetes.
+12.2 Proposed capacity baseline
+These are planning assumptions, not measured traffic. Run load tests with realistic attachment sizes, school calendars, device mix and peak attendance windows. Do not size infrastructure solely from registered-user counts.
+12.3 Initial reliability targets
+12.4 Configuration and secrets
+APP_ENV, PUBLIC_API_BASE_URL, SCHOOL_DEFAULT_TIMEZONE
+DATABASE_URL, DATABASE_USERNAME, DATABASE_PASSWORD
+JWT_ISSUER, JWT_AUDIENCE, JWT_SIGNING_KEY_ID, JWT_SIGNING_PRIVATE_KEY, JWT_VERIFY_PUBLIC_KEY
+STORAGE_ENDPOINT, STORAGE_BUCKET_QUARANTINE, STORAGE_BUCKET_CLEAN
+STORAGE_REGION, STORAGE_ACCESS_ROLE
+PUSH_PROVIDER_CONFIG, OTP_PROVIDER_CONFIG
+UPLOAD_MAX_BYTES, UPLOAD_ALLOWED_MIME_TYPES
+OUTBOX_BATCH_SIZE, OUTBOX_MAX_ATTEMPTS
+OTEL_EXPORTER_OTLP_ENDPOINT, LOG_LEVEL
+Secrets are injected from a managed secret store, never committed to Git or shipped in mobile configuration. Startup fails if required production secrets or issuer/audience settings are missing. No default JWT signing secret is permitted. Rotate credentials through a documented procedure.
+12.5 CI/CD and release gates
+Pull request: formatting, lint, TypeScript typecheck, TypeScript compilation, unit tests, dependency/security scan, secret scan and OpenAPI compatibility check.
+Integration stage: Testcontainers PostgreSQL, migration tests, API contract tests, authorization negative tests and file-storage adapter tests.
+Build: immutable container image and signed/versioned mobile artifacts; generate SBOM and record dependency lockfiles.
+Staging: deploy migrations, smoke tests, mobile E2E, upload/scan workflow, push sandbox and backup restore rehearsal.
+Production: approved release, migration backup, canary/rolling deployment, health checks, error-rate monitoring and rollback plan.
+Mobile: separate development/staging/production app identifiers and push credentials; internal testing before store release; staged rollout and crash monitoring.
+12.6 Monitoring and runbooks
+Dashboards must include API latency/error rate, database connections/slow queries, outbox age, push failures, scan queue age, upload failures, authentication denials, cross-scope denials, acknowledgement completion and storage growth. Alert on sustained failures and backlog, not every transient retry.
+13. Quality, testing and acceptance
+13.1 Test strategy
+Use a test pyramid with domain unit tests, database-backed integration tests, API contract tests, mobile component tests and a small number of critical end-to-end journeys. Security tests are release gates, not optional hardening. Seed at least two schools, two classes, two guardians for one child, a dual-role user and revoked relationships.
+13.2 Detailed acceptance scenarios
+13.3 Test coverage and quality gates
+Target 80%+ meaningful unit coverage for domain services and 100% coverage of critical authorization/policy branches through unit/integration tests. Coverage percentage alone is not release evidence.
+All critical scenarios above must pass on staging with representative Android and iOS devices. No open critical/high security defects or data-loss defects at pilot release.
+Run OWASP MASVS-aligned mobile checks and OWASP ASVS-aligned API checks; include dependency, secret, SAST and DAST scanning as appropriate.
+Perform accessibility testing with TalkBack and VoiceOver, large text, keyboard behavior and low-contrast checks.
+Load-test normal traffic, attendance burst, notification fan-out, large uploads, slow network and database failover. Record p50/p95/p99 and resource utilization.
+Run a restore drill, tenant isolation test suite, expired-session tests and a wrong-result incident tabletop before pilot.
+13.4 Definition of done
+A story is done only when implementation, automated tests, API/schema documentation, accessibility states, authorization checks, telemetry, error handling and product-owner acceptance are complete. Any database migration or new permission requires a negative test. Any new event requires idempotency and retry behavior. Any new attachment path requires privacy and scan-state tests.
+14. Delivery plan and backlog
+14.1 Team and schedule
+The business document proposes 10–12 weeks. This remains a target for a focused team with ready school data and timely decisions, not a guaranteed delivery date. A realistic team is one product owner/BA, one UX designer, two mobile engineers, two backend engineers, one QA engineer and part-time DevOps/security support. A smaller team should expect a longer schedule.
+14.2 Prioritized engineering backlog
+14.3 Dependency and risk register
+14.4 Pilot acceptance and handover
+Pilot sign-off requires a school-approved roster, verified guardian links, authorized teacher assignments, successful end-to-end publication of all three post types, private result access tests, attendance/acknowledgement evidence, operational dashboards, backup restore evidence, support contacts and a documented incident process. Handover includes source code, deployment/IaC, API contract, database migrations, Figma source, test suite, runbooks, credentials ownership and release procedures.
+14.5 Change control
+Any new module, external integration, data field affecting privacy, new role, or change to official attendance semantics requires an impact assessment covering UX, API, schema, authorization, migration, testing, cost and schedule. Product owner approves the change before implementation. Keep a versioned requirements-to-test traceability matrix.
+15. Implementation appendices
+15.1 Domain events
+Event payloads are versioned and contain IDs/minimal metadata, not full student documents. Consumers must tolerate duplicate delivery and unknown additive fields. Store correlation and causation IDs for traceability.
+15.2 Idempotency implementation
+For a mutation, store actor, school, idempotency key, canonical request hash, response status/body and expiry in one transactional workflow. A repeated key with the same hash returns the original response; a different hash returns 409. Proposed retention is 24 hours for ordinary mutations and 7 days for critical publish/attendance actions, subject to storage and operational review. Domain unique constraints remain the final defense against duplicates.
+15.3 Authorization service pseudocode
+canReadPost(principal, post, studentId):
+  require active membership in post.schoolId
+  if teacher: require assigned scope + permitted staff read action
+  if parent:
+    require active guardianLink(principal.userId, studentId)
+    require active enrollment / authorized historical access
+    require published post and eligible audience
+    require recipient eligibility not revoked
+    if result: require file.studentId == studentId
+  otherwise deny
+  audit sensitive result access
+15.4 Operational import format
+Imports are staged, validated and previewed before commit. Invalid rows are reported with row number and error code. No silent overwrite of existing guardian links or permissions. Commit is idempotent and audited; large imports use chunked transactions with a final consistency report.
+15.5 API error code catalogue
+15.6 Recommended engineering documentation
+ADR-001 Technology stack and version lock; ADR-002 Tenant isolation; ADR-003 Identity and OTP; ADR-004 Result privacy; ADR-005 Attendance source and correction semantics.
+OpenAPI contract and generated SDK; database ERD and migration catalogue; event catalogue; permission matrix; Figma component library and screen redlines.
+Threat model, data classification/retention schedule, operational runbooks, deployment diagram, environment configuration, test plan and UAT evidence.
+Release checklist, incident response contacts, backup/restore procedure, school onboarding guide and support escalation matrix.
+15.7 Source alignment and references
+Source A: SchoolConnect Lite Business, Product & UX Specification, supplied in this conversation. Sections 1–4 define product scope and scenarios; sections 5–9 define navigation, content model, screen states and workflows; sections 10–14 define security, NFRs, API baseline, delivery and acceptance.
+Source B: AI School Platform — High-Level Design v1.0, 06 September 2026, supplied in this conversation. Relevant principles: authoritative relational records, tenant/role/child scope, private object storage, approval before publication, auditable corrections, modular monolith and independently scalable workers.
+Implementation references: React Native, Expo, NestJS, NestJS security guards, PostgreSQL, Prisma Migrate, OpenAPI, OWASP MASVS/ASVS and platform push documentation. Exact versions and provider-specific configuration must be verified against official documentation during repository initialization.
+Final implementation position
+This specification is sufficiently detailed to establish the repository, create engineering tickets, implement the data model and API contracts, and begin development. The remaining approval gates are explicit: result privacy, attendance semantics, identity/onboarding, retention/legal policy, hosting/provider selection and final editable Figma sign-off. No implementation document can eliminate the need for these school-specific decisions or replace tested code and operational validation.
+
+16. Architecture revision: Node.js and scaling
+Version 1.1 amendment • Supersedes the Java-specific implementation choices in version 1.0. All functional requirements, privacy rules, data contracts and acceptance criteria remain unchanged. The selected backend is Node.js with NestJS and TypeScript. Java/Spring Boot remains a valid alternative if team expertise or future workload requirements justify it.
+16.1 Final technology decision
+16.2 Scaling is not the same as microservices
+A modular monolith can scale horizontally. Multiple stateless API instances can serve the same application behind a load balancer, while notification and file workers scale independently. Microservices become useful when a domain needs independent deployment, isolation, ownership or materially different scaling. They are not required merely because the number of schools or users increases.
+Mobile + Admin
+      |
+Load Balancer / WAF
+      |
+NestJS API: 1..N replicas
+      |
+PostgreSQL + private object storage
+      |
+Transactional outbox
+      +-- Notification workers: 1..N
+      +-- File processing workers: 1..N
+Scale API replicas based on CPU, memory, latency and request concurrency; scale workers based on queue age, processing time and failure rate. Database connection capacity, query efficiency, indexes, storage bandwidth and external-provider limits must be measured independently. Adding API replicas does not automatically solve a database bottleneck.
+16.3 Microservice-ready module boundaries
+apps/mobile
+apps/admin
+services/api/src/
+  identity/  school/  guardian/  content/
+  attendance/  files/  notifications/  audit/
+  common/  infrastructure/
+services/worker/src/
+  notifications/  files/  outbox/
+packages/api-contract/
+packages/shared-types/
+infra/
+Each module owns its controllers, application services, domain policies, persistence adapters and public interfaces. Other modules must not import internal repositories or entities. Shared packages contain stable contracts and utilities, not a shared mutable domain model. Use dependency rules and architecture tests to prevent accidental coupling.
+16.4 Service extraction criteria
+Extraction requires an ADR, owned data model, API/event contracts, migration plan, service authentication, observability, retry/idempotency design and rollback strategy. Do not split services merely to create one service per database table or business screen.
+16.5 Node.js runtime and CPU workload rules
+Node.js is well suited to I/O-heavy APIs, database access, notifications and service orchestration. CPU-heavy synchronous JavaScript can block the event loop and delay unrelated requests. PDF conversion, OCR, large image processing and expensive computation must run in bounded workers, worker threads or specialized external processes. Native libraries may use their own thread pools, but their concurrency and memory consumption still require limits.
+Do not perform malware scanning or expensive document processing inside an HTTP request. The API accepts uploads, records state and returns promptly; workers process files asynchronously. Use timeouts, bounded queues, memory limits and backpressure. A separate Java, Go or Python processor is acceptable later without changing the core Node.js architecture.
+16.6 Transactions, outbox and distributed consistency
+await prisma.$transaction(async (tx) => {
+  // Lock/validate aggregate version and authorization.
+  // Persist post revision and recipient snapshot.
+  // Persist audit event and outbox event.
+  // Commit together; never send push inside transaction.
+});
+The example is conceptual: implement optimistic concurrency or explicit row locking as required by the database operation. Prisma transaction APIs and raw SQL must be used with verified supported semantics. External storage and push operations are not part of the database transaction. Use upload readiness checks, transactional outbox, idempotency keys and compensating actions where necessary.
+If domains are extracted, each service owns its data and commits locally. Cross-service workflows use versioned events, retries, idempotent consumers and explicit eventual-consistency states. A saga is appropriate only where a genuine multi-service business transaction requires compensation; do not introduce a distributed transaction framework for the MVP.
+16.7 NestJS implementation conventions
+content/
+  content.module.ts
+  presentation/posts.controller.ts
+  application/publish-post.service.ts
+  domain/post-policy.ts
+  domain/post.aggregate.ts
+  infrastructure/post.repository.ts
+  dto/create-post.dto.ts
+  events/post-published.event.ts
+Controllers perform transport mapping and validation; application services coordinate use cases; domain policies enforce business rules; repositories encapsulate persistence. Authorization must be enforced at the service boundary as well as through guards. Use global validation pipes with whitelisting and forbidden unknown fields where appropriate, centralized exception mapping, request correlation and structured logging.
+16.8 Production deployment and cost
+Node.js and Java both support production-grade horizontal scaling and microservices. Node.js may use less memory for some small API workloads, but actual cost depends on framework, dependencies, traffic, database pools, worker concurrency and hosting. No fixed percentage saving is guaranteed. Java should not be rejected solely to reduce hosting cost.
+Start with one API deployment and independently deployable notification/file workers. Use a managed container platform rather than Kubernetes unless existing operational capabilities justify it. Do not add Kafka, service discovery, a service mesh or separate databases merely for future-proofing. Record actual monthly compute, database, storage, egress, OTP and monitoring costs during the pilot.
+16.9 Updated delivery and acceptance requirements
+Replace Java-specific build steps with Node.js/TypeScript compilation, linting, Jest unit tests, Supertest API tests, Prisma migration validation and Testcontainers integration tests. Keep all original functional and security tests. Add event-loop delay, heap usage, worker backlog, database pool saturation and graceful-shutdown tests.
+Release gates: no blocking CPU work in API handlers; all critical writes are transactional/idempotent; worker retries do not duplicate logical notifications; multiple API replicas pass concurrent publish/attendance tests; revoked guardian access is denied across replicas; worker failure does not lose committed business events; production secrets are mandatory and never defaulted.
+16.10 Final architecture decision record
+ADR-001 revision: Adopt Node.js/NestJS/TypeScript for the backend because it supports the MVP’s I/O-oriented workloads, shared TypeScript expertise and future service extraction. Retain PostgreSQL, NestJS-managed authentication, private storage, transactional outbox and strict tenant/child authorization. Begin as a modular monolith with independently scalable workers. Microservices are an optional evolution based on measured needs, not a prerequisite for scaling. Java/Spring Boot remains an acceptable alternative; changing runtime does not change product scope or security obligations.
+
+17. Authentication revision: lightweight NestJS identity
+Version 1.2 amendment • Supersedes the Keycloak-specific requirements in earlier sections. The MVP will use application-managed authentication inside NestJS. Keycloak is not required for production deployment. All existing school, teacher, guardian, student and result authorization rules remain mandatory.
+17.1 Decision and scope
+Use a private, invitation-only, phone-OTP authentication flow for the initial pilot. Do not implement password login, social login or public registration unless explicitly approved. A dedicated identity provider may be introduced later for enterprise SSO, federation or centralized identity policies. Removing Keycloak reduces a separate runtime and operational dependency but transfers responsibility for session security, abuse prevention and identity lifecycle to the application team.
+17.2 Identity architecture
+React Native / Admin
+        | HTTPS
+NestJS Authentication Module
+  |-- Invitation and OTP service
+  |-- Token and session service
+  |-- Device/session revocation
+  |-- MFA and abuse controls
+        |
+PostgreSQL + OTP provider
+        |
+Domain authorization: school / role / assignment / child link
+The authentication module is not a separate microservice initially. Its public interfaces must be isolated so an external OIDC provider can replace token issuance later without rewriting business authorization. Never use the identity provider as the authoritative source for dynamic guardian-child or teacher-class permissions.
+17.3 Authentication data model
+Extend the existing users table rather than creating duplicate user records. Apply tenant-safe foreign keys where relevant. Authentication identities may span schools, while memberships and all resource permissions remain school-scoped. Never place raw refresh tokens, OTPs, passwords or MFA secrets in audit records.
+17.4 OTP login and invitation flow
+1. School administrator creates or imports a user and explicitly assigns the permitted school role and guardian/teacher relationships.
+2. Issue a single-use invitation through an approved channel. Verify the invitation and phone ownership before activation; prevent unauthorized phone reassignment.
+3. Client requests an OTP challenge. Return a generic response to avoid account enumeration. Apply per-identity, phone, IP and device throttles and provider abuse controls.
+4. Generate a cryptographically secure code, store only a keyed hash, set a short expiry and enforce bounded attempts and resend cooldowns. Provider delivery is not proof of authentication.
+5. Verify the code in a transaction, consume the challenge once, confirm account status and create a device session. Return a short-lived signed access JWT and opaque refresh credential.
+6. Resolve active school membership and role context on the server. Require an explicit school/role selection where the user has multiple contexts.
+7. On logout, revoke the session and clear sensitive local credentials/cache. Administrative suspension or guardian-link revocation must take effect independently of token expiry.
+17.5 Token and session security
+Use asymmetric JWT signing (for example RS256 or ES256) with managed private keys, a key identifier and a documented rotation procedure. Validate algorithm allowlist, signature, issuer, audience, expiry, not-before and token type. Reject unsigned tokens, unexpected algorithms and client-controlled signing keys. Never use a hard-coded or default production secret.
+Access JWT claims should be minimal: subject, session ID, issuer, audience, issued/expiry times and token identifier. School and role may be contextual hints but are not authorization proof. Resolve current membership and resource permissions server-side. Use a 5–15 minute access-token lifetime as a proposed starting point, subject to threat review and pilot testing.
+Generate refresh tokens using a cryptographically secure random source. Store only keyed hashes; rotate on every successful refresh using an atomic compare-and-swap or row lock. Detect reuse and revoke the token family, with an explicit policy for concurrent refresh requests. Enforce configurable idle and absolute expiry, device/session limits, account suspension and administrator-initiated revocation. A short-lived access token may remain valid until expiry unless a session-status check or revocation cache is used; use such checks for sensitive operations and define the acceptable revocation latency.
+Store mobile refresh credentials in OS-backed secure storage, never AsyncStorage or logs. Keep access tokens in memory where practical. For the admin web application, prefer a same-origin backend-for-frontend session using Secure, HttpOnly, SameSite cookies with CSRF protection; do not persist bearer tokens in localStorage. Use TLS, strict CORS and appropriate security headers.
+17.6 API contract additions
+All endpoints require complete OpenAPI schemas, request validation, standardized error responses, audit events and explicit rate limits. OTP request responses must not reveal whether a phone number exists. Refresh and logout endpoints must not accept a user ID as authority to act on another user. Administrative actions require server-side permissions and step-up authentication where appropriate.
+17.7 Authorization remains unchanged
+Authentication only establishes identity. Every protected operation must resolve active membership, role permissions, tenant scope and resource-specific relationships. Teachers must be assigned to the relevant class/subject; guardians must have an active explicit link to the student; result access must be checked on every request and file-access grant. Do not embed entire student lists or teacher assignments in JWTs. Revocation of a guardian link must invalidate future access even when an existing access token has not expired.
+17.8 MFA, recovery and abuse prevention
+Require stronger authentication for school administrators and result-publishing approvers. The exact MFA mechanism (such as TOTP or a managed identity provider) requires a security decision; SMS OTP alone is not automatically sufficient for privileged access. Provide secure account recovery, phone-number change and lost-device procedures with identity verification and audit. Never let support staff bypass guardian-link approval or reset an account based solely on possession of a phone number.
+Enforce rate limits at the gateway and application, OTP attempt limits, resend cooldowns, per-user/device/session controls, provider spending limits and anomaly monitoring. Use generic errors to limit enumeration. Store minimal abuse telemetry with defined retention. Protect against SIM-swap/social-engineering risk through step-up verification for sensitive account changes.
+17.9 Testing and production acceptance
+Add tests for expired/replayed OTPs, concurrent verification, refresh rotation races, token-family reuse, revoked sessions, disabled users, changed school roles, revoked guardian links, signing-key rotation, malformed JWTs, account enumeration, rate-limit bypass, phone reassignment and privileged recovery. Verify all tests across multiple API replicas and during rolling deployments. Perform an independent authentication/security review before pilot release.
+Production readiness requires secure key management, backup/restore of identity and session data, monitored OTP delivery, session-revocation runbooks, security event alerts, documented recovery procedures and no default credentials. Measure authentication latency, OTP success/failure rates, refresh errors, session counts and abuse-related provider costs. Do not claim that removing Keycloak automatically makes the solution more secure or cheaper overall; include engineering and security maintenance in the cost assessment.
+17.10 Future external identity provider migration
+Keep stable internal user UUIDs and map external provider subjects to auth_identities. Introduce an OIDC adapter, migrate or re-enroll users through an approved verification process, and preserve existing school memberships and guardian-child links. Never assume password hashes, OTP sessions or refresh tokens can be transferred between providers. Plan token issuer transition, client updates, session invalidation, rollback and audit continuity. Consider Keycloak, managed OIDC or enterprise federation only when requirements justify the additional dependency.
+ADR-002: Adopt NestJS-managed invitation/OTP authentication for the MVP, with secure rotating sessions and application-owned authorization. Defer Keycloak and other external identity providers. This decision reduces initial infrastructure complexity but requires explicit security ownership and independent validation. It does not alter the approved business scope, privacy model or modular-monolith scaling strategy.
+Document control	Value
+Status	Proposed implementation baseline; product-owner decisions identified in Section 2
+Source	SchoolConnect Lite Business, Product & UX Specification; AI School Platform HLD v1.0
+Audience	Product owner, mobile/backend engineers, QA, DevOps, security and school pilot team
+Delivery	Android and iOS from one codebase; small operational administration console
+Scope	Homework, private result attachments, announcements, attendance and parent acknowledgement
+Business requirement	Technical implementation	Verification
+SC-01 Homework	Post aggregate, assignment-scoped audience, file pipeline	T-HW-01 to 08
+SC-02 Results	Student-private distribution, mandatory privacy review	T-RS-01 to 08
+SC-03 Announcements	Audience policy, drafts, publication outbox	T-AN-01 to 06
+SC-04 Absence	Versioned attendance event and separate response	T-AT-01 to 12
+SC-05 Multiple children	Explicit guardian links and child-scoped queries	T-AU-01 to 08
+SC-06 Corrections	Immutable revisions and material-update notifications	T-PO-01 to 06
+SC-07 Upload failure	Quarantine, scan, retry, atomic publish	T-FL-01 to 10
+SC-08 No response	Pending state and school follow-up filters	T-AT-08
+Decision	Proposed baseline / approval needed
+Result privacy	Individual student result files only by default. Class-wide files require an explicit school-approved public-to-class classification; no named marks lists in MVP.
+Attendance source	Native daily attendance for pilot schools; future ERP import remains an adapter boundary.
+Leave notes	Acknowledgement plus optional reason and leave request; approval does not automatically change attendance.
+Guardian identity	School-invited accounts verified by phone OTP; no public student search or self-linking.
+School administration	Restricted responsive web console for onboarding, assignments, permissions and audit.
+Languages	English first; translation keys and RTL-ready layout. Regional languages selected during discovery.
+File limits	Proposed 20 MB/file, 5 files/post, PDF/JPEG/PNG only; configurable after device/network testing.
+Retention	Proposed 3 years for posts/attachments, 7 years for attendance/audit; legal review and school contract must approve.
+Hosting region	India-region deployment preferred for India pilot; confirm residency, contracts and vendor availability.
+Pilot sizing	Assume 3 schools, 3,000 students, 6,000 guardians, 300 staff; validate actual roster and peak usage.
+Account ownership	School is data controller; provider processes under school instructions. Confirm contractual responsibilities.
+MVP release	No automatic AI decisions or external ERP writes; optional integrations are separate change requests.
+Layer	Selected technology	Rationale / implementation
+Mobile	React Native + Expo + TypeScript	Single Android/iOS codebase; EAS builds; native modules through development builds when required.
+Navigation	Expo Router	Typed routes and deep-link handling.
+State/data	TanStack Query + Zustand	Server cache separated from local UI/session state.
+Forms	React Hook Form + Zod	Typed validation and reusable form components.
+Local persistence	Expo SQLite + SecureStore	Minimal offline cache/drafts; tokens only in secure storage.
+Backend	Node.js supported LTS + NestJS + TypeScript	Structured modules, dependency injection, validation, guards and mature REST/async ecosystem.
+Security	NestJS guards + Passport/JWT verification	JWT signature/expiry/session verification, method-level policy and server-side authorization.
+Identity	NestJS-managed authentication	Application-owned identity, OTP, sessions, token rotation and MFA; external IdP adapter optional.
+Database	PostgreSQL 17 baseline + Prisma Migrate	Relational integrity, migrations, transactional outbox.
+Persistence	Prisma + explicit SQL for scoped reads	Typed database access; interactive transactions, migrations and explicit performance-sensitive queries.
+Storage	Private S3-compatible object storage	Quarantine/clean buckets, short-lived access and versioning.
+Queue	PostgreSQL outbox + worker polling	No Kafka required for MVP; Redis/BullMQ or a broker can be introduced when justified.
+Push	Firebase Cloud Messaging + APNs via Expo-compatible integration	Platform delivery; provider receipts are not proof of device delivery.
+Admin	Next.js + TypeScript	Small responsive internal console using the same APIs and secure authentication.
+API	REST/JSON + OpenAPI 3.1	Contract-first generated clients and schema validation.
+Testing	Jest, Supertest, Testcontainers, Playwright, React Native Testing Library, Maestro	Unit, integration, admin and mobile E2E coverage.
+Operations	Docker, managed Postgres, managed storage, OpenTelemetry	Simple deployment, structured logs, metrics and traces.
+Module	Responsibilities	Dependencies
+identity	User profile, sessions, memberships, role context	Authentication provider adapter
+school	Schools, years, grades, sections, subjects, assignments	identity
+guardian	Guardian/student relationships, activation and revocation	school
+content	Posts, revisions, audience resolution, views	school, guardian, files
+files	Upload sessions, scan state, metadata, download authorization	storage adapter
+attendance	Official events, corrections, leave notes, acknowledgement	school, guardian
+notifications	Inbox, preferences, device tokens, delivery attempts	outbox, push adapter
+audit	Append-only business events, access and correction evidence	all modules
+admin	Imports, provisioning, support and reports	domain services
+Action	Teacher	Parent	School admin
+Read own profile	Yes	Yes	Yes
+Create homework	Assigned class/subject	No	Authorized staff only
+Publish results	Explicit result permission + audience	No	Explicit result permission
+Publish school announcement	Only with school-wide grant	No	Authorized
+Read child result	No unless separately authorized	Linked child only	Restricted support/academic permission
+Mark attendance	Assigned class/date	No	Authorized staff
+Acknowledge absence	No	Linked child only	No impersonation
+Correct attendance	Assigned scope + correction policy	No	Authorized with reason
+Manage guardian links	No	No	Authorized registrar
+Read audit	Own activity only	Own response history	Scoped audit permission
+Entity	Principal fields	Constraint / purpose
+schools	id, code, name, timezone, status, created_at	code unique
+academic_years	id, school_id, name, start_date, end_date, status	unique school/name
+grades	id, school_id, academic_year_id, code, name	unique school/year/code
+sections	id, school_id, grade_id, code, name	unique school/grade/code
+subjects	id, school_id, code, name	unique school/code
+users	id, identity_subject, display_name, phone_e164, status	identity_subject unique
+memberships	id, school_id, user_id, role, status, version	unique school/user/role
+students	id, school_id, admission_no, display_name, status	unique school/admission_no
+enrollments	id, school_id, student_id, section_id, academic_year_id, status	one active enrollment/year
+guardian_links	id, school_id, guardian_user_id, student_id, relationship, status, verified_at	unique school/guardian/student
+teacher_assignments	id, school_id, teacher_user_id, section_id, subject_id, role, status	active assignment index
+role_grants	id, school_id, membership_id, permission, scope_type, scope_id	explicit permission grants
+posts	id, school_id, type, author_id, status, current_revision_id, published_at, version	type/status index
+post_revisions	id, school_id, post_id, revision_no, title, body, due_date, exam_name, subject_id, change_reason	unique post/revision
+post_audiences	id, school_id, post_id, scope_type, scope_id	scope index
+post_recipients	id, school_id, post_id, student_id, guardian_user_id, eligibility_status	unique post/student/guardian
+attachments	id, school_id, owner_type, owner_id, storage_key, original_name, mime_type, size_bytes, sha256, scan_status	storage_key unique
+revision_attachments	revision_id, attachment_id, sort_order	unique revision/attachment
+upload_sessions	id, school_id, owner_id, state, expires_at, expected_size, expected_sha256	expiry index
+post_views	id, school_id, post_id, student_id, guardian_user_id, first_viewed_at, last_viewed_at	unique post/student/guardian
+attendance_events	id, school_id, student_id, attendance_date, status, source, revision_no, recorded_by, reason, supersedes_id	unique student/date/revision
+attendance_current	school_id, student_id, attendance_date, current_event_id, version	unique school/student/date
+absence_responses	id, school_id, attendance_event_id, guardian_user_id, response_type, reason, created_at	unique event/guardian/type where applicable
+leave_requests	id, school_id, student_id, attendance_event_id, guardian_user_id, reason, status, reviewed_by, reviewed_at	status index
+notifications	id, school_id, user_id, student_id, type, resource_id, status, created_at, read_at	user/date index
+device_tokens	id, user_id, platform, token_hash, encrypted_token, status, last_seen_at	token_hash unique
+delivery_attempts	id, notification_id, provider, provider_message_id, status, attempted_at, error_code	notification/status index
+outbox_events	id, school_id, aggregate_type, aggregate_id, event_type, payload, created_at, processed_at, attempts	pending index
+audit_events	id, school_id, actor_id, action, resource_type, resource_id, before_hash, after_hash, reason, occurred_at, correlation_id	school/time index
+idempotency_records	school_id, actor_id, key, request_hash, response_status, response_body, expires_at	unique school/actor/key
+import_jobs	id, school_id, type, status, created_by, report_key, created_at	school/status index
+Control	Implementation default
+Allowed types	PDF, JPEG, PNG; inspect magic bytes, not extension alone
+Limits	20 MB/file, 5 files/post proposed; per-school quota configurable
+Upload URL	5-minute expiry; exact object key and content constraints
+Download URL	60-second expiry proposed; no public bucket ACL
+Quarantine	No parent access until scan and validation complete
+Malware scan	ClamAV or managed scanning adapter; fail closed on unavailable scanner
+Image processing	Strip unnecessary EXIF; preserve original only where required
+PDF	Reject encrypted/unreadable or active-content files according to approved policy
+Filename	Sanitize display name; generated UUID storage key
+Integrity	SHA-256 and server-observed size; checksum verification
+Cleanup	Expire incomplete sessions; scheduled orphan cleanup after grace period
+Retry	New session or resumable multipart upload; never reuse expired URL
+Cache	Sensitive results use no-store and private authenticated access
+Scenario	Required behavior
+Parent double taps	Same idempotency key returns original acknowledgement
+Two guardians respond	Both responses retained; school aggregate policy applied
+Teacher corrects absence before push	Cancel pending absence push; emit correction event if appropriate
+Parent opens old alert after correction	Show superseded status; do not create new acknowledgement
+Offline acknowledgement	Queue only with event ID/version; revalidate on replay
+Wrong class/date	403/422; no partial write
+Concurrent attendance edits	409 version conflict; reload and show differences
+Guardian link revoked	403 immediately on next API request
+Push provider unavailable	Inbox remains authoritative; retry with backoff
+Leave rejected	Keep acknowledgement and reason; show review outcome
+School timezone changes	Existing local attendance dates remain unchanged
+Student transferred	Historical records remain scoped to original school; new access requires explicit authorization
+Convention	Contract
+Pagination	Cursor-based; limit default 20, maximum 100; stable sort by published_at/id
+Mutations	Idempotency-Key UUID required for publish, attendance, acknowledgement and batch actions
+Concurrency	If-Match / expectedVersion; stale update returns 409
+Errors	application/problem+json with code, message, correlationId, fieldErrors
+Validation	400 malformed JSON; 422 valid JSON violating business rules
+Authorization	401 unauthenticated; 403 unauthorized; 404 for inaccessible private resources where appropriate
+Rate limiting	429 with Retry-After; per actor, IP and endpoint class
+Request tracing	X-Correlation-Id propagated across API, outbox and workers
+Date handling	School timezone supplied by server; client never calculates authoritative school date
+Contract evolution	Additive fields; clients ignore unknown properties; breaking changes require versioning
+Method	Endpoint	Purpose
+GET	/me	Profile, memberships and active role
+GET	/me/teaching-scope	Assigned sections/subjects and grants
+GET	/me/children	Active guardian-linked children
+POST	/auth/role-context	Validate/select active membership
+POST	/auth/logout	Revoke session and unregister device
+GET	/schools/{id}/configuration	Allowed types, limits, timezone, feature flags
+GET	/classes/{id}/roster	Authorized roster, date and version
+POST	/posts	Create draft
+GET	/posts	Teacher-owned post list with filters
+GET	/posts/{id}	Authorized post detail
+PATCH	/posts/{id}	Edit draft with expected version
+POST	/posts/{id}/publish	Atomic publication
+POST	/posts/{id}/revisions	Create correction revision
+POST	/posts/{id}/archive	Archive with reason
+GET	/timeline	Child-scoped published content
+POST	/posts/{id}/views	Idempotent explicit content-open receipt
+POST	/uploads	Create upload session
+POST	/uploads/{id}/complete	Validate completed upload
+GET	/uploads/{id}	Upload/scan status
+POST	/attachments/{id}/access	Authorize and issue short-lived access
+POST	/attendance/batches	Submit class attendance
+GET	/students/{id}/attendance	Authorized attendance history
+POST	/attendance/{id}/corrections	Versioned correction with reason
+POST	/attendance/{id}/acknowledgements	Explicit guardian acknowledgement
+POST	/attendance/{id}/leave-requests	Submit optional leave note
+GET	/attendance/follow-ups	Authorized school pending/response view
+POST	/leave-requests/{id}/review	Authorized approval/rejection
+GET	/notifications	User inbox
+POST	/notifications/{id}/read	Mark inbox item read
+POST	/devices	Register push token
+DELETE	/devices/{id}	Unregister device
+GET	/admin/imports	Import jobs and validation reports
+POST	/admin/imports	Stage roster/assignment import
+POST	/admin/imports/{id}/commit	Publish validated import
+GET	/admin/audit	Scoped audit query/export
+Screen / route	Primary components	Data / behavior
+F01 /teacher	Greeting, class selector, quick actions, recent posts	Teaching scope and teacher post summary
+F02 /teacher/posts/homework/new	Class/subject, title, due date, body, attachment tile	Draft, validation, upload, publish
+F03 /teacher/posts/results/new	Exam, subject, private file mapping, privacy confirmation	Scan readiness and controlled release
+F04 /teacher/posts/announcement/new	Audience, title, message, attachment, urgency	Draft and audience preview
+F05 /parent	Child switcher, action-required card, timeline	Child-scoped content and unread counts
+F06 /parent/attendance/{id}	Attendance facts, acknowledgement, reason, leave note	Explicit response and superseded state
+F07 /posts/{id}	Metadata, body, attachment cards, updated badge	Authorized content and view receipt
+F08 /notifications	Typed rows, unread state, timestamp	Exact child/resource deep link
+Shared /login	School invitation, OTP authentication	Session and role resolution
+Shared /profile	Account, school, role switch, preferences, logout	Secure context change
+Teacher /attendance	Date, roster, status controls, submit	Versioned batch and conflict handling
+Teacher /follow-ups	Absent list, response status, filter	Authorized class follow-up
+Shared /file-preview	PDF/image viewer, download/error controls	Authenticated private file access
+Token	Proposed value
+Frame	390 × 844 logical points baseline; responsive constraints
+Spacing	4, 8, 12, 16, 24, 32
+Page gutters	16–20
+Primary	Navy #17324D; teal #087F8C
+Surface	White #FFFFFF; background #F5F7FA
+Text	Primary #172B3A; secondary #607080
+Status	Semantic success/warning/error tokens; text labels mandatory
+Radius	8 input; 12 button; 16 card
+Typography	System sans; title 26, heading 20, body 16, caption 12–14
+Tap targets	Minimum 44 × 44 logical points
+Accessibility	WCAG 2.2 AA target; dynamic text and screen-reader labels
+Event	Recipient	Payload / behavior
+PostPublished	Resolved eligible guardians	Generic title, type, resource ID, child ID
+PostMateriallyUpdated	Current eligible guardians	Updated label and deep link
+AttendanceAbsent	Active linked guardians	Action-required alert, no sensitive reason
+AttendanceCorrected	Affected guardians	Correction notice; cancel pending absence reminder
+AbsenceAcknowledged	Responding guardian + authorized staff inbox	Confirmation and response status
+LeaveReviewed	Requesting guardian	Approved/rejected status, no sensitive reason in push
+Action	Offline behavior
+Parent timeline	Read recent permitted cached metadata with stale indicator
+Result attachment	No default persistent offline cache; explicit authorized download only if policy allows
+Teacher compose	Persist draft text and local attachment reference; resume safely
+Upload	Retry or resumable upload; expired session replaced
+Publish	Do not claim success offline; queue only after explicit confirmation and revalidate
+Attendance	Optional queued batch with roster/date version and operation ID
+Acknowledgement	Queue explicit action with event ID/revision; server validates on replay
+Role/child switch	Clear incompatible cache; no offline authorization expansion
+Threat	Required mitigation
+Cross-child/tenant IDOR	Server-side relationship checks, scoped queries, negative authorization tests
+Malicious file	Quarantine, type validation, malware scan, private storage, no execution
+Result leakage	Student-private mapping, live access checks, generic push, short-lived URLs
+Stolen mobile device	Secure token storage, session revocation, minimal cache, optional device lock
+Token replay	Short-lived tokens, refresh rotation, TLS, logout/revocation
+OTP abuse	Rate limits, attempt caps, expiry, provider abuse monitoring
+Mass assignment	DTO allowlists; ignore/reject client-owned role, school and audit fields
+SQL injection	Parameterized queries, ORM binding, least-privilege DB role
+XSS/content injection	Plain-text content or sanitized allowlisted rich text; safe admin rendering
+Duplicate writes	Idempotency keys, unique constraints, transactional outbox
+Insider misuse	Least privilege, explicit result grants, audit, support access review
+Sensitive logging	Redaction, structured logs, no tokens/OTP/document bodies
+Backup exposure	Encryption, restricted restore access, retention and restore testing
+Class	Examples	Handling
+Restricted student	Results, attendance reasons, guardian links	Need-to-know, encrypted, audited, minimal retention
+Confidential school	Rosters, assignments, unpublished posts	Tenant-scoped, restricted staff access
+Internal operational	Metrics, error codes, queue status	No student details in routine telemetry
+Public approved	School-approved general announcements	Still audience-scoped unless explicitly public
+Dimension	Pilot assumption	Engineering response
+Schools	3 initially	Tenant-aware schema and per-school configuration
+Students	3,000	Indexed enrollment/guardian queries
+Guardians	6,000	Paginated timeline and notification fan-out
+Staff	300	Assignment-scoped roster queries
+Daily posts	100–300 total	Outbox batching and object storage
+Peak attendance	300 staff within 30 minutes	Load-test batch writes and notification burst
+Attachment average	2 MB assumed	Storage growth and egress measured
+Peak reads	100–200 requests/sec test target	Validate p95 and database pool sizing
+Metric	Proposed target
+Core API availability	99.9% monthly, excluding agreed external-provider outages
+Timeline p95	<2 seconds on ordinary 4G, excluding large file download
+Normal publish confirmation	<2 seconds after files are ready
+Attendance batch p95	<2 seconds for 50 students under pilot load
+Notification enqueue	<5 seconds after committed business event
+Push attempt	95% within 60 seconds under normal provider conditions
+Offline convergence	<5 minutes after connectivity returns for valid queued actions
+Recovery point objective	15 minutes proposed
+Recovery time objective	1 hour proposed
+Backup restore	Successful staging restore drill before pilot
+Runbook	Minimum procedure
+Push outage	Confirm inbox persistence, provider status, retry backlog and recovery
+Scanner outage	Block publication of pending files; restore scanner; replay jobs
+Wrong result published	Restrict access immediately, archive/revoke, notify school owner, preserve audit
+Guardian access error	Disable affected link/session, investigate scope, correct and audit
+Attendance conflict	Inspect revisions, authorize correction, preserve original event
+Database recovery	Restore to isolated environment, verify integrity, reconcile outbox
+Lost device	Revoke sessions/tokens, disable device, clear cache on next connection
+Tenant offboarding	Export approved records, revoke access, apply retention/deletion policy
+ID	Scenario	Expected outcome
+T-HW-01	Assigned teacher publishes valid homework	Correct linked parents see it; unrelated users denied
+T-HW-02	Teacher selects unassigned class	403; no post published
+T-HW-03	Due date invalid	422 with field error; draft preserved
+T-HW-04	Material correction	New revision, Updated label, audit and notification
+T-HW-05	Duplicate publish request	One publication and one logical notification per recipient
+T-HW-06	Attachment optional	Text-only homework publishes when policy permits
+T-HW-07	Offline draft	Text and local file reference survive app restart
+T-HW-08	Stale version	409; no silent overwrite
+T-RS-01	Private result mapped to student	Only linked guardians can access
+T-RS-02	Parent guesses another result ID	403/404; no metadata or file leakage
+T-RS-03	Class-wide marks file without approval	Publication rejected
+T-RS-04	Unmatched batch file	Validation report; no partial publish
+T-RS-05	Result scan pending	Publish disabled and server rejects
+T-RS-06	Guardian link revoked	Existing resource access denied on next request
+T-RS-07	Result correction	Old version hidden from normal access; audit retained
+T-RS-08	Push payload	No marks, student name or signed URL
+T-AN-01	Class announcement	Only eligible guardians receive
+T-AN-02	Unauthorized school-wide audience	403
+T-AN-03	Draft announcement	Not visible to parents
+T-AN-04	Urgent permission	Only authorized staff may set urgent
+T-AN-05	Attachment failure	No broken published attachment
+T-AN-06	Material edit	Updated label and correct recipient notification
+T-AT-01	Teacher submits absent student	Official event and pending response created
+T-AT-02	Parent acknowledges	Actor/time recorded; attendance remains ABSENT
+T-AT-03	Parent submits reason	Reason linked to response; no automatic approval
+T-AT-04	Two guardians acknowledge	Independent evidence; aggregate policy correct
+T-AT-05	Duplicate acknowledgement	One logical response
+T-AT-06	Attendance corrected to present	Historical response retained; alert superseded
+T-AT-07	Old alert opened after correction	Current status shown; no stale acknowledgement
+T-AT-08	No parent response	Pending remains; no inferred acknowledgement
+T-AT-09	Concurrent teacher correction	409 and explicit conflict
+T-AT-10	Unassigned teacher submits roster	403; no partial write
+T-AT-11	Leave approval	Separate review; official attendance unchanged unless corrected
+T-AT-12	Offline replay after correction	Conflict handled without applying stale response
+T-AU-01	Parent with two children	Correct child-specific timeline and counts
+T-AU-02	Cross-school ID substitution	Denied
+T-AU-03	Dual-role user	No permission inheritance between roles
+T-AU-04	Revoked guardian link	Protected content inaccessible
+T-AU-05	Expired token	Refresh or reauthentication; no unauthorized access
+T-AU-06	Logout	Session revoked and sensitive cache cleared
+T-AU-07	Admin without result grant	Cannot open private result
+T-AU-08	Background job wrong tenant	Tenant boundary enforced
+T-PO-01	Published post correction	Immutable revision history
+T-PO-02	Archive	Removed from normal feed; audit retained
+T-PO-03	Unauthorized edit	Denied
+T-PO-04	Concurrent edit	Version conflict
+T-PO-05	Recipient snapshot	Stable reporting; live access rechecked
+T-PO-06	Duplicate event processing	No duplicate logical inbox item
+T-FL-01	Unsupported file	Rejected before publication
+T-FL-02	Spoofed MIME type	Magic-byte validation rejects
+T-FL-03	Oversized file	413/422 and clear UI error
+T-FL-04	Malware detected	Quarantined/rejected; no access
+T-FL-05	Scanner unavailable	Fail closed; retry/alert
+T-FL-06	Upload interrupted	Draft retained; retry succeeds
+T-FL-07	Expired upload URL	New session required
+T-FL-08	Wrong checksum	Completion rejected
+T-FL-09	Unauthorized signed URL request	Denied and audited
+T-FL-10	Orphan upload	Cleanup after configured grace period
+Phase	Weeks	Deliverables / exit gate
+Discovery and contracts	1–2	Decisions, editable Figma, data model, OpenAPI, threat model, pilot roster
+Foundation	3–4	Identity, tenant/role scope, imports, mobile shell, CI/CD, database
+Publishing	5–7	Homework, results, announcements, private files, timeline, revisions
+Attendance	8–9	Roster entry, corrections, acknowledgement, leave notes, follow-up view
+Hardening and pilot	10–12	Notifications, offline retry, security, load tests, store builds, UAT and runbooks
+Epic	Stories / deliverables	Priority
+E01 Foundation	Repository, environments, CI/CD, migrations, health, logging	P0
+E02 Identity	Invitations, OTP authentication, session rotation, role context, logout	P0
+E03 Registry	School/year/class/student import, guardian links, assignments	P0
+E04 Authorization	Policy service, tenant enforcement, negative tests	P0
+E05 Files	Upload sessions, quarantine, scan, clean storage, access	P0
+E06 Content	Drafts, revisions, audience, publish/archive, receipts	P0
+E07 Homework	Compose, due date, attachment, timeline	P0
+E08 Results	Private mapping, privacy confirmation, controlled release	P0
+E09 Announcements	Audience picker, drafts, urgency grants	P0
+E10 Attendance	Roster, batch submit, corrections, history	P0
+E11 Parent response	Acknowledgement, reason, leave review, follow-up	P0
+E12 Notifications	Inbox, device registration, outbox worker, deep links	P0
+E13 Mobile resilience	Draft persistence, retry, cache isolation, offline states	P0
+E14 Admin	Imports, assignments, grants, audit and support	P0
+E15 Quality	E2E, security, load, accessibility, restore, UAT	P0
+E16 Enhancements	Scheduled posts, quiet hours, advanced analytics, ERP adapter	P1
+Risk / dependency	Mitigation / owner
+School roster quality	Product owner obtains sample data in week 1; import validation and duplicate review
+Result privacy ambiguity	School signs off private-result policy before implementation
+OTP provider and sender approval	Select provider and complete onboarding early; adapter allows substitution
+Apple/Google developer accounts	School/product owner provides accounts and legal entity details before build release
+Push delivery uncertainty	Use in-app inbox as source of truth; report provider acceptance accurately
+File scanning cost/latency	Benchmark sample PDFs and images; size worker capacity
+Guardian relationship errors	Two-step import validation, explicit verification and revocation workflow
+Scope creep into ERP/AI	Change control and separate P1 backlog
+Retention/legal requirements	Legal and school approval before production data import
+Single backend engineer bottleneck	Parallelize contracts/mobile mocks; add backend capacity if schedule fixed
+Event	Minimum payload	Consumers
+PostPublished.v1	schoolId, postId, revisionNo, actorId, occurredAt	Notifications, audit projection
+PostUpdated.v1	schoolId, postId, revisionNo, material	Notifications
+PostArchived.v1	schoolId, postId, reasonCode	Notifications/cache invalidation
+AttendanceRecorded.v1	schoolId, eventId, studentId, date, status, revisionNo	Notifications, follow-up
+AttendanceCorrected.v1	schoolId, oldEventId, newEventId, status	Notifications, follow-up
+AbsenceAcknowledged.v1	schoolId, eventId, responseId, guardianId	Follow-up, confirmation
+LeaveReviewed.v1	schoolId, requestId, status, reviewerId	Notifications
+AttachmentReady.v1	schoolId, attachmentId, scanStatus	Draft readiness
+GuardianLinkRevoked.v1	schoolId, guardianId, studentId	Cache/session invalidation
+CSV	Required columns	Validation
+students.csv	admission_no, display_name, academic_year, grade, section	Unique admission, valid class/year
+guardians.csv	guardian_external_id, name, phone_e164	Normalized phone, duplicate review
+guardian_links.csv	guardian_external_id, admission_no, relationship	Both references exist; explicit verification
+teachers.csv	staff_no, name, phone_e164	Unique staff number, verified account
+assignments.csv	staff_no, academic_year, grade, section, subject, permission	Valid references and approved grants
+Code	Meaning / client action
+AUTH_REQUIRED	Reauthenticate
+MEMBERSHIP_INACTIVE	Clear context and contact school
+ACCESS_DENIED	Show generic access-denied state
+RESOURCE_NOT_FOUND	Show unavailable content
+VERSION_CONFLICT	Reload and resolve changes
+INVALID_AUDIENCE	Correct audience selection
+RESULT_PRIVACY_REQUIRED	Complete private mapping/approval
+ATTACHMENT_NOT_READY	Wait for scan or retry
+FILE_TYPE_NOT_ALLOWED	Choose supported file
+FILE_TOO_LARGE	Reduce file size
+UPLOAD_EXPIRED	Create new upload session
+ATTENDANCE_SUPERSEDED	Refresh current attendance
+ALREADY_ACKNOWLEDGED	Show existing response
+RATE_LIMITED	Respect Retry-After
+SERVICE_UNAVAILABLE	Retry safely; preserve draft
+Component	Selected baseline	Implementation detail
+API runtime	Node.js supported LTS	Pin exact release and container digest; production mode and graceful shutdown
+Framework	NestJS + TypeScript	Strict TypeScript, dependency injection, modules, guards and DTO validation
+Database	PostgreSQL + Prisma	Prisma Migrate; explicit transactions and parameterized SQL for complex scoped reads
+Authentication	NestJS-managed authentication	JWT signature, issuer, audience, expiry and session verification; application-owned permissions
+Mobile	React Native + Expo	One role-aware Android/iOS application; generated API types
+Background jobs	PostgreSQL outbox + Node workers	Separate worker processes; bounded concurrency and retry/dead-letter policy
+Future queue	Redis + BullMQ or managed broker	Introduce only when queue throughput/operational requirements justify it
+Files	Private S3-compatible storage	Quarantine, malware scan, checksum verification and short-lived access
+Testing	Jest + Supertest + Testcontainers	Contract, authorization, transaction, integration and E2E tests
+Deployment	Docker + managed container platform	Independent API/worker replicas; managed database and storage
+Candidate	Trigger	First action
+Notifications	Sustained fan-out backlog or independent delivery requirements	Scale workers, batch and optimize; extract only if needed
+File processing	CPU/memory-intensive scanning or document processing	Dedicated worker deployment; use worker threads or external processor
+Reporting	Analytical queries degrade transactional performance	Read replica/read model before separate service
+Attendance	Independent team/release needs or proven domain bottleneck	Define owned data, APIs and events; migrate incrementally
+Content/results	Distinct scaling, compliance or ownership requirements	Extract after contract and data ownership review
+Identity	Specialized identity requirements	Keep authentication behind an adapter; consider external IdP for enterprise SSO
+Cost component	Node.js impact	Cost control
+API compute	Potentially lower memory footprint; workload-dependent	Benchmark replicas and right-size
+Database	Largely independent of runtime	Indexes, pooling, query tuning and managed sizing
+Object storage/egress	No inherent runtime advantage	Retention, compression and controlled downloads
+OTP/SMS	Provider and volume driven	Rate limits, provider contracts and abuse controls
+Push	Provider and delivery architecture driven	Batching, deduplication and bounded retries
+Workers	CPU/file workload driven	Separate scaling and concurrency limits
+Operations	Microservice count can increase overhead	Start with modular monolith and managed services
+Entity	Key fields	Rules
+auth_identities	id, user_id, provider, provider_subject, phone_verified_at, status	Unique provider identity; school memberships remain separate
+auth_invitations	id, user_id, school_id, token_hash, expires_at, consumed_at	Single-use, expiring invitation; no public student linking
+otp_challenges	id, identity_id, purpose, code_hash, expires_at, attempts, consumed_at	Keyed hash; bounded attempts; short retention; no plaintext OTP
+auth_sessions	id, user_id, device_id, token_family_id, refresh_hash, expires_at, idle_expires_at, revoked_at	Atomic rotation; family revocation on reuse; hashed credentials
+auth_security_events	id, user_id, event_type, timestamp, ip_hash, metadata	Append-only security audit; redact sensitive values
+auth_mfa_factors	id, user_id, factor_type, secret_reference, enabled_at	Only if MFA method is approved; protect secrets with managed encryption
+Method	Endpoint	Purpose
+POST	/api/v1/auth/otp/request	Request login challenge; generic response and rate limits
+POST	/api/v1/auth/otp/verify	Consume challenge and create session
+POST	/api/v1/auth/token/refresh	Atomically rotate refresh credential
+POST	/api/v1/auth/logout	Revoke current session
+POST	/api/v1/auth/logout-all	Revoke all user sessions after appropriate verification
+GET	/api/v1/auth/sessions	List current user devices/sessions
+DELETE	/api/v1/auth/sessions/{id}	Revoke owned session
+POST	/api/v1/admin/invitations	Create scoped invitation
+POST	/api/v1/admin/users/{id}/suspend	Suspend account and revoke sessions
