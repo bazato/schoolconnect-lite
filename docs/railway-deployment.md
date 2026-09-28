@@ -1,5 +1,14 @@
 # Railway deployment
 
+## Current attempt — 2026-09-28
+
+- GitHub `bazato/schoolconnect-lite`, branch `main`, contains the implementation and deployment packaging.
+- The local Linux Docker build succeeds. This is not proof of a completed Railway deployment.
+- Linked to project `sincere-manifestation`, environment `Develop` (`63a216b1-a5d7-4be3-b473-563885f3fe5a`).
+- A private PostgreSQL service is running, and an empty `identity` service has been created. Cloud application schemas and the application services have not been deployed.
+- Further service creation is rejected with `Free plan resource provision limit exceeded`. No paid upgrade or combined-service architecture has been applied. An account upgrade or explicit approval of a reduced demo deployment is needed to continue.
+- No public application endpoint has been created. OTP remains mocked as `123456` for testing; public test access still needs an agreed restriction.
+
 ## Layout
 
 Deploy the existing backend as separate Railway services from this repository. The same Dockerfile compiles the backend packages; `SERVICE_NAME` selects one process at runtime. It does not combine the services or their databases. The Expo mobile app is still the only client application; publishing Android/iOS binaries is separate from hosting its API.

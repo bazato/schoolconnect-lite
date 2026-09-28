@@ -23,6 +23,8 @@
 
 ## Remaining hardening and external dependencies
 
+- Railway deployment is blocked by the account resource limit after creating PostgreSQL and an empty Identity service. Cloud schemas and the application deployment are not complete; no public application URL exists. See `docs/railway-deployment.md`.
+
 - No real SMS OTP, APNs/FCM transport, production malware scanner or provisioned production S3 bucket/provider. The notification inbox/outbox and provider abstractions are in place.
 - Local private-object storage cannot currently start because its MinIO image registry returns HTTP 401. Upload/private-download end-to-end verification remains blocked; metadata/signing abstractions alone do not prove the full storage workflow.
 - Token/session authority is centralized in Identity and uses a configurable token adapter. Route-role checks remain in the gateway and teacher/guardian relationship policies in School; a fully externalized authorization policy service remains pending.
