@@ -4,6 +4,9 @@ dist/
 coverage/
 .env
 *.log
+.railway/
+dist-native/
+docs/screenshots/
 reference/kaksha-structure.json
 reference/kaksha-screens.json
 reference/kaksha.figctx/

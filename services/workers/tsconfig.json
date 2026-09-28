@@ -1,0 +1,1 @@
+{ "extends": "../../tsconfig.service.json", "compilerOptions": { "rootDir": "src" }, "include": ["src/**/*.ts"] }

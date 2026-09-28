@@ -28,6 +28,7 @@ Expo mobile app (Owner, School Admin, Teacher or Parent context)
 - The mobile application calls only the public gateway.
 - Platform Owner has platform provisioning authority but no school content access. School Admin is bound to one school and cannot enumerate or mutate other schools.
 - Identity owns accounts, memberships and invitations; School owns schools, classes and teacher assignments. The gateway coordinates provisioning without shared database access.
+- Identity is the single session-authorization authority. The gateway treats access tokens as opaque, asks Identity to validate the configured provider token, and receives only a database-resolved active principal. Provider mode, signing secret, issuer, audience and access-token lifetime are environment configuration.
 - The gateway resolves the authenticated principal through Identity and checks live guardian/teacher authorization through School before delegating.
 - Clients never supply the authoritative recipient list. The gateway resolves recipients from School and sends an immutable snapshot to Content.
 - Content and Attendance commit their business record and outbox event in the same database transaction.
@@ -57,4 +58,4 @@ Expo mobile app (Owner, School Admin, Teacher or Parent context)
 
 ## Current provider boundary
 
-Development OTP is deliberately mocked as `123456`. The database records hashed challenges and sessions, but SMS delivery and production JWT/refresh-token signing remain provider work. S3 signing, malware scanning, APNs/FCM delivery, and event-broker transport are adapter boundaries rather than dependencies between business services.
+Development OTP is deliberately mocked as `123456`. Identity issues signed, expiring, session-bound access tokens through a configurable authorization-provider interface and owns rotating refresh tokens, reuse detection, device binding and revocation. SMS delivery remains provider work. S3-compatible signing and transactional outbox workers are implemented; production malware scanning and APNs/FCM delivery remain provider adapters rather than dependencies between business services.

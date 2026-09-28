@@ -1,0 +1,14 @@
+.git
+.railway
+**/node_modules
+**/.expo
+**/dist
+**/dist-native
+**/coverage
+**/.env
+**/.env.*
+**/*.log
+reference
+sources
+docs/screenshots
+apps/mobile/assets

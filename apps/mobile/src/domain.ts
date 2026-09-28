@@ -3,13 +3,13 @@ export type TabKey = 'home' | 'posts' | 'attendance' | 'notifications' | 'profil
 export type PostType = 'HOMEWORK' | 'RESULT' | 'ANNOUNCEMENT';
 export type AttendanceStatus = 'PRESENT' | 'ABSENT' | 'LATE' | 'LEAVE';
 export type Route =
-  | { name: 'compose'; type: PostType }
+  | { name: 'compose'; type: PostType; draftId?: string }
   | { name: 'edit-post'; postId: string }
   | { name: 'teacher-attendance' }
   | { name: 'follow-ups' }
-  | { name: 'post-detail'; postId: string }
+  | { name: 'post-detail'; postId: string; studentId?: string }
   | { name: 'absence'; eventId: string }
-  | { name: 'file-preview'; fileName: string }
+  | { name: 'file-preview'; fileName: string; fileId?: string; studentId?: string }
   | null;
 
 export type Child = { id: string; name: string; school: string; className: string; avatar: string };
@@ -25,7 +25,7 @@ export type TimelinePost = {
   timestamp: string;
   unread: boolean;
   updated?: boolean;
-  attachment?: { name: string; size: string; state: 'READY' | 'UNAVAILABLE' };
+  attachment?: { fileId?: string; name: string; size: string; state: 'READY' | 'UNAVAILABLE' };
 };
 
 export const children: Child[] = [

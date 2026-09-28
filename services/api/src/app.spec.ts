@@ -4,10 +4,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppModule, ServiceClient } from './app.module';
 import type { INestApplication } from '@nestjs/common';
 
-const parent = { userId: 'parent-1', displayName: 'Parent', membershipId: 'membership-parent', schoolId: 'school-1', role: 'PARENT' };
-const teacher = { userId: 'teacher-1', displayName: 'Teacher', membershipId: 'membership-teacher', schoolId: 'school-1', role: 'TEACHER' };
-const owner = { userId: 'owner-1', displayName: 'Owner', membershipId: 'membership-owner', schoolId: null, role: 'PLATFORM_OWNER' };
-const schoolAdmin = { userId: 'admin-1', displayName: 'School Admin', membershipId: 'membership-admin', schoolId: 'school-1', role: 'SCHOOL_ADMIN' };
+const parent = { userId: 'parent-1', displayName: 'Parent', membershipId: 'membership-parent', schoolId: 'school-1', role: 'PARENT', sessionId: 'session-parent' };
+const teacher = { userId: 'teacher-1', displayName: 'Teacher', membershipId: 'membership-teacher', schoolId: 'school-1', role: 'TEACHER', sessionId: 'session-teacher' };
+const owner = { userId: 'owner-1', displayName: 'Owner', membershipId: 'membership-owner', schoolId: null, role: 'PLATFORM_OWNER', sessionId: 'session-owner' };
+const schoolAdmin = { userId: 'admin-1', displayName: 'School Admin', membershipId: 'membership-admin', schoolId: 'school-1', role: 'SCHOOL_ADMIN', sessionId: 'session-admin' };
 
 describe('API gateway authorization and service boundaries', () => {
   let app: INestApplication;
@@ -20,8 +20,12 @@ describe('API gateway authorization and service boundaries', () => {
         const token = JSON.parse(String(init?.body)).accessToken as string;
         return Promise.resolve(token === 'teacher-token' ? teacher : token === 'owner-token' ? owner : token === 'admin-token' ? schoolAdmin : parent);
       }
+      if (service === 'identity' && path === '/internal/v1/sessions/switch-membership') {
+        return Promise.resolve({ accessToken: 'signed-switched-token', expiresInSeconds: 600, activeMembership: { id: 'membership-parent', schoolId: 'school-1', role: 'PARENT' } });
+      }
       if (service === 'school' && path === '/internal/v1/schools' && init?.method === 'POST') return Promise.resolve({ id: 'school-created', schoolCode: 'NEW1', displayName: 'New School', timezone: 'Asia/Riyadh', status: 'ACTIVE', created: true });
       if (service === 'school' && path === '/internal/v1/schools') return Promise.resolve([{ id: 'school-1', schoolCode: 'S1', displayName: 'School One' }]);
+      if (service === 'school' && path === '/internal/v1/schools/school-1') return Promise.resolve({ id: 'school-1', active: true });
       if (service === 'school' && path.endsWith('/classes') && init?.method === 'POST') return Promise.resolve({ id: 'class-created', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027' });
       if (service === 'school' && path.endsWith('/classes')) return Promise.resolve([{ id: 'class-1', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027' }]);
       if (service === 'school' && path.endsWith('/teacher-assignments')) return Promise.resolve({ assignmentId: 'assignment-1', classId: 'class-1', subjectCode: 'MATH' });
@@ -31,7 +35,7 @@ describe('API gateway authorization and service boundaries', () => {
       }
       if (service === 'school' && path.includes('/authorization/guardian')) return Promise.resolve({ allowed: !path.includes('student-denied') });
       if (service === 'school' && path.includes('/authorization/teacher')) return Promise.resolve({ allowed: !path.includes('class-denied') });
-      if (service === 'school' && path.includes('/recipients')) return Promise.resolve([{ studentId: 'student-1', guardianUserId: 'parent-1', snapshot: {} }]);
+      if (service === 'school' && path.includes('/audience-recipients')) return Promise.resolve([{ studentId: 'student-1', guardianUserId: 'parent-1', snapshot: {} }]);
       if (service === 'content' && path.startsWith('/internal/v1/timeline')) return Promise.resolve([{ id: 'post-1', title: 'Homework' }]);
       if (service === 'content' && path.startsWith('/internal/v1/teacher-posts')) return Promise.resolve([{ id: 'post-2', postType: 'ANNOUNCEMENT', title: 'School closed' }]);
       if (service === 'content' && path === '/internal/v1/posts') return Promise.resolve({ id: 'post-created', status: 'PUBLISHED' });
@@ -52,6 +56,35 @@ describe('API gateway authorization and service boundaries', () => {
     const response = await request(app.getHttpServer()).get('/api/v1/health').expect(200);
     expect(response.body.status).toBe('ok');
     expect(response.body.services).toHaveLength(7);
+  });
+
+  it('requires authentication for protected routes', async () => {
+    await request(app.getHttpServer()).get('/api/v1/me/context').expect(401);
+  });
+
+  it('reports ready only when all backend services are healthy', async () => {
+    await request(app.getHttpServer()).get('/api/v1/health/ready').expect(200);
+  });
+
+  it('returns an unsuccessful readiness status when a backend is unavailable', async () => {
+    serviceClient.request.mockImplementation((service: string) => service === 'school' ? Promise.reject(new Error('unavailable')) : Promise.resolve({ status: 'ok' }));
+    const response = await request(app.getHttpServer()).get('/api/v1/health/ready').expect(503);
+    expect(response.body.status).toBe('degraded');
+  });
+
+  it('binds role switching to the authenticated server session', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/api/v1/auth/switch-role')
+      .set('Authorization', 'Bearer teacher-token')
+      .send({ membershipId: 'membership-parent' })
+      .expect(201);
+    expect(response.body.accessToken).toBe('signed-switched-token');
+    const switchCall = serviceClient.request.mock.calls.find((call) => call[0] === 'identity' && call[1] === '/internal/v1/sessions/switch-membership');
+    expect(JSON.parse(String(switchCall?.[2]?.body))).toEqual({
+      userId: 'teacher-1',
+      membershipId: 'membership-parent',
+      sessionId: 'session-teacher',
+    });
   });
 
   it('authorizes the parent-child relationship before fetching a timeline', async () => {
