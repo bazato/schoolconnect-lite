@@ -21,6 +21,8 @@ The optional administration web console remains intentionally excluded.
 
 Railway backend packaging and environment requirements are in [docs/railway-deployment.md](docs/railway-deployment.md). Deployment is separate from native app distribution; mocked OTP must not be exposed as a public production login.
 
+The prepared Oracle Always Free trial layout and its account/security prerequisites are in [docs/oracle-free-tier-deployment.md](docs/oracle-free-tier-deployment.md). It has been tested locally but is not deployed to OCI.
+
 Development Platform Owner login: `+919876543200` with invitation `OWNER-INVITE`. Development OTP is `123456`.
 
 Identity owns token issuance and session validity. `AUTHORIZATION_PROVIDER` selects the token adapter; the current `local-jwt` adapter reads its signing secret, issuer, audience and access-token lifetime from environment configuration. The gateway enforces route-role checks and asks School for guardian/teacher scope decisions. A fully externalized policy engine is not yet implemented. Production startup fails if `AUTH_JWT_SECRET` is missing or shorter than 32 bytes. Development without a configured secret uses an ephemeral process secret, so restarting Identity invalidates existing local access tokens.

@@ -1,0 +1,179 @@
+# Trial-only OCI Ampere A1 layout. Build the image once with:
+# docker build -t schoolconnect-backend:oci .
+# The gateway binds only to VM loopback until restricted HTTPS access is set up.
+x-app: &app
+  image: schoolconnect-backend:oci
+  init: true
+  restart: unless-stopped
+  networks: [private]
+
+x-db-dependent: &db-dependent
+  postgres:
+    condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sc_admin
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD}
+      SC_IDENTITY_DB_PASSWORD: ${SC_IDENTITY_DB_PASSWORD:?Set SC_IDENTITY_DB_PASSWORD}
+      SC_SCHOOL_DB_PASSWORD: ${SC_SCHOOL_DB_PASSWORD:?Set SC_SCHOOL_DB_PASSWORD}
+      SC_CONTENT_DB_PASSWORD: ${SC_CONTENT_DB_PASSWORD:?Set SC_CONTENT_DB_PASSWORD}
+      SC_ATTENDANCE_DB_PASSWORD: ${SC_ATTENDANCE_DB_PASSWORD:?Set SC_ATTENDANCE_DB_PASSWORD}
+      SC_FILES_DB_PASSWORD: ${SC_FILES_DB_PASSWORD:?Set SC_FILES_DB_PASSWORD}
+      SC_NOTIFICATIONS_DB_PASSWORD: ${SC_NOTIFICATIONS_DB_PASSWORD:?Set SC_NOTIFICATIONS_DB_PASSWORD}
+      SC_AUDIT_DB_PASSWORD: ${SC_AUDIT_DB_PASSWORD:?Set SC_AUDIT_DB_PASSWORD}
+      SC_DEMO_SEED: ${SC_DEMO_SEED:-false}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-databases.sh:/docker-entrypoint-initdb.d/001-init-databases.sh:ro
+      - ../postgres/init:/opt/schoolconnect/migrations:ro
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U sc_admin -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [private]
+
+  identity:
+    <<: *app
+    depends_on: *db-dependent
+    environment:
+      SERVICE_NAME: identity
+      SERVICE_BIND_HOST: 0.0.0.0
+      NODE_ENV: development # Required while OTP remains the fixed mock code.
+      IDENTITY_DATABASE_URL: postgresql://sc_identity:${SC_IDENTITY_DB_PASSWORD:?Set SC_IDENTITY_DB_PASSWORD}@postgres:5432/schoolconnect_identity
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      AUTHORIZATION_PROVIDER: local-jwt
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?Set AUTH_JWT_SECRET}
+      AUTH_JWT_ISSUER: schoolconnect-identity
+      AUTH_JWT_AUDIENCE: schoolconnect-mobile
+      OTP_PROVIDER: development
+      DEVELOPMENT_OTP_CODE: ${DEVELOPMENT_OTP_CODE:-123456}
+
+  school:
+    <<: *app
+    depends_on: *db-dependent
+    environment:
+      SERVICE_NAME: school
+      SERVICE_BIND_HOST: 0.0.0.0
+      NODE_ENV: production
+      SCHOOL_DATABASE_URL: postgresql://sc_school:${SC_SCHOOL_DB_PASSWORD:?Set SC_SCHOOL_DB_PASSWORD}@postgres:5432/schoolconnect_school
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+
+  content:
+    <<: *app
+    depends_on: *db-dependent
+    environment:
+      SERVICE_NAME: content
+      SERVICE_BIND_HOST: 0.0.0.0
+      NODE_ENV: production
+      CONTENT_DATABASE_URL: postgresql://sc_content:${SC_CONTENT_DB_PASSWORD:?Set SC_CONTENT_DB_PASSWORD}@postgres:5432/schoolconnect_content
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+
+  attendance:
+    <<: *app
+    depends_on: *db-dependent
+    environment:
+      SERVICE_NAME: attendance
+      SERVICE_BIND_HOST: 0.0.0.0
+      NODE_ENV: production
+      ATTENDANCE_DATABASE_URL: postgresql://sc_attendance:${SC_ATTENDANCE_DB_PASSWORD:?Set SC_ATTENDANCE_DB_PASSWORD}@postgres:5432/schoolconnect_attendance
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+
+  files:
+    <<: *app
+    depends_on: *db-dependent
+    networks: [private, egress] # Only this backend needs outbound Object Storage access.
+    environment:
+      SERVICE_NAME: files
+      SERVICE_BIND_HOST: 0.0.0.0
+      NODE_ENV: development # Development-clean scanner is not suitable for real uploads.
+      FILE_DATABASE_URL: postgresql://sc_files:${SC_FILES_DB_PASSWORD:?Set SC_FILES_DB_PASSWORD}@postgres:5432/schoolconnect_files
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      FILE_SCANNER_PROVIDER: development-clean
+      S3_ENDPOINT: ${S3_ENDPOINT:?Set the OCI S3 compatibility endpoint}
+      S3_REGION: ${S3_REGION:?Set the OCI region}
+      S3_BUCKET: ${S3_BUCKET:?Set the private bucket name}
+      S3_FORCE_PATH_STYLE: "true"
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?Set the customer access key}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?Set the customer secret key}
+
+  notifications:
+    <<: *app
+    depends_on: *db-dependent
+    environment:
+      SERVICE_NAME: notifications
+      SERVICE_BIND_HOST: 0.0.0.0
+      NODE_ENV: production
+      NOTIFICATION_DATABASE_URL: postgresql://sc_notifications:${SC_NOTIFICATIONS_DB_PASSWORD:?Set SC_NOTIFICATIONS_DB_PASSWORD}@postgres:5432/schoolconnect_notifications
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+
+  audit:
+    <<: *app
+    depends_on: *db-dependent
+    environment:
+      SERVICE_NAME: audit
+      SERVICE_BIND_HOST: 0.0.0.0
+      NODE_ENV: production
+      AUDIT_DATABASE_URL: postgresql://sc_audit:${SC_AUDIT_DB_PASSWORD:?Set SC_AUDIT_DB_PASSWORD}@postgres:5432/schoolconnect_audit
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+
+  workers:
+    <<: *app
+    depends_on:
+      content: { condition: service_started }
+      attendance: { condition: service_started }
+      school: { condition: service_started }
+      notifications: { condition: service_started }
+      audit: { condition: service_started }
+    environment:
+      SERVICE_NAME: workers
+      NODE_ENV: production
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      CONTENT_SERVICE_URL: http://content:3103
+      ATTENDANCE_SERVICE_URL: http://attendance:3104
+      SCHOOL_SERVICE_URL: http://school:3102
+      NOTIFICATION_SERVICE_URL: http://notifications:3106
+      AUDIT_SERVICE_URL: http://audit:3107
+
+  api:
+    <<: *app
+    networks: [private, ingress]
+    depends_on:
+      identity: { condition: service_started }
+      school: { condition: service_started }
+      content: { condition: service_started }
+      attendance: { condition: service_started }
+      files: { condition: service_started }
+      notifications: { condition: service_started }
+      audit: { condition: service_started }
+    environment:
+      SERVICE_NAME: api
+      SERVICE_BIND_HOST: 0.0.0.0
+      NODE_ENV: production
+      PORT: "3000"
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      ENFORCE_HTTPS: "true"
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      IDENTITY_SERVICE_URL: http://identity:3101
+      SCHOOL_SERVICE_URL: http://school:3102
+      CONTENT_SERVICE_URL: http://content:3103
+      ATTENDANCE_SERVICE_URL: http://attendance:3104
+      FILE_SERVICE_URL: http://files:3105
+      NOTIFICATION_SERVICE_URL: http://notifications:3106
+      AUDIT_SERVICE_URL: http://audit:3107
+    ports:
+      - "127.0.0.1:${API_LOOPBACK_PORT:-3000}:3000"
+
+networks:
+  private:
+    internal: true
+  egress: {}
+  ingress: {}
+
+volumes:
+  postgres_data:
