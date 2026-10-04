@@ -2,7 +2,7 @@
   "name": "@schoolconnect/mobile",
   "private": true,
   "version": "0.1.0",
-  "main": "node_modules/expo/AppEntry.js",
+  "main": "expo/AppEntry",
   "scripts": {
     "start": "expo start",
     "android": "expo start --android",
