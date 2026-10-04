@@ -2,18 +2,18 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { AESEncryptionKey, AESSealedData, aesDecryptAsync, aesEncryptAsync } from 'expo-crypto';
+import { offlineSecretSecureKey } from './secureStoreKeys';
 
-const secretKey = (userId: string) => `schoolconnect:offline-secret:${userId}`;
 const keyPromises = new Map<string, Promise<AESEncryptionKey>>();
 
 async function userKey(userId: string): Promise<AESEncryptionKey> {
   const existing = keyPromises.get(userId);
   if (existing) return existing;
   const pending = (async () => {
-    const stored = await SecureStore.getItemAsync(secretKey(userId));
+    const stored = await SecureStore.getItemAsync(offlineSecretSecureKey(userId));
     if (stored) return AESEncryptionKey.import(stored, 'base64');
     const generated = await AESEncryptionKey.generate();
-    await SecureStore.setItemAsync(secretKey(userId), await generated.encoded('base64'), {
+    await SecureStore.setItemAsync(offlineSecretSecureKey(userId), await generated.encoded('base64'), {
       keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
     });
     return generated;
@@ -45,6 +45,6 @@ export const secureOfflineStorage = {
   multiRemove: (keys: string[]) => AsyncStorage.multiRemove(keys),
   async clearUserKey(userId: string) {
     keyPromises.delete(userId);
-    if (Platform.OS !== 'web') await SecureStore.deleteItemAsync(secretKey(userId));
+    if (Platform.OS !== 'web') await SecureStore.deleteItemAsync(offlineSecretSecureKey(userId));
   },
 };

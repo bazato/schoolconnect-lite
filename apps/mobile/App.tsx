@@ -281,7 +281,7 @@ function LoginScreen({
 }) {
   const [phase, setPhase] = useState<"phone" | "otp">("phone");
   const [phone, setPhone] = useState("+91 98765 43210");
-  const [invitation, setInvitation] = useState("PARENT-INVITE");
+  const [invitation, setInvitation] = useState(demoMode ? "PARENT-INVITE" : "");
   const [otp, setOtp] = useState("123456");
   const [challengeId, setChallengeId] = useState("");
   const [loading, setLoading] = useState(false);

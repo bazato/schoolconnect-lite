@@ -1,0 +1,58 @@
+# Disposable, synthetic-data-only Render free-tier trial. Never sync this as production.
+databases:
+  - name: schoolconnect-demo-postgres
+    databaseName: schoolconnect_demo
+    user: schoolconnect_demo
+    postgresMajorVersion: '17'
+    plan: free
+    region: frankfurt
+    ipAllowList: []
+
+services:
+  - type: web
+    name: schoolconnect-demo-api
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerCommand: node scripts/start-render-demo.mjs
+    healthCheckPath: /api/v1/health/ready
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: schoolconnect-demo-postgres
+          property: connectionString
+      - key: RENDER_DEMO_MODE
+        value: 'true'
+      - key: NODE_ENV
+        value: development
+      - key: OTP_PROVIDER
+        value: development
+      - key: DEVELOPMENT_OTP_CODE
+        value: '123456'
+      - key: AUTHORIZATION_PROVIDER
+        value: local-jwt
+      - key: AUTH_JWT_SECRET
+        generateValue: true
+      - key: INTERNAL_SERVICE_TOKEN
+        generateValue: true
+      - key: ENFORCE_HTTPS
+        value: 'true'
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=384
+      - key: OUTBOX_POLL_INTERVAL_MS
+        value: '10000'
+      - key: IDENTITY_DB_POOL_MAX
+        value: '2'
+      - key: SCHOOL_DB_POOL_MAX
+        value: '2'
+      - key: CONTENT_DB_POOL_MAX
+        value: '2'
+      - key: ATTENDANCE_DB_POOL_MAX
+        value: '2'
+      - key: FILES_DB_POOL_MAX
+        value: '2'
+      - key: NOTIFICATIONS_DB_POOL_MAX
+        value: '2'
+      - key: AUDIT_DB_POOL_MAX
+        value: '2'

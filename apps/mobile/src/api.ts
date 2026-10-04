@@ -2,13 +2,14 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import type { Role } from './domain';
-import { isDemoMode } from './config';
+import { isDemoMode, resolveApiUrl } from './config';
+import { SESSION_SECURE_KEY } from './secureStoreKeys';
+import { withReturningMemberFallback } from './otp-request';
 import { cacheChildren, cachedChildren, cachePublicTimeline, cachedPublicTimeline, cacheScopedRead, cachedScopedRead, clearOfflineUserData, queueMutation, queuedMutations, replayMutations, type QueuedMutation } from './offline';
 
-const browserHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-const API_URL = process.env.EXPO_PUBLIC_API_URL ?? `http://${browserHost}:3000/api/v1`;
+const API_URL = resolveApiUrl(process.env.EXPO_PUBLIC_API_URL, Platform.OS, typeof window !== 'undefined' ? window.location : undefined);
 export const demoMode = isDemoMode(process.env.EXPO_PUBLIC_DEMO_MODE);
-const SESSION_KEY = 'schoolconnect:session';
+const SESSION_KEY = Platform.OS === 'web' ? 'schoolconnect:session' : SESSION_SECURE_KEY;
 const DEVICE_ID = `schoolconnect-${Platform.OS}`;
 
 export type MobileSession = {
@@ -166,10 +167,12 @@ async function request<T>(path: string, init?: RequestInit, session?: MobileSess
   return payload;
 }
 
-export function requestOtp(phoneE164: string, invitationCode: string) {
-  return request<{ challengeId: string; expiresInSeconds: number; resendAfterSeconds: number; developmentCode?: string }>('/auth/otp/request', {
-    method: 'POST', body: JSON.stringify({ phoneE164: phoneE164.replace(/\s/g, ''), invitationCode }),
+export async function requestOtp(phoneE164: string, invitationCode: string) {
+  const normalizedPhone = phoneE164.replace(/\s/g, '');
+  const send = (code: string) => request<{ challengeId: string; expiresInSeconds: number; resendAfterSeconds: number; developmentCode?: string }>('/auth/otp/request', {
+    method: 'POST', body: JSON.stringify({ phoneE164: normalizedPhone, invitationCode: code }),
   });
+  return withReturningMemberFallback(invitationCode, send);
 }
 
 export function verifyOtp(challengeId: string, code: string) {

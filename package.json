@@ -19,6 +19,7 @@
     "test:integration": "node scripts/integration-test.mjs",
     "test:product": "node scripts/product-test.mjs",
     "test:load": "node scripts/load-test.mjs",
+    "test:render-demo": "node --test scripts/render-demo-db.test.mjs",
     "build": "pnpm -r build"
   },
   "devDependencies": {
