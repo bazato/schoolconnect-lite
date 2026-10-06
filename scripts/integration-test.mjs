@@ -47,10 +47,15 @@ const parentProvision = await call('/admin/parents', { token: admin.accessToken,
 const newParent = await login(parentPhone, parentProvision.body.parent.invitationCode);
 const newChildren = await call('/me/children', { token: newParent.accessToken });
 assert.equal(newChildren.body.length, 1);
+const parentHome = await call(`/bff/parent/home?studentId=${newChildren.body[0].id}`, { token: newParent.accessToken });
+assert.equal(parentHome.body.studentId, newChildren.body[0].id);
+assert.equal(parentHome.body.children.length, 1);
 
 console.log('4/8 teacher roster-scoped atomic attendance');
 const teacher = await login('+919876543211', 'TEACHER-INVITE');
 const scope = await call('/me/teaching-scope', { token: teacher.accessToken });
+const teacherHome = await call('/bff/teacher/home', { token: teacher.accessToken });
+assert.ok(Array.isArray(teacherHome.body.teachingScope));
 const assignment = scope.body[0];
 const roster = await call(`/attendance/roster?classId=${assignment.classId}`, { token: teacher.accessToken });
 const date = new Date().toISOString().slice(0, 10);
@@ -74,6 +79,7 @@ assert.ok(followUps.body.some((item) => item.attendanceEventId === absenceNotifi
 
 console.log('7/8 cross-tenant and invalid-roster rejection');
 await call(`/timeline/${newChildren.body[0].id}`, { token: seededParent.accessToken, expected: 403 });
+await call(`/bff/parent/home?studentId=${newChildren.body[0].id}`, { token: seededParent.accessToken, expected: 403 });
 await call('/attendance/batches', { token: teacher.accessToken, method: 'POST', body: JSON.stringify({ classId: assignment.classId, attendanceDate: date, expectedVersion: attendance.body.version, idempotencyKey: randomUUID(), rows: [{ studentId: randomUUID(), status: 'PRESENT' }] }), expected: 400 });
 
 console.log('8/8 genuine logout revocation');

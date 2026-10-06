@@ -7,6 +7,9 @@ import { BadRequestException, Body, ConflictException, Controller, ForbiddenExce
 import { NestFactory } from '@nestjs/core';
 import { createHash, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
+import { domainEventTypes } from '@schoolconnect/contracts';
+import { startOutboxPublisher } from '@schoolconnect/eventing';
+import { ScheduledPostRunner } from './scheduled-runner';
 
 type CreatePostRequest = {
   schoolId: string;
@@ -23,6 +26,7 @@ type CreatePostRequest = {
   urgent?: boolean;
   scheduledFor?: string;
   idempotencyKey: string;
+  correlationId?: string;
   recipients: Array<{ studentId: string; guardianUserId: string; snapshot?: Record<string, unknown> }>;
   attachments?: Array<{ fileId: string; studentId?: string; privacyClassification: 'GENERAL' | 'STUDENT_PRIVATE' | 'APPROVED_CLASS_PUBLIC' }>;
 };
@@ -40,6 +44,7 @@ type CreatePostRevisionRequest = {
   urgent?: boolean;
   scheduledFor?: string;
   changeKind?: 'MATERIAL' | 'MINOR';
+  correlationId?: string;
 };
 
 const requestHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -48,6 +53,10 @@ const requestHash = (value: unknown) => createHash('sha256').update(JSON.stringi
 class ContentRepository implements OnModuleDestroy {
   private readonly pool = new Pool({ connectionString: process.env.CONTENT_DATABASE_URL ?? 'postgresql://schoolconnect:schoolconnect@localhost:5432/schoolconnect_content', max: Number(process.env.CONTENT_DB_POOL_MAX ?? 10), connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS ?? 3000), statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS ?? 5000) });
   async health() { const result = await this.pool.query<{ now: Date }>('SELECT now() AS now'); return result.rows[0]; }
+  async nextScheduledAt() {
+    const result = await this.pool.query<{ nextAt: Date | null }>(`SELECT MIN(scheduled_for) AS "nextAt" FROM posts WHERE status='SCHEDULED'`);
+    return result.rows[0]?.nextAt ?? null;
+  }
 
   async timeline(schoolId: string, guardianUserId: string, studentId: string, before?: string, limit = 50) {
     const result = await this.pool.query(
@@ -125,7 +134,7 @@ class ContentRepository implements OnModuleDestroy {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      const hash = requestHash(input);
+      const hash = requestHash({ ...input, correlationId: undefined });
       const existing = await client.query<{ request_hash: string; response_body: unknown }>(
         `SELECT request_hash, response_body FROM idempotency_keys WHERE actor_id=$1 AND operation='CREATE_POST' AND idempotency_key=$2 AND expires_at>now() FOR UPDATE`,
         [input.actorUserId, input.idempotencyKey]);
@@ -138,9 +147,9 @@ class ContentRepository implements OnModuleDestroy {
       const postId = randomUUID();
       const revisionId = randomUUID();
       await client.query(
-        `INSERT INTO posts (id, school_id, author_membership_id, class_id, post_type, status, published_at,scheduled_for)
-         VALUES ($1,$2,$3,$4,$5,$6,CASE WHEN $7::timestamptz IS NULL THEN now() ELSE NULL END,$7)`,
-        [postId, input.schoolId, input.authorMembershipId, input.classId ?? null, input.postType, scheduledFor ? 'SCHEDULED' : 'PUBLISHED', scheduledFor]);
+        `INSERT INTO posts (id, school_id, author_membership_id, class_id, post_type, status, published_at,scheduled_for,created_correlation_id)
+         VALUES ($1,$2,$3,$4,$5,$6,CASE WHEN $7::timestamptz IS NULL THEN now() ELSE NULL END,$7,$8)`,
+        [postId, input.schoolId, input.authorMembershipId, input.classId ?? null, input.postType, scheduledFor ? 'SCHEDULED' : 'PUBLISHED', scheduledFor, input.correlationId ?? null]);
       await client.query(
         `INSERT INTO post_revisions (id, post_id, revision_number, title, body, subject_code, exam_name, due_date, audience_type, urgent, created_by_membership_id)
          VALUES ($1,$2,1,$3,$4,$5,$6,$7,$8,$9,$10)`,
@@ -155,10 +164,17 @@ class ContentRepository implements OnModuleDestroy {
           `INSERT INTO post_attachments (post_revision_id, file_id, student_id, privacy_classification) VALUES ($1,$2,$3,$4)`,
           [revisionId, attachment.fileId, attachment.studentId ?? null, attachment.privacyClassification]);
       }
-      const eventId = scheduledFor ? null : randomUUID();
-      if (eventId) await client.query(
-        `INSERT INTO outbox_events (id, event_type, aggregate_id, payload) VALUES ($1,'content.post-published.v1',$2,$3)`,
-        [eventId, postId, { schoolId: input.schoolId, postId, postType: input.postType, recipients: input.recipients }]);
+      const eventId = randomUUID();
+      await client.query(
+        `INSERT INTO outbox_events (id, event_type, aggregate_id, payload) VALUES ($1,$2,$3,$4)`,
+        [eventId, scheduledFor ? domainEventTypes.postScheduled : domainEventTypes.postPublished, postId, { schoolId: input.schoolId, postId, postType: input.postType, correlationId: input.correlationId,
+          recipients: input.recipients, notification: { title: input.title.trim(), body: input.body.trim().slice(0, 500) },
+          post: { id: postId, schoolId: input.schoolId, authorMembershipId: input.authorMembershipId, classId: input.classId ?? null,
+            postType: input.postType, status: scheduledFor ? 'SCHEDULED' : 'PUBLISHED', publishedAt: scheduledFor ? null : new Date().toISOString(),
+            scheduledFor: scheduledFor?.toISOString() ?? null, revisionNumber: 1, title: input.title.trim(), body: input.body.trim(),
+            subjectCode: input.subjectCode ?? null, examName: input.examName ?? null, dueDate: input.dueDate ?? null,
+            urgent: input.urgent ?? false, attachments: input.attachments ?? [] } }]);
+      if (scheduledFor) await client.query(`SELECT pg_notify('schoolconnect_post_schedule',$1)`, [postId]);
       const response = { id: postId, revisionId, status: scheduledFor ? 'SCHEDULED' : 'PUBLISHED', recipientCount: input.recipients.length, eventId, scheduledFor };
       await client.query(
         `INSERT INTO idempotency_keys (actor_id, operation, idempotency_key, request_hash, response_status, response_body, expires_at)
@@ -197,11 +213,11 @@ class ContentRepository implements OnModuleDestroy {
     try {
       await client.query('BEGIN');
       const current = await client.query<{
-        post_type: CreatePostRequest['postType']; status: string; current_revision_number: number;
+        post_type: CreatePostRequest['postType']; status: string; current_revision_number: number; class_id: string | null; published_at: Date | null;
         author_membership_id: string; subject_code: string | null; exam_name: string | null;
         due_date: string | null; audience_type: CreatePostRequest['audienceType']; urgent: boolean; revision_id: string; scheduled_for: Date | null;
       }>(
-        `SELECT p.post_type, p.status, p.current_revision_number, p.author_membership_id,
+        `SELECT p.post_type, p.status, p.current_revision_number, p.author_membership_id, p.class_id, p.published_at,
                 r.subject_code, r.exam_name, r.due_date::text, r.audience_type, r.urgent, r.id AS revision_id,p.scheduled_for
          FROM posts p
          JOIN post_revisions r ON r.post_id=p.id AND r.revision_number=p.current_revision_number
@@ -245,6 +261,8 @@ class ContentRepository implements OnModuleDestroy {
       const recipients = await client.query<{ student_id: string; guardian_user_id: string }>(
         `SELECT student_id, guardian_user_id FROM post_recipients WHERE post_id=$1`,
         [postId]);
+      const attachments = await client.query<{ file_id: string; student_id: string | null; privacy_classification: string }>(
+        `SELECT file_id,student_id,privacy_classification FROM post_attachments WHERE post_revision_id=$1 ORDER BY display_order`, [revisionId]);
       const eventId = randomUUID();
       await client.query(
         `INSERT INTO outbox_events (id, event_type, aggregate_id, payload)
@@ -254,9 +272,17 @@ class ContentRepository implements OnModuleDestroy {
           postId,
           revisionNumber: nextRevisionNumber,
           actorUserId: input.actorUserId,
+          correlationId: input.correlationId,
           material: (input.changeKind ?? 'MATERIAL') === 'MATERIAL',
+          notification: { title: input.title.trim(), body: input.body.trim().slice(0, 500) },
           recipients: recipients.rows.map((recipient) => ({ studentId: recipient.student_id, guardianUserId: recipient.guardian_user_id })),
-        }, nextStatus === 'SCHEDULED' ? 'content.scheduled-post-updated.v1' : 'content.post-updated.v1']);
+          post: { id: postId, schoolId: input.schoolId, authorMembershipId: input.authorMembershipId, classId: post.class_id,
+            postType: post.post_type, status: nextStatus, publishedAt: post.published_at, scheduledFor,
+            revisionNumber: nextRevisionNumber, title: input.title.trim(), body: input.body.trim(),
+            subjectCode: input.subjectCode ?? post.subject_code, examName: examName ?? null, dueDate: dueDate ?? null,
+            urgent: input.urgent ?? post.urgent, attachments: attachments.rows.map((item) => ({ fileId: item.file_id, studentId: item.student_id, privacyClassification: item.privacy_classification })) },
+        }, nextStatus === 'SCHEDULED' ? domainEventTypes.scheduledPostUpdated : domainEventTypes.postUpdated]);
+      if (nextStatus === 'SCHEDULED') await client.query(`SELECT pg_notify('schoolconnect_post_schedule',$1)`, [postId]);
       await client.query('COMMIT');
       return { id: postId, revisionId, revisionNumber: nextRevisionNumber, status: nextStatus, eventId,scheduledFor };
     } catch (error) {
@@ -275,7 +301,7 @@ class ContentRepository implements OnModuleDestroy {
     return result.rows[0];
   }
 
-  async archive(schoolId: string, postId: string, authorMembershipId: string, expectedRevisionNumber: number, actorUserId?: string) {
+  async archive(schoolId: string, postId: string, authorMembershipId: string, expectedRevisionNumber: number, actorUserId?: string, correlationId?: string) {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -285,8 +311,9 @@ class ContentRepository implements OnModuleDestroy {
       if (!post || post.current_revision_number !== expectedRevisionNumber || !['PUBLISHED','UPDATED','SCHEDULED','ARCHIVED'].includes(post.status)) throw new ConflictException({ code: 'POST_ARCHIVE_CONFLICT_OR_NOT_AUTHORIZED' });
       if (post.status === 'ARCHIVED') { await client.query('COMMIT'); return { id: post.id,status: post.status,archivedAt: post.archivedAt }; }
       const result = await client.query(`UPDATE posts SET status='ARCHIVED',archived_at=now(),updated_at=now() WHERE id=$1 RETURNING id,status,archived_at AS "archivedAt"`, [postId]);
-      await client.query(`INSERT INTO outbox_events (event_type,aggregate_id,payload) VALUES ('content.post-archived.v1',$1,$2)`,
-        [postId,{ schoolId,postId,actorUserId,actorMembershipId: authorMembershipId }]);
+      await client.query(`INSERT INTO outbox_events (event_type,aggregate_id,payload) VALUES ($1,$2,$3)`,
+        [domainEventTypes.postArchived,postId,{ schoolId,postId,actorUserId,actorMembershipId: authorMembershipId,correlationId }]);
+      if (post.status === 'SCHEDULED') await client.query(`SELECT pg_notify('schoolconnect_post_schedule',$1)`, [postId]);
       await client.query('COMMIT');
       return result.rows[0];
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
@@ -308,13 +335,26 @@ class ContentRepository implements OnModuleDestroy {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      const due = await client.query<{ id: string; school_id: string; post_type: string }>(`SELECT id,school_id,post_type FROM posts
-        WHERE status='SCHEDULED' AND scheduled_for<=now() ORDER BY scheduled_for FOR UPDATE SKIP LOCKED LIMIT $1`, [Math.min(Math.max(limit,1),100)]);
+      const due = await client.query<{ id: string; school_id: string; post_type: string; created_correlation_id: string | null; title: string; body: string;
+        author_membership_id: string; class_id: string | null; revision_number: number; subject_code: string | null; exam_name: string | null;
+        due_date: string | null; urgent: boolean; revision_id: string }>(`SELECT p.id,p.school_id,p.post_type,p.created_correlation_id,r.title,r.body,
+          p.author_membership_id,p.class_id,r.revision_number,r.subject_code,r.exam_name,r.due_date::text,r.urgent,r.id AS revision_id
+        FROM posts p JOIN post_revisions r ON r.post_id=p.id AND r.revision_number=p.current_revision_number
+        WHERE p.status='SCHEDULED' AND p.scheduled_for<=now() ORDER BY p.scheduled_for FOR UPDATE OF p SKIP LOCKED LIMIT $1`, [Math.min(Math.max(limit,1),100)]);
       for (const post of due.rows) {
         await client.query(`UPDATE posts SET status='PUBLISHED',published_at=now(),updated_at=now() WHERE id=$1`, [post.id]);
         const recipients = await client.query<{ student_id: string; guardian_user_id: string }>(`SELECT student_id,guardian_user_id FROM post_recipients WHERE post_id=$1`, [post.id]);
-        await client.query(`INSERT INTO outbox_events (event_type,aggregate_id,payload) VALUES ('content.post-published.v1',$1,$2)`,
-          [post.id, { schoolId: post.school_id, postId: post.id, postType: post.post_type, recipients: recipients.rows.map((row) => ({ studentId: row.student_id, guardianUserId: row.guardian_user_id })) }]);
+        const attachments = await client.query<{ file_id: string; student_id: string | null; privacy_classification: string }>(
+          `SELECT file_id,student_id,privacy_classification FROM post_attachments WHERE post_revision_id=$1 ORDER BY display_order`, [post.revision_id]);
+        await client.query(`INSERT INTO outbox_events (event_type,aggregate_id,payload) VALUES ($1,$2,$3)`,
+          [domainEventTypes.postPublished, post.id, { schoolId: post.school_id, postId: post.id, postType: post.post_type, correlationId: post.created_correlation_id,
+            recipients: recipients.rows.map((row) => ({ studentId: row.student_id, guardianUserId: row.guardian_user_id })),
+            notification: { title: post.title, body: post.body.slice(0, 500) },
+            post: { id: post.id, schoolId: post.school_id, authorMembershipId: post.author_membership_id, classId: post.class_id,
+              postType: post.post_type, status: 'PUBLISHED', publishedAt: new Date().toISOString(), scheduledFor: null,
+              revisionNumber: post.revision_number, title: post.title, body: post.body, subjectCode: post.subject_code,
+              examName: post.exam_name, dueDate: post.due_date, urgent: post.urgent,
+              attachments: attachments.rows.map((item) => ({ fileId: item.file_id, studentId: item.student_id, privacyClassification: item.privacy_classification })) } }]);
       }
       await client.query('COMMIT');
       return { published: due.rows.length };
@@ -350,14 +390,17 @@ class ContentController {
   @Post('drafts/:draftId/delete') deleteDraft(@Param('draftId') draftId: string, @Body() body: { schoolId: string; authorMembershipId: string }) { return this.repository.deleteDraft(body.schoolId, body.authorMembershipId, draftId); }
   @Post('posts/:postId/revisions') createRevision(@Param('postId') postId: string, @Body() body: CreatePostRevisionRequest) { return this.repository.createRevision(postId, body); }
   @Post('posts/:postId/views') view(@Param('postId') postId: string, @Body() body: { schoolId: string; guardianUserId: string; studentId: string }) { return this.repository.recordView(body.schoolId, postId, body.guardianUserId, body.studentId); }
-  @Post('posts/:postId/archive') archive(@Param('postId') postId: string, @Body() body: { schoolId: string; authorMembershipId: string; expectedRevisionNumber: number; actorUserId?: string }) { return this.repository.archive(body.schoolId, postId, body.authorMembershipId, body.expectedRevisionNumber,body.actorUserId); }
+  @Post('posts/:postId/archive') archive(@Param('postId') postId: string, @Body() body: { schoolId: string; authorMembershipId: string; expectedRevisionNumber: number; actorUserId?: string; correlationId?: string }) { return this.repository.archive(body.schoolId, postId, body.authorMembershipId, body.expectedRevisionNumber,body.actorUserId,body.correlationId); }
   @Get('posts/:postId/report') report(@Param('postId') postId: string, @Query('schoolId') schoolId: string) { return this.repository.report(schoolId, postId); }
   @Post('scheduled/publish-due') publishDue(@Body() body: { limit?: number }) { return this.repository.publishDue(body.limit); }
   @Get('outbox') outbox(@Query('limit') limit = '25') { return this.repository.claimOutbox(Number(limit)); }
   @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean }) { return this.repository.completeOutbox(eventId, body.success !== false); }
 }
 
-@Module({ controllers: [ContentController], providers: [ContentRepository] })
+@Module({ controllers: [ContentController], providers: [ContentRepository,
+  { provide: ScheduledPostRunner, useFactory: (repository: ContentRepository) => new ScheduledPostRunner(repository,
+    process.env.CONTENT_DATABASE_URL ?? 'postgresql://schoolconnect:schoolconnect@localhost:5432/schoolconnect_content'), inject: [ContentRepository] },
+] })
 class ContentModule {}
-async function bootstrap() { const app = await NestFactory.create(ContentModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.CONTENT_PORT ?? 3103), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); }
+async function bootstrap() { const app = await NestFactory.create(ContentModule); app.enableShutdownHooks(); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.CONTENT_PORT ?? 3103), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); await startOutboxPublisher('content', app.get(ContentRepository)); }
 void bootstrap();

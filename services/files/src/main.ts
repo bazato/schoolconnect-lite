@@ -3,10 +3,12 @@ import { config } from 'dotenv';
 import { resolve } from 'node:path';
 config({ path: resolve(__dirname, '../../../.env') });
 import 'reflect-metadata';
-import { BadRequestException, Body, Controller, Get, Inject, Injectable, Module, NotFoundException, OnModuleDestroy, Param, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Headers, Inject, Injectable, Module, NotFoundException, OnModuleDestroy, Param, Post, Query } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
+import { domainEventTypes } from '@schoolconnect/contracts';
+import { startOutboxPublisher } from '@schoolconnect/eventing';
 import { createMalwareScanner, MalwareScanner, PrivateObjectStorage, S3PrivateObjectStorage } from './storage';
 
 @Injectable()
@@ -33,15 +35,15 @@ class FileRepository implements OnModuleDestroy {
       return { fileId, uploadSessionId, status: 'QUARANTINED', upload: { mode: 'S3_PRESIGNED_PUT', url, objectKey: quarantineKey, expiresInSeconds: Number(process.env.FILE_URL_TTL_SECONDS ?? 300), requiredHeaders: { 'content-type': input.mediaType, 'x-amz-meta-checksumsha256': input.checksumSha256.toLowerCase() } } };
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
-  async completeUpload(uploadSessionId: string, actorUserId: string) {
+  async completeUpload(uploadSessionId: string, actorUserId: string, schoolId: string, correlationId?: string) {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      const session = await client.query<{ file_id: string; quarantine_object_key: string; byte_size: string }>(`UPDATE upload_sessions s SET status='UPLOADED', completed_at=now() FROM file_objects f WHERE s.id=$1 AND s.file_id=f.id AND f.uploaded_by_user_id=$2 AND s.status IN ('CREATED','UPLOADING') AND s.expires_at>now() RETURNING s.file_id,f.quarantine_object_key,f.byte_size`, [uploadSessionId, actorUserId]);
+      const session = await client.query<{ file_id: string; quarantine_object_key: string; byte_size: string }>(`UPDATE upload_sessions s SET status='UPLOADED', completed_at=now() FROM file_objects f WHERE s.id=$1 AND s.file_id=f.id AND f.uploaded_by_user_id=$2 AND s.school_id=$3 AND f.school_id=$3 AND s.status IN ('CREATED','UPLOADING') AND s.expires_at>now() RETURNING s.file_id,f.quarantine_object_key,f.byte_size`, [uploadSessionId, actorUserId, schoolId]);
       if (!session.rowCount) throw new NotFoundException({ code: 'UPLOAD_SESSION_NOT_FOUND_OR_EXPIRED' });
       await this.storage.verifyUpload(session.rows[0]!.quarantine_object_key, Number(session.rows[0]!.byte_size));
       await client.query(`UPDATE file_objects SET processing_status='SCANNING' WHERE id=$1`, [session.rows[0]!.file_id]);
-      await client.query(`INSERT INTO outbox_events (event_type, aggregate_id, payload) VALUES ('files.upload-completed.v1',$1,$2)`, [session.rows[0]!.file_id, { fileId: session.rows[0]!.file_id }]);
+      await client.query(`INSERT INTO outbox_events (event_type, aggregate_id, payload) VALUES ($1,$2,$3)`, [domainEventTypes.fileUploadCompleted, session.rows[0]!.file_id, { fileId: session.rows[0]!.file_id, schoolId, actorUserId, correlationId }]);
       await client.query('COMMIT');
       const fileId = session.rows[0]!.file_id;
       const privateKey = `${fileId.slice(0, 2)}/${fileId}`;
@@ -66,6 +68,16 @@ class FileRepository implements OnModuleDestroy {
     if (!allowed) throw new BadRequestException({ code: 'FILE_NOT_READY_OR_UNAUTHORIZED' });
     return { mode: 'S3_PRESIGNED_GET', url: await this.storage.createDownloadUrl(file.rows[0]!.private_object_key!), expiresInSeconds: Number(process.env.FILE_URL_TTL_SECONDS ?? 60), cacheControl: 'private, no-store' };
   }
+  async claimOutbox(limit: number) {
+    const result = await this.pool.query(`UPDATE outbox_events SET attempt_count=attempt_count+1,available_at=now()+interval '30 seconds'
+      WHERE id IN (SELECT id FROM outbox_events WHERE processed_at IS NULL AND available_at<=now() ORDER BY occurred_at FOR UPDATE SKIP LOCKED LIMIT $1)
+      RETURNING id,event_type AS "eventType",aggregate_id AS "aggregateId",payload,occurred_at AS "occurredAt"`, [Math.min(Math.max(limit, 1), 100)]);
+    return result.rows;
+  }
+  async completeOutbox(eventId: string, success: boolean) {
+    await this.pool.query(success ? `UPDATE outbox_events SET processed_at=now() WHERE id=$1` : `UPDATE outbox_events SET available_at=now()+interval '1 minute' WHERE id=$1 AND processed_at IS NULL`, [eventId]);
+    return { completed: success };
+  }
   async onModuleDestroy() { await this.pool.end(); }
 }
 
@@ -74,13 +86,15 @@ class FileController {
   constructor(@Inject(FileRepository) private readonly repository: FileRepository) {}
   @Get('health') async health() { return { status: 'ok', service: 'files', database: await this.repository.health() }; }
   @Post('uploads') upload(@Body() body: Parameters<FileRepository['createUpload']>[0]) { return this.repository.createUpload(body); }
-  @Post('uploads/:uploadSessionId/complete') complete(@Param('uploadSessionId') id: string, @Body() body: { actorUserId: string }) { return this.repository.completeUpload(id, body.actorUserId); }
+  @Post('uploads/:uploadSessionId/complete') complete(@Param('uploadSessionId') id: string, @Body() body: { actorUserId: string; schoolId: string }, @Headers('x-correlation-id') correlationId?: string) { return this.repository.completeUpload(id, body.actorUserId, body.schoolId, correlationId); }
   @Post('files/:fileId/access') access(@Param('fileId') fileId: string, @Body() body: Parameters<FileRepository['access']>[1]) { return this.repository.access(fileId, body); }
+  @Get('outbox') outbox(@Query('limit') limit = '25') { return this.repository.claimOutbox(Number(limit)); }
+  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean }) { return this.repository.completeOutbox(eventId, body.success !== false); }
 }
 @Module({ controllers: [FileController], providers: [
   { provide: 'PRIVATE_OBJECT_STORAGE', useFactory: () => new S3PrivateObjectStorage() },
   { provide: 'MALWARE_SCANNER', useFactory: () => createMalwareScanner() },
   { provide: FileRepository, useFactory: (storage: PrivateObjectStorage, scanner: MalwareScanner) => new FileRepository(storage, scanner), inject: ['PRIVATE_OBJECT_STORAGE', 'MALWARE_SCANNER'] },
 ] }) class FileModule {}
-async function bootstrap() { const app = await NestFactory.create(FileModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.FILE_PORT ?? 3105), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); }
+async function bootstrap() { const app = await NestFactory.create(FileModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.FILE_PORT ?? 3105), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); await startOutboxPublisher('files', app.get(FileRepository)); }
 void bootstrap();

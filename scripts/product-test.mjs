@@ -9,6 +9,15 @@ const call = async (path, { token, expected = 200, ...init } = {}) => {
   return body;
 };
 const send = (path, token, body, method = 'POST') => call(path, { token, method, body: JSON.stringify(body), expected: [200, 201] });
+const eventually = async (check, timeoutMs = 10_000) => {
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    const result = await check();
+    if (result) return result;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  throw new Error('EVENT_PROJECTION_TIMEOUT');
+};
 const login = async (phoneE164, invitationCode) => {
   let challenge;
   try { challenge = await send('/auth/otp/request', undefined, { phoneE164, invitationCode }); }
@@ -41,8 +50,8 @@ const secondParent = await login(`+96653${suffix}`, secondParentProvision.parent
 console.log('3/9 grade publishing, read report and archive');
 const gradePost = await send('/posts', teacher.accessToken, { classId: firstClass.id, postType: 'ANNOUNCEMENT', title: 'Grade announcement', body: 'For the entire grade', audienceType: 'GRADE', urgent: false, idempotencyKey: randomUUID() });
 assert.equal(gradePost.recipientCount, 2);
-assert.equal((await call(`/timeline/${firstParentProvision.student.studentId}`, { token: firstParent.accessToken })).some((item) => item.id === gradePost.id), true);
-assert.equal((await call(`/timeline/${secondParentProvision.student.studentId}`, { token: secondParent.accessToken })).some((item) => item.id === gradePost.id), true);
+await eventually(async () => (await call(`/timeline/${firstParentProvision.student.studentId}`, { token: firstParent.accessToken })).some((item) => item.id === gradePost.id));
+await eventually(async () => (await call(`/timeline/${secondParentProvision.student.studentId}`, { token: secondParent.accessToken })).some((item) => item.id === gradePost.id));
 await send(`/posts/${gradePost.id}/view`, firstParent.accessToken, { studentId: firstParentProvision.student.studentId });
 const gradeDetail = await call(`/posts/${gradePost.id}?studentId=${firstParentProvision.student.studentId}`, { token: firstParent.accessToken });
 assert.equal(gradeDetail.title, 'Grade announcement');
@@ -52,7 +61,7 @@ assert.equal(report.recipientCount, 2);
 assert.equal(report.viewedCount, 1);
 await send(`/posts/${gradePost.id}/archive`, teacher.accessToken, { expectedRevisionNumber: 1 });
 await send(`/posts/${gradePost.id}/archive`, teacher.accessToken, { expectedRevisionNumber: 1 });
-assert.equal((await call(`/timeline/${firstParentProvision.student.studentId}`, { token: firstParent.accessToken })).some((item) => item.id === gradePost.id), false);
+await eventually(async () => !(await call(`/timeline/${firstParentProvision.student.studentId}`, { token: firstParent.accessToken })).some((item) => item.id === gradePost.id));
 const urgentPayload = { classId: firstClass.id,postType: 'ANNOUNCEMENT',title: 'Urgent notice',body: 'Granted urgent notice',audienceType: 'CLASS',urgent: true,idempotencyKey: randomUUID() };
 await call('/posts', { token: teacher.accessToken,method: 'POST',body: JSON.stringify(urgentPayload),expected: 403 });
 await send('/admin/configuration',admin.accessToken,{ urgentAnnouncementsEnabled: true },'PATCH');
@@ -66,11 +75,11 @@ await send(`/drafts/${draft.id}/delete`,teacher.accessToken,{});
 console.log('4/9 scheduled announcement');
 const scheduled = await send('/posts', teacher.accessToken, { classId: firstClass.id, postType: 'ANNOUNCEMENT', title: 'Scheduled notice', body: 'Published by worker', audienceType: 'CLASS', urgent: false, scheduledFor: new Date(Date.now() + 5000).toISOString(), idempotencyKey: randomUUID() });
 assert.equal(scheduled.status, 'SCHEDULED');
-assert.ok((await call('/teacher-posts',{ token:teacher.accessToken })).find((item)=>item.id===scheduled.id).scheduledFor);
+await eventually(async () => (await call('/teacher-posts',{ token:teacher.accessToken })).find((item)=>item.id===scheduled.id)?.scheduledFor);
 const scheduledRevision = await send(`/posts/${scheduled.id}/revisions`,teacher.accessToken,{ expectedRevisionNumber:1,title:'Edited scheduled notice',body:'Edited before release',scheduledFor:new Date(Date.now()+6000).toISOString() });
 assert.equal(scheduledRevision.status,'SCHEDULED');
 await new Promise((resolve) => setTimeout(resolve, 8000));
-assert.equal((await call(`/timeline/${firstParentProvision.student.studentId}`, { token: firstParent.accessToken })).find((item) => item.id === scheduled.id)?.title, 'Edited scheduled notice');
+await eventually(async () => (await call(`/timeline/${firstParentProvision.student.studentId}`, { token: firstParent.accessToken })).find((item) => item.id === scheduled.id)?.title === 'Edited scheduled notice');
 
 console.log('5/9 CSV import and student/guardian lifecycle');
 const csv = `studentDisplayName,admissionNumber,classCode,parentDisplayName,parentPhoneE164,relationship\nImported Student,IMP-${suffix},G1A,Imported Parent,+96654${suffix},Parent`;
@@ -119,8 +128,7 @@ assert.equal((await call('/me/teaching-scope', { token: teacher.accessToken }))[
 const summary = await call(`/admin/reports/summary?fromDate=${date}&toDate=${date}`, { token: admin.accessToken });
 assert.ok(summary.studentCount >= 3);
 assert.ok(Array.isArray(summary.attendance));
-const adminAudit = await call('/admin/reports/audit', { token: admin.accessToken });
-assert.ok(adminAudit.some((item) => item.action.startsWith('ADMIN_')));
+await eventually(async () => (await call('/admin/reports/audit', { token: admin.accessToken })).some((item) => item.action === 'school.teacher-assignment-updated.v1'));
 const platformReport = await call('/admin/reports/platform-summary', { token: owner.accessToken });
 assert.ok(platformReport.schools.some((item) => item.schoolId === school.school.id && item.activeStudentCount >= 3 && item.activeTeacherCount >= 1));
 await call('/admin/reports/platform-summary', { token: admin.accessToken, expected: 403 });

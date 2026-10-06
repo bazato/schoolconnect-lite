@@ -8,6 +8,7 @@ const databases = {
   schoolconnect_files: ['file_objects', 'upload_sessions', 'file_access_events'],
   schoolconnect_notifications: ['notifications', 'device_tokens', 'delivery_attempts'],
   schoolconnect_audit: ['audit_events', 'consumer_checkpoints'],
+  schoolconnect_read: ['consumed_events', 'read_posts', 'read_post_recipients', 'read_attendance'],
 };
 
 for (const [database, requiredTables] of Object.entries(databases)) {

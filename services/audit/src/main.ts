@@ -6,6 +6,8 @@ import 'reflect-metadata';
 import { Body, Controller, Get, Inject, Injectable, Module, OnModuleDestroy, Post, Query } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { Pool } from 'pg';
+import { startEventConsumer } from '@schoolconnect/eventing';
+import { auditFromEvent } from './event-consumer';
 
 @Injectable()
 class AuditRepository implements OnModuleDestroy {
@@ -38,5 +40,5 @@ class AuditController {
   @Get('audit-events') list(@Query('schoolId') schoolId?: string, @Query('resourceType') resourceType?: string, @Query('resourceId') resourceId?: string) { return this.repository.list(schoolId ?? null, resourceType, resourceId); }
 }
 @Module({ controllers: [AuditController], providers: [AuditRepository] }) class AuditModule {}
-async function bootstrap() { const app = await NestFactory.create(AuditModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.AUDIT_PORT ?? 3107), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); }
+async function bootstrap() { const app = await NestFactory.create(AuditModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.AUDIT_PORT ?? 3107), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); const repository = app.get(AuditRepository); await startEventConsumer('schoolconnect-audit-v2', async (event) => { const audit = auditFromEvent(event); if (audit) await repository.append(audit); }); }
 void bootstrap();

@@ -109,6 +109,31 @@ importers:
         specifier: 3.2.4
         version: 3.2.4(@types/node@24.3.0)(jiti@2.7.0)(lightningcss@1.33.0)(supports-color@8.1.1)(terser@5.51.2)(tsx@4.20.5)(yaml@2.9.1)
 
+  packages/eventing:
+    dependencies:
+      kafkajs:
+        specifier: 2.2.4
+        version: 2.2.4
+    devDependencies:
+      '@eslint/js':
+        specifier: 9.35.0
+        version: 9.35.0
+      '@types/node':
+        specifier: 24.3.0
+        version: 24.3.0
+      eslint:
+        specifier: 9.35.0
+        version: 9.35.0(jiti@2.7.0)(supports-color@8.1.1)
+      typescript:
+        specifier: 5.9.2
+        version: 5.9.2
+      typescript-eslint:
+        specifier: 8.70.0
+        version: 8.70.0(eslint@9.35.0(jiti@2.7.0)(supports-color@8.1.1))(supports-color@8.1.1)(typescript@5.9.2)
+      vitest:
+        specifier: 3.2.4
+        version: 3.2.4(@types/node@24.3.0)(jiti@2.7.0)(lightningcss@1.33.0)(supports-color@8.1.1)(terser@5.51.2)(tsx@4.20.5)(yaml@2.9.1)
+
   services/api:
     dependencies:
       '@nestjs/common':
@@ -184,6 +209,12 @@ importers:
       '@nestjs/platform-express':
         specifier: 12.0.3
         version: 12.0.3(@nestjs/common@12.0.3(class-transformer@0.5.1)(class-validator@0.14.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/core@12.0.3)(supports-color@8.1.1)
+      '@schoolconnect/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@schoolconnect/eventing':
+        specifier: workspace:*
+        version: link:../../packages/eventing
       dotenv:
         specifier: 17.2.2
         version: 17.2.2
@@ -233,6 +264,12 @@ importers:
       '@nestjs/platform-express':
         specifier: 12.0.3
         version: 12.0.3(@nestjs/common@12.0.3(class-transformer@0.5.1)(class-validator@0.14.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/core@12.0.3)(supports-color@8.1.1)
+      '@schoolconnect/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@schoolconnect/eventing':
+        specifier: workspace:*
+        version: link:../../packages/eventing
       dotenv:
         specifier: 17.2.2
         version: 17.2.2
@@ -271,6 +308,49 @@ importers:
         specifier: 3.2.4
         version: 3.2.4(@types/node@24.3.0)(jiti@2.7.0)(lightningcss@1.33.0)(supports-color@8.1.1)(terser@5.51.2)(tsx@4.20.5)(yaml@2.9.1)
 
+  services/authorization:
+    dependencies:
+      '@nestjs/common':
+        specifier: 12.0.3
+        version: 12.0.3(class-transformer@0.5.1)(class-validator@0.14.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1)
+      '@nestjs/core':
+        specifier: 12.0.3
+        version: 12.0.3(@nestjs/common@12.0.3(class-transformer@0.5.1)(class-validator@0.14.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/platform-express@12.0.3)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/platform-express':
+        specifier: 12.0.3
+        version: 12.0.3(@nestjs/common@12.0.3(class-transformer@0.5.1)(class-validator@0.14.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/core@12.0.3)(supports-color@8.1.1)
+      dotenv:
+        specifier: 17.2.2
+        version: 17.2.2
+      reflect-metadata:
+        specifier: 0.2.2
+        version: 0.2.2
+      rxjs:
+        specifier: 7.8.2
+        version: 7.8.2
+    devDependencies:
+      '@eslint/js':
+        specifier: 9.35.0
+        version: 9.35.0
+      '@types/node':
+        specifier: 24.3.0
+        version: 24.3.0
+      eslint:
+        specifier: 9.35.0
+        version: 9.35.0(jiti@2.7.0)(supports-color@8.1.1)
+      tsx:
+        specifier: 4.20.5
+        version: 4.20.5
+      typescript:
+        specifier: 5.9.2
+        version: 5.9.2
+      typescript-eslint:
+        specifier: 8.70.0
+        version: 8.70.0(eslint@9.35.0(jiti@2.7.0)(supports-color@8.1.1))(supports-color@8.1.1)(typescript@5.9.2)
+      vitest:
+        specifier: 3.2.4
+        version: 3.2.4(@types/node@24.3.0)(jiti@2.7.0)(lightningcss@1.33.0)(supports-color@8.1.1)(terser@5.51.2)(tsx@4.20.5)(yaml@2.9.1)
+
   services/content:
     dependencies:
       '@nestjs/common':
@@ -282,6 +362,12 @@ importers:
       '@nestjs/platform-express':
         specifier: 12.0.3
         version: 12.0.3(@nestjs/common@12.0.3(class-transformer@0.5.1)(class-validator@0.14.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/core@12.0.3)(supports-color@8.1.1)
+      '@schoolconnect/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@schoolconnect/eventing':
+        specifier: workspace:*
+        version: link:../../packages/eventing
       dotenv:
         specifier: 17.2.2
         version: 17.2.2
@@ -337,6 +423,12 @@ importers:
       '@nestjs/platform-express':
         specifier: 12.0.3
         version: 12.0.3(@nestjs/common@12.0.3(class-transformer@0.5.1)(class-validator@0.14.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/core@12.0.3)(supports-color@8.1.1)
+      '@schoolconnect/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@schoolconnect/eventing':
+        specifier: workspace:*
+        version: link:../../packages/eventing
       dotenv:
         specifier: 17.2.2
         version: 17.2.2
@@ -386,6 +478,12 @@ importers:
       '@nestjs/platform-express':
         specifier: 12.0.3
         version: 12.0.3(@nestjs/common@12.0.3(class-transformer@0.5.1)(class-validator@0.14.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/core@12.0.3)(supports-color@8.1.1)
+      '@schoolconnect/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@schoolconnect/eventing':
+        specifier: workspace:*
+        version: link:../../packages/eventing
       dotenv:
         specifier: 17.2.2
         version: 17.2.2
@@ -435,6 +533,67 @@ importers:
       '@nestjs/platform-express':
         specifier: 12.0.3
         version: 12.0.3(@nestjs/common@12.0.3(class-transformer@0.5.1)(class-validator@0.14.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/core@12.0.3)(supports-color@8.1.1)
+      '@schoolconnect/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@schoolconnect/eventing':
+        specifier: workspace:*
+        version: link:../../packages/eventing
+      dotenv:
+        specifier: 17.2.2
+        version: 17.2.2
+      pg:
+        specifier: 8.16.3
+        version: 8.16.3
+      reflect-metadata:
+        specifier: 0.2.2
+        version: 0.2.2
+      rxjs:
+        specifier: 7.8.2
+        version: 7.8.2
+    devDependencies:
+      '@eslint/js':
+        specifier: 9.35.0
+        version: 9.35.0
+      '@types/node':
+        specifier: 24.3.0
+        version: 24.3.0
+      '@types/pg':
+        specifier: 8.15.5
+        version: 8.15.5
+      eslint:
+        specifier: 9.35.0
+        version: 9.35.0(jiti@2.7.0)(supports-color@8.1.1)
+      tsx:
+        specifier: 4.20.5
+        version: 4.20.5
+      typescript:
+        specifier: 5.9.2
+        version: 5.9.2
+      typescript-eslint:
+        specifier: 8.70.0
+        version: 8.70.0(eslint@9.35.0(jiti@2.7.0)(supports-color@8.1.1))(supports-color@8.1.1)(typescript@5.9.2)
+      vitest:
+        specifier: 3.2.4
+        version: 3.2.4(@types/node@24.3.0)(jiti@2.7.0)(lightningcss@1.33.0)(supports-color@8.1.1)(terser@5.51.2)(tsx@4.20.5)(yaml@2.9.1)
+
+  services/read-model:
+    dependencies:
+      '@nestjs/common':
+        specifier: 12.0.3
+        version: 12.0.3(class-transformer@0.5.1)(class-validator@0.14.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1)
+      '@nestjs/core':
+        specifier: 12.0.3
+        version: 12.0.3(@nestjs/common@12.0.3(class-transformer@0.5.1)(class-validator@0.14.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/platform-express@12.0.3)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/platform-express':
+        specifier: 12.0.3
+        version: 12.0.3(@nestjs/common@12.0.3(class-transformer@0.5.1)(class-validator@0.14.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/core@12.0.3)(supports-color@8.1.1)
+      '@schoolconnect/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@schoolconnect/eventing':
+        specifier: workspace:*
+        version: link:../../packages/eventing
       dotenv:
         specifier: 17.2.2
         version: 17.2.2
@@ -484,6 +643,12 @@ importers:
       '@nestjs/platform-express':
         specifier: 12.0.3
         version: 12.0.3(@nestjs/common@12.0.3(class-transformer@0.5.1)(class-validator@0.14.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/core@12.0.3)(supports-color@8.1.1)
+      '@schoolconnect/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@schoolconnect/eventing':
+        specifier: workspace:*
+        version: link:../../packages/eventing
       dotenv:
         specifier: 17.2.2
         version: 17.2.2
@@ -506,34 +671,6 @@ importers:
       '@types/pg':
         specifier: 8.15.5
         version: 8.15.5
-      eslint:
-        specifier: 9.35.0
-        version: 9.35.0(jiti@2.7.0)(supports-color@8.1.1)
-      tsx:
-        specifier: 4.20.5
-        version: 4.20.5
-      typescript:
-        specifier: 5.9.2
-        version: 5.9.2
-      typescript-eslint:
-        specifier: 8.70.0
-        version: 8.70.0(eslint@9.35.0(jiti@2.7.0)(supports-color@8.1.1))(supports-color@8.1.1)(typescript@5.9.2)
-      vitest:
-        specifier: 3.2.4
-        version: 3.2.4(@types/node@24.3.0)(jiti@2.7.0)(lightningcss@1.33.0)(supports-color@8.1.1)(terser@5.51.2)(tsx@4.20.5)(yaml@2.9.1)
-
-  services/workers:
-    dependencies:
-      dotenv:
-        specifier: 17.2.2
-        version: 17.2.2
-    devDependencies:
-      '@eslint/js':
-        specifier: 9.35.0
-        version: 9.35.0
-      '@types/node':
-        specifier: 24.3.0
-        version: 24.3.0
       eslint:
         specifier: 9.35.0
         version: 9.35.0(jiti@2.7.0)(supports-color@8.1.1)
@@ -3213,6 +3350,10 @@ packages:
     resolution: {integrity: sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg==}
     engines: {node: '>=6'}
     hasBin: true
+
+  kafkajs@2.2.4:
+    resolution: {integrity: sha512-j/YeapB1vfPT2iOIUn/vxdyKEuhuY2PxMBvf5JWux6iSaukAccrMtXEY/Lb7OvavDhOWME589bpLrEdnVHjfjA==}
+    engines: {node: '>=14.0.0'}
 
   keyv@4.5.4:
     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
@@ -7643,6 +7784,8 @@ snapshots:
   json-stable-stringify-without-jsonify@1.0.1: {}
 
   json5@2.2.3: {}
+
+  kafkajs@2.2.4: {}
 
   keyv@4.5.4:
     dependencies:

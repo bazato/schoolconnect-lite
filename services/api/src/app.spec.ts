@@ -2,6 +2,7 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppModule, ServiceClient } from './app.module';
+import { requestContextMiddleware } from './request-context';
 import type { INestApplication } from '@nestjs/common';
 
 const parent = { userId: 'parent-1', displayName: 'Parent', membershipId: 'membership-parent', schoolId: 'school-1', role: 'PARENT', sessionId: 'session-parent' };
@@ -28,6 +29,9 @@ describe('API gateway authorization and service boundaries', () => {
       if (service === 'school' && path === '/internal/v1/schools/school-1') return Promise.resolve({ id: 'school-1', active: true });
       if (service === 'school' && path.endsWith('/classes') && init?.method === 'POST') return Promise.resolve({ id: 'class-created', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027' });
       if (service === 'school' && path.endsWith('/classes')) return Promise.resolve([{ id: 'class-1', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027' }]);
+      if (service === 'school' && path.endsWith('/roster')) return Promise.resolve([{ id: 'student-1', displayName: 'Child One' }]);
+      if (service === 'school' && path.endsWith('/children')) return Promise.resolve([{ id: 'student-1', displayName: 'Child One' }]);
+      if (service === 'school' && path.endsWith('/scope')) return Promise.resolve([{ classId: 'class-1' }]);
       if (service === 'school' && path.endsWith('/teacher-assignments')) return Promise.resolve({ assignmentId: 'assignment-1', classId: 'class-1', subjectCode: 'MATH' });
       if (service === 'identity' && path === '/internal/v1/provisioning/accounts') {
         const body = JSON.parse(String(init?.body)) as { role: string };
@@ -35,9 +39,18 @@ describe('API gateway authorization and service boundaries', () => {
       }
       if (service === 'school' && path.includes('/authorization/guardian')) return Promise.resolve({ allowed: !path.includes('student-denied') });
       if (service === 'school' && path.includes('/authorization/teacher')) return Promise.resolve({ allowed: !path.includes('class-denied') });
+      if (service === 'authorization' && path === '/internal/v1/decisions') {
+        const body = JSON.parse(String(init?.body)) as { classId?: string; studentId?: string };
+        return Promise.resolve({ allowed: body.classId !== 'class-denied' && body.studentId !== 'student-denied', reason: 'TEST_POLICY' });
+      }
+      if (service === 'authorization' && path === '/internal/v1/decisions/route') return Promise.resolve({ allowed: true, reason: 'TEST_POLICY' });
       if (service === 'school' && path.includes('/audience-recipients')) return Promise.resolve([{ studentId: 'student-1', guardianUserId: 'parent-1', snapshot: {} }]);
-      if (service === 'content' && path.startsWith('/internal/v1/timeline')) return Promise.resolve([{ id: 'post-1', title: 'Homework' }]);
-      if (service === 'content' && path.startsWith('/internal/v1/teacher-posts')) return Promise.resolve([{ id: 'post-2', postType: 'ANNOUNCEMENT', title: 'School closed' }]);
+      if (service === 'read' && path.startsWith('/internal/v1/timeline')) return Promise.resolve([{ id: 'post-1', title: 'Homework' }]);
+      if (service === 'read' && path.startsWith('/internal/v1/teacher-posts')) return Promise.resolve([{ id: 'post-2', postType: 'ANNOUNCEMENT', title: 'School closed' }]);
+      if (service === 'content' && path.startsWith('/internal/v1/drafts')) return Promise.resolve([{ id: 'draft-1' }]);
+      if (service === 'attendance' && path.startsWith('/internal/v1/students/')) return Promise.resolve([{ id: 'event-1', attendanceStatus: 'PRESENT' }]);
+      if (service === 'attendance' && path.startsWith('/internal/v1/attendance/projection-consistency')) return Promise.resolve({ consistent: true, mismatches: [] });
+      if (service === 'notifications' && path.startsWith('/internal/v1/notifications?')) return Promise.resolve([{ id: 'notice-1' }]);
       if (service === 'content' && path === '/internal/v1/posts') return Promise.resolve({ id: 'post-created', status: 'PUBLISHED' });
       if (service === 'content' && path.startsWith('/internal/v1/posts/post-owned?')) return Promise.resolve({ id: 'post-owned', classId: 'class-1', postType: 'ANNOUNCEMENT', authorMembershipId: 'membership-teacher' });
       if (service === 'content' && path.startsWith('/internal/v1/posts/post-other?')) return Promise.resolve({ id: 'post-other', classId: 'class-1', postType: 'ANNOUNCEMENT', authorMembershipId: 'another-teacher' });
@@ -48,6 +61,7 @@ describe('API gateway authorization and service boundaries', () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(ServiceClient).useValue(serviceClient).compile();
     app = moduleRef.createNestApplication();
+    app.use(requestContextMiddleware);
     app.setGlobalPrefix('api/v1');
     await app.init();
   });
@@ -55,7 +69,7 @@ describe('API gateway authorization and service boundaries', () => {
   it('aggregates service health without authentication', async () => {
     const response = await request(app.getHttpServer()).get('/api/v1/health').expect(200);
     expect(response.body.status).toBe('ok');
-    expect(response.body.services).toHaveLength(7);
+    expect(response.body.services).toHaveLength(9);
   });
 
   it('requires authentication for protected routes', async () => {
@@ -85,17 +99,71 @@ describe('API gateway authorization and service boundaries', () => {
       membershipId: 'membership-parent',
       sessionId: 'session-teacher',
     });
+    expect(serviceClient.request.mock.calls.some((call) => call[0] === 'audit' && call[1] === '/internal/v1/audit-events')).toBe(false);
   });
 
   it('authorizes the parent-child relationship before fetching a timeline', async () => {
     const response = await request(app.getHttpServer()).get('/api/v1/timeline/student-1').set('Authorization', 'Bearer parent-token').expect(200);
     expect(response.body[0].id).toBe('post-1');
-    expect(serviceClient.request.mock.calls.some((call) => call[0] === 'school' && call[1].includes('/authorization/guardian'))).toBe(true);
+    expect(serviceClient.request.mock.calls.some((call) => call[0] === 'authorization' && call[1] === '/internal/v1/decisions')).toBe(true);
   });
 
   it('denies an unrelated child before calling content', async () => {
     await request(app.getHttpServer()).get('/api/v1/timeline/student-denied').set('Authorization', 'Bearer parent-token').expect(403);
     expect(serviceClient.request.mock.calls.some((call) => call[0] === 'content')).toBe(false);
+  });
+
+  it('builds one parent mobile payload only after guardian authorization', async () => {
+    const response = await request(app.getHttpServer()).get('/api/v1/bff/parent/home?studentId=student-1')
+      .set('Authorization', 'Bearer parent-token').expect(200);
+    expect(response.body).toMatchObject({ studentId: 'student-1', children: [{ id: 'student-1' }], timeline: [{ id: 'post-1' }], attendance: [{ id: 'event-1' }], notifications: [{ id: 'notice-1' }] });
+    expect(serviceClient.request.mock.calls.some((call) => call[0] === 'authorization' && call[1] === '/internal/v1/decisions')).toBe(true);
+    expect(serviceClient.request.mock.calls.some((call) => call[0] === 'read' && call[1].includes('schoolId=school-1') && call[1].includes('studentId=student-1'))).toBe(true);
+  });
+
+  it('does not query child data when parent-child authorization is denied', async () => {
+    await request(app.getHttpServer()).get('/api/v1/bff/parent/home?studentId=student-denied')
+      .set('Authorization', 'Bearer parent-token').expect(403);
+    expect(serviceClient.request.mock.calls.some((call) => call[0] === 'content' || call[0] === 'attendance')).toBe(false);
+  });
+
+  it('exposes teacher and admin BFF payloads only to matching roles', async () => {
+    const teacherHome = await request(app.getHttpServer()).get('/api/v1/bff/teacher/home')
+      .set('Authorization', 'Bearer teacher-token').expect(200);
+    expect(teacherHome.body).toMatchObject({ teachingScope: [{ classId: 'class-1' }], posts: [{ id: 'post-2' }], drafts: [{ id: 'draft-1' }] });
+    await request(app.getHttpServer()).get('/api/v1/bff/teacher/home').set('Authorization', 'Bearer parent-token').expect(403);
+    const adminHome = await request(app.getHttpServer()).get('/api/v1/bff/admin/home')
+      .set('Authorization', 'Bearer admin-token').expect(200);
+    expect(adminHome.body.classes).toEqual([{ id: 'class-1', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027' }]);
+    await request(app.getHttpServer()).get('/api/v1/bff/admin/home').set('Authorization', 'Bearer teacher-token').expect(403);
+  });
+
+  it('scopes attendance projection checks to the admin membership school', async () => {
+    const response = await request(app.getHttpServer()).get('/api/v1/admin/attendance/projection-consistency')
+      .set('Authorization', 'Bearer admin-token').expect(200);
+    expect(response.body).toEqual({ consistent: true, mismatches: [] });
+    expect(serviceClient.request).toHaveBeenCalledWith('attendance', '/internal/v1/attendance/projection-consistency?schoolId=school-1');
+    await request(app.getHttpServer()).get('/api/v1/admin/attendance/projection-consistency')
+      .set('Authorization', 'Bearer teacher-token').expect(403);
+  });
+
+  it('requires school-admin confirmation for a tenant-scoped attendance rebuild', async () => {
+    await request(app.getHttpServer()).post('/api/v1/admin/attendance/rebuild-projection')
+      .set('Authorization', 'Bearer teacher-token').send({ confirmation: 'REBUILD_FROM_EVENTS' }).expect(403);
+    await request(app.getHttpServer()).post('/api/v1/admin/attendance/rebuild-projection')
+      .set('Authorization', 'Bearer admin-token').send({}).expect(400);
+    await request(app.getHttpServer()).post('/api/v1/admin/attendance/rebuild-projection')
+      .set('Authorization', 'Bearer admin-token').send({ confirmation: 'REBUILD_FROM_EVENTS', schoolId: 'other-school' }).expect(201);
+    const downstream = serviceClient.request.mock.calls.find((call) => call[0] === 'attendance' && call[1] === '/internal/v1/attendance/rebuild-projection');
+    expect(JSON.parse(String(downstream?.[2]?.body))).toMatchObject({ schoolId: 'school-1', actorMembershipId: 'membership-admin' });
+  });
+
+  it('snapshots guardian recipients for an attendance event', async () => {
+    await request(app.getHttpServer()).post('/api/v1/attendance/batches').set('Authorization', 'Bearer teacher-token')
+      .send({ classId: 'class-1', attendanceDate: '2026-10-05', expectedVersion: 0, idempotencyKey: 'key-1',
+        rows: [{ studentId: 'student-1', status: 'ABSENT' }], notificationRecipients: [{ studentId: 'student-1', guardianUserId: 'untrusted-user' }] }).expect(201);
+    const downstream = serviceClient.request.mock.calls.find((call) => call[0] === 'attendance' && call[1] === '/internal/v1/attendance/batches');
+    expect(JSON.parse(String(downstream?.[2]?.body)).notificationRecipients).toEqual([{ studentId: 'student-1', guardianUserId: 'parent-1' }]);
   });
 
   it('checks teacher assignment before publishing', async () => {
@@ -113,7 +181,7 @@ describe('API gateway authorization and service boundaries', () => {
   it('lists persisted posts for the authenticated teacher membership', async () => {
     const response = await request(app.getHttpServer()).get('/api/v1/teacher-posts').set('Authorization', 'Bearer teacher-token').expect(200);
     expect(response.body[0]).toMatchObject({ postType: 'ANNOUNCEMENT', title: 'School closed' });
-    expect(serviceClient.request).toHaveBeenCalledWith('content', expect.stringContaining('authorMembershipId=membership-teacher'));
+    expect(serviceClient.request).toHaveBeenCalledWith('read', expect.stringContaining('authorMembershipId=membership-teacher'));
   });
 
   it('does not expose the teacher publishing feed to a parent', async () => {
@@ -127,6 +195,23 @@ describe('API gateway authorization and service boundaries', () => {
     const forwarded = JSON.parse(String(downstream?.[2]?.body)) as { recipients: Array<{ studentId: string }>; authorMembershipId: string };
     expect(forwarded.recipients).toEqual([{ studentId: 'student-1', guardianUserId: 'parent-1', snapshot: {} }]);
     expect(forwarded.authorMembershipId).toBe('membership-teacher');
+  });
+
+  it('carries one correlation ID into the post outbox request without trusting a client school ID', async () => {
+    const response = await request(app.getHttpServer()).post('/api/v1/posts')
+      .set('Authorization', 'Bearer teacher-token').set('x-correlation-id', 'trace-post-123')
+      .send({ classId: 'class-1', postType: 'ANNOUNCEMENT', title: 'Reminder', body: 'Bring a notebook',
+        audienceType: 'CLASS', idempotencyKey: 'trace-key', schoolId: 'other-school' }).expect(201);
+    expect(response.headers['x-correlation-id']).toBe('trace-post-123');
+    const downstream = serviceClient.request.mock.calls.find((call) => call[0] === 'content' && call[1] === '/internal/v1/posts');
+    expect(JSON.parse(String(downstream?.[2]?.body))).toMatchObject({ schoolId: 'school-1', correlationId: 'trace-post-123' });
+  });
+
+  it('requires the teacher role and current school context to complete an upload', async () => {
+    await request(app.getHttpServer()).post('/api/v1/files/uploads/upload-1/complete').set('Authorization', 'Bearer parent-token').expect(403);
+    await request(app.getHttpServer()).post('/api/v1/files/uploads/upload-1/complete').set('Authorization', 'Bearer teacher-token').expect(201);
+    const completion = serviceClient.request.mock.calls.find((call) => call[0] === 'files' && call[1] === '/internal/v1/uploads/upload-1/complete');
+    expect(JSON.parse(String(completion?.[2]?.body))).toEqual({ actorUserId: 'teacher-1', schoolId: 'school-1' });
   });
 
   it('lets a teacher create a correction revision for their own post', async () => {

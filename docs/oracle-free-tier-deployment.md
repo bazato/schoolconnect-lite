@@ -1,5 +1,7 @@
 # Oracle Cloud Always Free trial deployment
 
+> Historical account/deployment notes. The current Compose file has no standalone worker and adds Authorization plus the Read Model database/service. It requires an externally reachable Kafka broker. The revised layout has not been verified on OCI or an ARM VM.
+
 ## Status — 2026-09-30
 
 The OCI account has not been created yet, so nothing has been deployed to Oracle and there is no public URL. The user must complete Oracle's registration, payment/identity verification, home-region choice and terms in a regular browser. The in-app browser displays a blank Oracle signup form. Do not request card details, passwords, OTPs or private SSH keys in chat.

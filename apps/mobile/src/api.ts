@@ -248,6 +248,12 @@ export const mobileApi = {
     }
   },
   teachingScope: (session: MobileSession) => scopedRead<ApiTeachingAssignment[]>(session, '/me/teaching-scope'),
+  teacherHome: (session: MobileSession) => scopedRead<{
+    teachingScope: ApiTeachingAssignment[]; posts: ApiTeacherPost[]; drafts: ApiDraft[]; notifications: ApiNotification[];
+  }>(session, '/bff/teacher/home', (value) => ({ ...value,
+    posts: value.posts.filter((item) => item.postType !== 'RESULT'),
+    drafts: value.drafts.filter((item) => item.postType !== 'RESULT'),
+  })),
   teacherPosts: (session: MobileSession) => scopedRead<ApiTeacherPost[]>(session, '/teacher-posts', (items) => items.filter((item) => item.postType !== 'RESULT')),
   timeline: async (session: MobileSession, studentId: string, onNetworkStatus?: (online: boolean) => void) => {
     const membership = session.memberships.find((item) => item.id === session.activeMembershipId) ?? session.memberships[0];

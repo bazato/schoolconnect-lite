@@ -3,11 +3,13 @@ import { config } from 'dotenv';
 import { resolve } from 'node:path';
 config({ path: resolve(__dirname, '../../../.env') });
 import 'reflect-metadata';
-import { BadRequestException, Body, ConflictException, Controller, Get, HttpException, HttpStatus, Inject, Injectable, Module, NotFoundException, OnModuleDestroy, Param, Patch, Post, Query, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, Get, Headers, HttpException, HttpStatus, Inject, Injectable, Module, NotFoundException, OnModuleDestroy, Param, Patch, Post, Query, UnauthorizedException } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
+import { domainEventTypes } from '@schoolconnect/contracts';
 import { AccessTokenValidationError, AuthorizationProvider, createAuthorizationProvider } from './authorization';
+import { startOutboxPublisher } from '@schoolconnect/eventing';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 type MembershipRole = 'PLATFORM_OWNER' | 'SCHOOL_ADMIN' | 'TEACHER' | 'PARENT';
@@ -44,7 +46,10 @@ class IdentityRepository implements OnModuleDestroy {
        ON CONFLICT (scope, subject_hash) DO UPDATE SET
          window_started_at = CASE WHEN auth_rate_limits.window_started_at < now()-($4 * interval '1 second') THEN now() ELSE auth_rate_limits.window_started_at END,
          attempt_count = CASE WHEN auth_rate_limits.window_started_at < now()-($4 * interval '1 second') THEN 1 ELSE auth_rate_limits.attempt_count+1 END,
-         blocked_until = CASE WHEN auth_rate_limits.window_started_at >= now()-($4 * interval '1 second') AND auth_rate_limits.attempt_count+1 > $3 THEN now()+($4 * interval '1 second') ELSE auth_rate_limits.blocked_until END,
+         blocked_until = CASE
+           WHEN auth_rate_limits.window_started_at < now()-($4 * interval '1 second') THEN NULL
+           WHEN auth_rate_limits.attempt_count+1 > $3 THEN now()+($4 * interval '1 second')
+           ELSE auth_rate_limits.blocked_until END,
          updated_at = now()
        RETURNING attempt_count, blocked_until`,
       [scope, subjectHash, maximum, windowSeconds]);
@@ -157,8 +162,11 @@ class IdentityRepository implements OnModuleDestroy {
     return { userId: row.user_id, displayName: row.display_name, membershipId: row.membership_id, schoolId: row.school_id, role: row.role, sessionId: row.session_id };
   }
 
-  async switchMembership(userId: string, membershipId: string, sessionId: string) {
-    const result = await this.pool.query<{
+  async switchMembership(userId: string, membershipId: string, sessionId: string, correlationId?: string) {
+    const client = await this.pool.connect();
+    try {
+    await client.query('BEGIN');
+    const result = await client.query<{
       user_id: string; display_name: string; membership_id: string; school_id: string | null; role: MembershipRole;
     }>(
       `UPDATE auth_sessions s SET active_membership_id=m.id, idle_expires_at=LEAST(s.expires_at,now()+($4 * interval '1 day'))
@@ -171,12 +179,16 @@ class IdentityRepository implements OnModuleDestroy {
     );
     if (!result.rowCount) throw new UnauthorizedException({ code: 'SESSION_OR_MEMBERSHIP_INACTIVE' });
     const row = result.rows[0]!;
+    await client.query(`INSERT INTO outbox_events (event_type,aggregate_id,payload) VALUES ($1,$2,$3)`,
+      [domainEventTypes.roleSwitched,membershipId,{ schoolId:row.school_id,actorUserId:userId,actorMembershipId:membershipId,role:row.role,correlationId }]);
+    await client.query('COMMIT');
     const issued = this.authorization.issueAccessToken({ userId: row.user_id, membershipId: row.membership_id, sessionId });
     return {
       accessToken: issued.accessToken,
       expiresInSeconds: issued.expiresInSeconds,
       activeMembership: { id: row.membership_id, schoolId: row.school_id, role: row.role },
     };
+    } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
 
   async refresh(refreshToken: string, deviceId: string) {
@@ -252,7 +264,7 @@ class IdentityRepository implements OnModuleDestroy {
     return result.rows.map((row) => ({ id: row.id, schoolId: row.school_id, role: row.role }));
   }
 
-  async provisionAccount(input: { schoolId: string | null; role: MembershipRole; phoneE164: string; displayName: string }) {
+  async provisionAccount(input: { schoolId: string | null; role: MembershipRole; phoneE164: string; displayName: string }, actorUserId?: string, correlationId?: string) {
     if (!/^\+[1-9]\d{7,14}$/.test(input.phoneE164) || !input.displayName?.trim() || ((input.role === 'PLATFORM_OWNER') !== (input.schoolId === null))) {
       throw new BadRequestException({ code: 'ACCOUNT_PROVISIONING_VALIDATION_FAILED' });
     }
@@ -283,8 +295,8 @@ class IdentityRepository implements OnModuleDestroy {
       const eventId = randomUUID();
       await client.query(
         `INSERT INTO outbox_events (id, event_type, aggregate_id, payload)
-         VALUES ($1,'identity.account-provisioned.v1',$2,$3)`,
-        [eventId, membershipId, { schoolId: input.schoolId, userId, membershipId, role: input.role }]);
+         VALUES ($1,$2,$3,$4)`,
+        [eventId, domainEventTypes.accountProvisioned, membershipId, { schoolId: input.schoolId, userId, membershipId, role: input.role, actorUserId, correlationId }]);
       await client.query('COMMIT');
       return {
         userId,
@@ -312,7 +324,7 @@ class IdentityRepository implements OnModuleDestroy {
     return result.rows;
   }
 
-  async revokeMembership(membershipId: string) {
+  async revokeMembership(membershipId: string, actorUserId?: string, correlationId?: string) {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -322,6 +334,8 @@ class IdentityRepository implements OnModuleDestroy {
         const row = membership.rows[0]!;
         await client.query(`UPDATE invitations SET revoked_at=COALESCE(revoked_at,now()) WHERE school_id IS NOT DISTINCT FROM $1 AND role=$2 AND accepted_by_user_id IS NULL AND phone_hash=(SELECT encode(digest(phone_e164,'sha256'),'hex') FROM users WHERE id=$3)`, [row.school_id, row.role, row.user_id]);
         await client.query(`UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE active_membership_id=$1`, [membershipId]);
+        await client.query(`INSERT INTO outbox_events (event_type,aggregate_id,payload) VALUES ($1,$2,$3)`,
+          [domainEventTypes.membershipRevoked, membershipId, { schoolId: row.school_id, userId: row.user_id, membershipId, role: row.role, actorUserId, correlationId }]);
       }
       await client.query('COMMIT');
       return { revoked: true };
@@ -334,7 +348,7 @@ class IdentityRepository implements OnModuleDestroy {
     return result.rows;
   }
 
-  async updateMember(membershipId: string, schoolId: string | null, input: { displayName?: string; phoneE164?: string; status?: 'ACTIVE' | 'REVOKED' }) {
+  async updateMember(membershipId: string, schoolId: string | null, input: { displayName?: string; phoneE164?: string; status?: 'ACTIVE' | 'REVOKED' }, actorUserId?: string, correlationId?: string) {
     if (input.displayName !== undefined && (!input.displayName.trim() || input.displayName.trim().length > 160)) throw new BadRequestException({ code: 'MEMBER_NAME_INVALID' });
     if (input.phoneE164 !== undefined && !/^\+[1-9]\d{7,14}$/.test(input.phoneE164)) throw new BadRequestException({ code: 'PHONE_INVALID' });
     const client = await this.pool.connect();
@@ -358,12 +372,15 @@ class IdentityRepository implements OnModuleDestroy {
         await client.query(`UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE active_membership_id=$1`, [membershipId]);
         await client.query(`UPDATE invitations SET revoked_at=COALESCE(revoked_at,now()) WHERE school_id IS NOT DISTINCT FROM $1 AND phone_hash=$2 AND accepted_at IS NULL`, [schoolId, hash(input.phoneE164 ?? user.phone_e164)]);
       }
+      await client.query(`INSERT INTO outbox_events (event_type,aggregate_id,payload) VALUES ($1,$2,$3)`,
+        [domainEventTypes.membershipUpdated, membershipId, { schoolId, userId: user.user_id, membershipId, role: result.rows[0].role,
+          status: result.rows[0].status, changedFields: Object.keys(input).filter((key) => ['displayName', 'phoneE164', 'status'].includes(key)), actorUserId, correlationId }]);
       await client.query('COMMIT');
       return result.rows[0];
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
 
-  async reissueInvitation(membershipId: string, schoolId: string | null, actorUserId?: string) {
+  async reissueInvitation(membershipId: string, schoolId: string | null, actorUserId?: string, correlationId?: string) {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -378,6 +395,9 @@ class IdentityRepository implements OnModuleDestroy {
         `INSERT INTO invitations (school_id,invitation_code_hash,phone_hash,role,expires_at,created_by_user_id)
          VALUES ($1,$2,$3,$4,now()+interval '30 days',$5) RETURNING id,expires_at`,
         [row.school_id, hash(invitationCode), hash(row.phone_e164), row.role, actorUserId ?? null]);
+      await client.query(`INSERT INTO outbox_events (event_type,aggregate_id,payload) VALUES ($1,$2,$3)`,
+        [domainEventTypes.invitationReissued, membershipId, { schoolId: row.school_id, userId: row.user_id,
+          membershipId, invitationId: invitation.rows[0]!.id, role: row.role, actorUserId, correlationId }]);
       await client.query('COMMIT');
       return { invitationId: invitation.rows[0]!.id, invitationCode, expiresAt: invitation.rows[0]!.expires_at };
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
@@ -391,6 +411,18 @@ class IdentityRepository implements OnModuleDestroy {
               count(*) FILTER (WHERE role='SCHOOL_ADMIN' AND status='ACTIVE')::integer AS "activeAdminCount"
        FROM memberships WHERE school_id IS NOT NULL GROUP BY school_id`);
     return result.rows;
+  }
+
+  async claimOutbox(limit: number) {
+    const result = await this.pool.query(`UPDATE outbox_events SET attempt_count=attempt_count+1,available_at=now()+interval '30 seconds'
+      WHERE id IN (SELECT id FROM outbox_events WHERE processed_at IS NULL AND available_at<=now() ORDER BY occurred_at FOR UPDATE SKIP LOCKED LIMIT $1)
+      RETURNING id,event_type AS "eventType",aggregate_id AS "aggregateId",payload,occurred_at AS "occurredAt"`, [Math.min(Math.max(limit, 1), 100)]);
+    return result.rows;
+  }
+
+  async completeOutbox(eventId: string, success: boolean) {
+    await this.pool.query(success ? `UPDATE outbox_events SET processed_at=now() WHERE id=$1` : `UPDATE outbox_events SET available_at=now()+interval '1 minute' WHERE id=$1 AND processed_at IS NULL`, [eventId]);
+    return { completed: success };
   }
 
   async onModuleDestroy() { await this.pool.end(); }
@@ -427,9 +459,9 @@ class IdentityController {
   }
 
   @Post('sessions/switch-membership')
-  switchMembership(@Body() body: { userId?: string; membershipId?: string; sessionId?: string }) {
+  switchMembership(@Body() body: { userId?: string; membershipId?: string; sessionId?: string }, @Headers('x-correlation-id') correlationId?: string) {
     if (!body.userId || !body.membershipId || !body.sessionId) throw new BadRequestException({ code: 'USER_MEMBERSHIP_AND_SESSION_REQUIRED' });
-    return this.repository.switchMembership(body.userId, body.membershipId, body.sessionId);
+    return this.repository.switchMembership(body.userId, body.membershipId, body.sessionId, correlationId);
   }
 
   @Post('sessions/refresh')
@@ -448,25 +480,27 @@ class IdentityController {
   memberships(@Param('userId') userId: string) { return this.repository.memberships(userId); }
 
   @Post('provisioning/accounts')
-  provisionAccount(@Body() body: { schoolId?: string | null; role?: MembershipRole; phoneE164?: string; displayName?: string }) {
+  provisionAccount(@Body() body: { schoolId?: string | null; role?: MembershipRole; phoneE164?: string; displayName?: string }, @Headers('x-schoolconnect-user-id') actorUserId?: string, @Headers('x-correlation-id') correlationId?: string) {
     if (!body.role || !['PLATFORM_OWNER','SCHOOL_ADMIN', 'TEACHER', 'PARENT'].includes(body.role) || !body.phoneE164 || !body.displayName || (body.role !== 'PLATFORM_OWNER' && !body.schoolId)) throw new BadRequestException({ code: 'PROVISIONING_FIELDS_REQUIRED' });
-    return this.repository.provisionAccount({ schoolId: body.schoolId ?? null, role: body.role, phoneE164: body.phoneE164, displayName: body.displayName });
+    return this.repository.provisionAccount({ schoolId: body.schoolId ?? null, role: body.role, phoneE164: body.phoneE164, displayName: body.displayName }, actorUserId, correlationId);
   }
 
   @Post('provisioning/accounts/:membershipId/revoke')
-  revoke(@Param('membershipId') membershipId: string) { return this.repository.revokeMembership(membershipId); }
+  revoke(@Param('membershipId') membershipId: string, @Headers('x-schoolconnect-user-id') actorUserId?: string, @Headers('x-correlation-id') correlationId?: string) { return this.repository.revokeMembership(membershipId, actorUserId, correlationId); }
 
   @Post('provisioning/accounts/:membershipId/reissue-invitation')
-  reissue(@Param('membershipId') membershipId: string, @Body() body: { schoolId?: string | null; actorUserId?: string }) {
+  reissue(@Param('membershipId') membershipId: string, @Body() body: { schoolId?: string | null; actorUserId?: string }, @Headers('x-schoolconnect-user-id') actorUserId?: string, @Headers('x-correlation-id') correlationId?: string) {
     if (body.schoolId === undefined) throw new BadRequestException({ code: 'SCHOOL_CONTEXT_REQUIRED' });
-    return this.repository.reissueInvitation(membershipId, body.schoolId, body.actorUserId);
+    return this.repository.reissueInvitation(membershipId, body.schoolId, actorUserId ?? body.actorUserId, correlationId);
   }
 
   @Get('schools/:schoolId/members')
   schoolMembers(@Param('schoolId') schoolId: string, @Query('role') role?: MembershipRole) { return this.repository.schoolMembers(schoolId, role); }
   @Get('platform/members') platformMembers() { return this.repository.platformMembers(); }
   @Get('reports/platform-memberships') platformMembershipSummary() { return this.repository.platformMembershipSummary(); }
-  @Patch('members/:membershipId') updateMember(@Param('membershipId') membershipId: string, @Body() body: { schoolId: string | null; displayName?: string; phoneE164?: string; status?: 'ACTIVE' | 'REVOKED' }) { return this.repository.updateMember(membershipId, body.schoolId, body); }
+  @Patch('members/:membershipId') updateMember(@Param('membershipId') membershipId: string, @Body() body: { schoolId: string | null; displayName?: string; phoneE164?: string; status?: 'ACTIVE' | 'REVOKED' }, @Headers('x-schoolconnect-user-id') actorUserId?: string, @Headers('x-correlation-id') correlationId?: string) { return this.repository.updateMember(membershipId, body.schoolId, body, actorUserId, correlationId); }
+  @Get('outbox') outbox(@Query('limit') limit = '25') { return this.repository.claimOutbox(Number(limit)); }
+  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean }) { return this.repository.completeOutbox(eventId, body.success !== false); }
 }
 
 @Module({
@@ -484,5 +518,6 @@ async function bootstrap() {
   if (process.env.NODE_ENV === 'production' && (!internalToken || internalToken.length < 32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED');
   if (internalToken) app.use((request: { headers: Record<string, string | string[] | undefined> }, response: { status: (code: number) => { json: (body: unknown) => void } }, next: () => void) => request.headers['x-internal-service-token'] === internalToken ? next() : response.status(401).json({ code: 'INTERNAL_AUTHENTICATION_REQUIRED' }));
   await app.listen(Number(process.env.IDENTITY_PORT ?? 3101), process.env.SERVICE_BIND_HOST ?? '127.0.0.1');
+  await startOutboxPublisher('identity', app.get(IdentityRepository));
 }
 void bootstrap();

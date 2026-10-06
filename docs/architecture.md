@@ -1,61 +1,49 @@
 # Architecture
 
-SchoolConnect Lite is one mobile product backed by independently runnable services. The public gateway owns no business tables. Each business service owns one PostgreSQL database and publishes versioned events through its own transactional outbox.
+SchoolConnect Lite is one Expo mobile application with role-aware Owner, School Admin, Teacher and Parent contexts. It calls a public NestJS gateway. Business services own separate PostgreSQL databases; no service reads or joins another service's database. The Authorization service is stateless and makes policy decisions using its configured rules and live relationship facts from School.
 
 ```text
-Expo mobile app (Owner, School Admin, Teacher or Parent context)
-                        |
-                  Public API gateway :3000
-                        |
-       +----------------+------------------------------+
-       |                |               |              |
- Identity :3101   School :3102    Content :3103  Attendance :3104
-       |                |               |              |
- identity DB       school DB       content DB     attendance DB
+Expo app → API gateway :3000 → Identity :3101 → identity DB
+                            → School :3102 → school DB
+                            → Content :3103 → content DB
+                            → Attendance :3104 → attendance DB
+                            → Files :3105 → files DB → private S3-compatible objects
+                            → Notifications :3106 → notifications DB
+                            → Audit :3107 → audit DB
+                            → Authorization :3108 → School relationship facts
+                            → Read Model :3109 → read DB
 
-       Files :3105       Notifications :3106       Audit :3107
-            |                    |                     |
-        files DB          notifications DB          audit DB
-            |
-  private S3-compatible storage adapter
+Identity / School / Content / Attendance / Files / Notifications
+  → own transactional outboxes → own in-process publishers → Kafka
+Kafka → Notifications consumer group → in-app inbox
+      → Audit consumer group → append-only audit records
+      → Read Model consumer group → parent/teacher/attendance projections
 ```
 
-## Boundary rules
+## Boundaries
 
-- No service reads another service's database.
-- No cross-database foreign keys exist. External identifiers are opaque UUIDs validated by the owning service.
-- Foreign keys are used inside a service database where both tables share one lifecycle and owner.
-- The mobile application calls only the public gateway.
-- Platform Owner has platform provisioning authority but no school content access. School Admin is bound to one school and cannot enumerate or mutate other schools.
-- Identity owns accounts, memberships and invitations; School owns schools, classes and teacher assignments. The gateway coordinates provisioning without shared database access.
-- Identity is the single session-authorization authority. The gateway treats access tokens as opaque, asks Identity to validate the configured provider token, and receives only a database-resolved active principal. Provider mode, signing secret, issuer, audience and access-token lifetime are environment configuration.
-- The gateway resolves the authenticated principal through Identity and checks live guardian/teacher authorization through School before delegating.
-- Clients never supply the authoritative recipient list. The gateway resolves recipients from School and sends an immutable snapshot to Content.
-- Content and Attendance commit their business record and outbox event in the same database transaction.
-- Notifications and Audit are idempotent consumers of versioned events. Provider delivery is not considered device delivery.
-- Files remain quarantined until an asynchronous scanner moves them to `READY`.
+- Identity validates sessions and issues access/refresh tokens. The gateway asks Authorization for route and resource decisions. Authorization's route and resource-role rules can be configured using environment JSON. School remains the source of teacher-assignment and guardian-child facts. Some controller-level role checks still exist as defense in depth; granting a new role through policy configuration alone may still require application changes.
+- The gateway propagates a correlation ID and trusted principal context. It does not own business tables. Internal services require an internal service token.
+- A business write and its outbox event commit in one owner-database transaction. Each owning process asynchronously publishes pending outbox rows to Kafka and marks a row complete only after broker acknowledgement. There is no standalone worker service and no direct Kafka client in the mobile app.
+- Kafka consumers use independent groups and deduplicate source event IDs. Notifications persists an in-app inbox item and delivery attempt; Audit persists append-only evidence; Read Model builds query tables. Consumers and publishers are at least once, so a duplicate event must be harmless. A temporarily unavailable broker delays projections/notifications/audit but does not undo a committed business write.
+- Parent timelines and Teacher post feeds are served from event-built read projections, with School still providing relationship scope. The read database is a rebuildable view, not a source of authorization truth. Notification inbox, child lists, and some administration views remain owner-service reads.
+- Scheduled announcements remain durable in Content. Content uses PostgreSQL LISTEN/NOTIFY and an in-process timer to publish them when due.
+- Platform Owner has provisioning authority but no implicit school-content access. School Admin is tenant-bound. Recipient lists are calculated server-side and snapshot at publication.
+- `DELIVERED` means persisted in the in-app inbox, not pushed to a device. Real SMS, push and production malware-scanning providers remain unconfigured.
 
 ## Database ownership
 
 | Service | Database | Owned records |
 | --- | --- | --- |
-| Identity | `schoolconnect_identity` | users, memberships, invitations, OTP challenges, sessions |
-| School | `schoolconnect_school` | schools, configuration, classes, students, enrollment, guardian links, teacher assignments |
-| Content | `schoolconnect_content` | posts, revisions, recipients, attachments, views |
-| Attendance | `schoolconnect_attendance` | batches, immutable events, current pointers, responses, leave requests |
-| Files | `schoolconnect_files` | file metadata, upload sessions, file-access evidence |
-| Notifications | `schoolconnect_notifications` | inbox, device tokens, preferences, delivery attempts |
-| Audit | `schoolconnect_audit` | append-only audit events and consumer checkpoints |
+| Identity | `schoolconnect_identity` | users, memberships, invitations, OTP challenges, sessions, outbox |
+| School | `schoolconnect_school` | schools, classes, students, enrolments, guardian links, teacher assignments, outbox |
+| Content | `schoolconnect_content` | posts, immutable revisions, recipients, attachments, views, outbox |
+| Attendance | `schoolconnect_attendance` | batches, immutable events, current pointers, responses, leave requests, outbox |
+| Files | `schoolconnect_files` | metadata, upload sessions, file-access evidence, outbox |
+| Notifications | `schoolconnect_notifications` | inbox, device tokens, preferences, delivery attempts, outbox |
+| Audit | `schoolconnect_audit` | append-only audit events, consumer deduplication |
+| Read Model | `schoolconnect_read` | event-built post and attendance projections, consumer deduplication |
 
-## Naming conventions
+Identifiers and tables use lowercase `snake_case` in SQL; API JSON uses `camelCase`. Cross-service IDs are opaque UUIDs with no cross-database foreign keys. Internal foreign keys are used where one service owns both tables. Instants use UTC `timestamptz`, school calendar dates use `date`, and incompatible event changes require a new versioned event type.
 
-- Database and table identifiers use lowercase `snake_case`.
-- Primary keys are UUIDs named `id`; external references end in `_id` but have no cross-database constraint.
-- UTC instants use `timestamptz` and end in `_at`; school calendar dates use `date`.
-- Mutable aggregates carry a version. Historical attendance and post revisions are append-only.
-- Event types use a namespaced, versioned format such as `attendance.student-absent.v1`.
-- API JSON uses `camelCase`; SQL remains `snake_case`.
-
-## Current provider boundary
-
-Development OTP is deliberately mocked as `123456`. Identity issues signed, expiring, session-bound access tokens through a configurable authorization-provider interface and owns rotating refresh tokens, reuse detection, device binding and revocation. SMS delivery remains provider work. S3-compatible signing and transactional outbox workers are implemented; production malware scanning and APNs/FCM delivery remain provider adapters rather than dependencies between business services.
+The deliberately mocked development OTP is `123456`. Hosting a public environment with that value gives anyone who knows a seeded phone and invitation code a login path; use real OTP, secrets, TLS and provider integration before production.

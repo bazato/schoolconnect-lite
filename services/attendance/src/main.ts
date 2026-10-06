@@ -7,11 +7,14 @@ import { BadRequestException, Body, ConflictException, Controller, Get, Inject, 
 import { NestFactory } from '@nestjs/core';
 import { createHash, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
+import { domainEventTypes } from '@schoolconnect/contracts';
+import { startOutboxPublisher } from '@schoolconnect/eventing';
 import { validateAttendanceSubmission, type AttendanceStatus } from './validation';
 
 type AttendanceBatchRequest = {
   schoolId: string; classId: string; attendanceDate: string; actorUserId: string; actorMembershipId: string;
   expectedVersion: number; idempotencyKey: string; correctionReason?: string; rows: Array<{ studentId: string; status: AttendanceStatus }>;
+  correlationId?: string; notificationRecipients?: Array<{ studentId: string; guardianUserId: string }>;
 };
 const requestHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
@@ -22,11 +25,16 @@ class AttendanceRepository implements OnModuleDestroy {
 
   async submit(input: AttendanceBatchRequest) {
     validateAttendanceSubmission(input);
+    const studentIds = new Set(input.rows.map((row) => row.studentId));
+    if (input.notificationRecipients && (!Array.isArray(input.notificationRecipients) ||
+        input.notificationRecipients.some((recipient) => !studentIds.has(recipient.studentId) || !recipient.guardianUserId))) {
+      throw new BadRequestException({ code: 'ATTENDANCE_RECIPIENT_SNAPSHOT_INVALID' });
+    }
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${input.schoolId}:${input.classId}:${input.attendanceDate}`]);
-      const hash = requestHash(input);
+      const hash = requestHash({ ...input, correlationId: undefined, notificationRecipients: undefined });
       const existing = await client.query<{ request_hash: string; response_body: unknown }>(
         `SELECT request_hash, response_body FROM idempotency_keys WHERE actor_id=$1 AND operation='SUBMIT_ATTENDANCE' AND idempotency_key=$2 AND expires_at>now() FOR UPDATE`,
         [input.actorUserId, input.idempotencyKey]);
@@ -48,6 +56,8 @@ class AttendanceRepository implements OnModuleDestroy {
         [batchId, input.schoolId, input.classId, input.attendanceDate, input.actorMembershipId, input.expectedVersion, committedVersion]);
       let absenceNotificationsQueued = 0;
       for (const row of input.rows) {
+        const guardians = input.notificationRecipients?.filter((recipient) => recipient.studentId === row.studentId)
+          .map((recipient) => ({ guardianUserId: recipient.guardianUserId }));
         const current = await client.query<{ current_event_id: string; version: number }>(
           `SELECT current_event_id, version FROM attendance_current WHERE school_id=$1 AND student_id=$2 AND attendance_date=$3 FOR UPDATE`,
           [input.schoolId, row.studentId, input.attendanceDate]);
@@ -63,15 +73,19 @@ class AttendanceRepository implements OnModuleDestroy {
            VALUES ($1,$2,$3,$4,$5)
            ON CONFLICT (school_id, student_id, attendance_date) DO UPDATE SET current_event_id=excluded.current_event_id, version=excluded.version, updated_at=now()`,
           [input.schoolId, row.studentId, input.attendanceDate, eventId, revision]);
+        await client.query(`INSERT INTO outbox_events (event_type,aggregate_id,payload) VALUES ($1,$2,$3)`,
+          [domainEventTypes.attendanceRecorded, eventId, { schoolId: input.schoolId, classId: input.classId, studentId: row.studentId,
+            attendanceDate: input.attendanceDate, status: row.status, revisionNumber: revision, attendanceEventId: eventId,
+            actorUserId: input.actorUserId, actorMembershipId: input.actorMembershipId, correlationId: input.correlationId }]);
         if (row.status === 'ABSENT') {
           absenceNotificationsQueued += 1;
           await client.query(
-            `INSERT INTO outbox_events (event_type, aggregate_id, payload) VALUES ('attendance.student-absent.v1',$1,$2)`,
-            [eventId, { schoolId: input.schoolId, attendanceEventId: eventId, studentId: row.studentId, attendanceDate: input.attendanceDate }]);
+            `INSERT INTO outbox_events (event_type, aggregate_id, payload) VALUES ($1,$2,$3)`,
+            [domainEventTypes.studentAbsent, eventId, { schoolId: input.schoolId, attendanceEventId: eventId, studentId: row.studentId, attendanceDate: input.attendanceDate, correlationId: input.correlationId, guardians }]);
         } else if (previous) {
           await client.query(
-            `INSERT INTO outbox_events (event_type, aggregate_id, payload) VALUES ('attendance.corrected.v1',$1,$2)`,
-            [eventId, { schoolId: input.schoolId, attendanceEventId: eventId, studentId: row.studentId, status: row.status, supersedesEventId: previous.current_event_id }]);
+            `INSERT INTO outbox_events (event_type, aggregate_id, payload) VALUES ($1,$2,$3)`,
+            [domainEventTypes.attendanceCorrected, eventId, { schoolId: input.schoolId, attendanceEventId: eventId, studentId: row.studentId, status: row.status, supersedesEventId: previous.current_event_id, correlationId: input.correlationId, guardians }]);
         }
       }
       const response = { batchId, committed: true, version: committedVersion, rowCount: input.rows.length, absenceNotificationsQueued };
@@ -119,7 +133,61 @@ class AttendanceRepository implements OnModuleDestroy {
     return result.rows;
   }
 
-  async acknowledge(input: { schoolId: string; eventId: string; guardianUserId: string; actorUserId: string; idempotencyKey: string; reason?: string; leaveNote: boolean }) {
+  async projectionConsistency(schoolId: string) {
+    const result = await this.pool.query(`WITH latest AS (
+      SELECT DISTINCT ON (student_id,attendance_date) id,student_id,attendance_date,revision_number
+      FROM attendance_events WHERE school_id=$1
+      ORDER BY student_id,attendance_date,revision_number DESC
+    ), current_projection AS (
+      SELECT student_id,attendance_date,current_event_id,version FROM attendance_current WHERE school_id=$1
+    )
+    SELECT COALESCE(l.student_id,c.student_id) AS "studentId",
+      COALESCE(l.attendance_date,c.attendance_date) AS "attendanceDate",
+      l.id AS "latestEventId",c.current_event_id AS "projectedEventId",
+      l.revision_number AS "latestRevision",c.version AS "projectedRevision"
+    FROM latest l FULL OUTER JOIN current_projection c
+      ON c.student_id=l.student_id AND c.attendance_date=l.attendance_date
+    WHERE l.id IS DISTINCT FROM c.current_event_id OR l.revision_number IS DISTINCT FROM c.version
+    ORDER BY "attendanceDate" DESC LIMIT 100`, [schoolId]);
+    return { consistent: result.rows.length === 0, mismatches: result.rows };
+  }
+
+  async rebuildProjection(schoolId: string, actorMembershipId: string, correlationId?: string) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // This maintenance operation blocks concurrent attendance submissions for
+      // the duration of the rebuild, so it cannot race an event/current write.
+      await client.query(`SET LOCAL lock_timeout = '3000ms'`);
+      await client.query('LOCK TABLE attendance_events, attendance_current IN SHARE ROW EXCLUSIVE MODE');
+      const removed = await client.query<{ student_id: string }>(`WITH latest AS (
+        SELECT DISTINCT ON (student_id,attendance_date) id,student_id,attendance_date,revision_number
+        FROM attendance_events WHERE school_id=$1
+        ORDER BY student_id,attendance_date,revision_number DESC,created_at DESC,id DESC
+      )
+      DELETE FROM attendance_current c WHERE c.school_id=$1 AND NOT EXISTS (
+        SELECT 1 FROM latest l WHERE l.student_id=c.student_id AND l.attendance_date=c.attendance_date
+          AND l.id=c.current_event_id AND l.revision_number=c.version
+      ) RETURNING c.student_id`, [schoolId]);
+      const restored = await client.query<{ student_id: string }>(`WITH latest AS (
+        SELECT DISTINCT ON (student_id,attendance_date) id,student_id,attendance_date,revision_number
+        FROM attendance_events WHERE school_id=$1
+        ORDER BY student_id,attendance_date,revision_number DESC,created_at DESC,id DESC
+      )
+      INSERT INTO attendance_current (school_id,student_id,attendance_date,current_event_id,version)
+      SELECT $1,l.student_id,l.attendance_date,l.id,l.revision_number FROM latest l
+      WHERE NOT EXISTS (SELECT 1 FROM attendance_current c
+        WHERE c.school_id=$1 AND c.student_id=l.student_id AND c.attendance_date=l.attendance_date)
+      RETURNING student_id`, [schoolId]);
+      const result = { removedRows: removed.rowCount ?? 0, restoredRows: restored.rowCount ?? 0 };
+      await client.query(`INSERT INTO outbox_events (event_type,aggregate_id,payload) VALUES ($1,$2,$3)`,
+        [domainEventTypes.attendanceProjectionRebuilt, schoolId, { schoolId, actorMembershipId, correlationId, ...result }]);
+      await client.query('COMMIT');
+      return { ...result, consistent: true };
+    } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+  }
+
+  async acknowledge(input: { schoolId: string; eventId: string; guardianUserId: string; actorUserId: string; idempotencyKey: string; reason?: string; leaveNote: boolean; correlationId?: string }) {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -129,7 +197,7 @@ class AttendanceRepository implements OnModuleDestroy {
          WHERE e.school_id=$1 AND e.id=$2 FOR UPDATE OF c,e`, [input.schoolId, input.eventId]);
       const event = currentEvent.rows[0];
       if (!event || event.attendance_status !== 'ABSENT') throw new ConflictException({ code: 'ATTENDANCE_EVENT_SUPERSEDED' });
-      const hash = requestHash(input);
+      const hash = requestHash({ ...input, correlationId: undefined });
       const existing = await client.query<{ request_hash: string; response_body: unknown }>(
         `SELECT request_hash, response_body FROM idempotency_keys WHERE actor_id=$1 AND operation='ACKNOWLEDGE_ABSENCE' AND idempotency_key=$2 AND expires_at>now() FOR UPDATE`,
         [input.actorUserId, input.idempotencyKey]);
@@ -160,8 +228,8 @@ class AttendanceRepository implements OnModuleDestroy {
       }
       const eventOutboxId = randomUUID();
       await client.query(
-        `INSERT INTO outbox_events (id, event_type, aggregate_id, payload) VALUES ($1,'attendance.absence-acknowledged.v1',$2,$3)`,
-        [eventOutboxId, input.eventId, { schoolId: input.schoolId, attendanceEventId: input.eventId, responseId, guardianUserId: input.guardianUserId, responseType, leaveRequestId }]);
+        `INSERT INTO outbox_events (id, event_type, aggregate_id, payload) VALUES ($1,$2,$3,$4)`,
+        [eventOutboxId, domainEventTypes.absenceAcknowledged, input.eventId, { schoolId: input.schoolId, attendanceEventId: input.eventId, responseId, guardianUserId: input.guardianUserId, responseType, leaveRequestId, correlationId: input.correlationId }]);
       const response = { id: responseId, attendanceEventId: input.eventId, responseType, reason: input.reason, leaveRequestId };
       await client.query(
         `INSERT INTO idempotency_keys (actor_id, operation, idempotency_key, request_hash, response_status, response_body, expires_at)
@@ -190,7 +258,7 @@ class AttendanceRepository implements OnModuleDestroy {
     return result.rows;
   }
 
-  async reviewLeave(schoolId: string, leaveRequestId: string, actorMembershipId: string, decision: 'APPROVED' | 'REJECTED', reviewNote?: string) {
+  async reviewLeave(schoolId: string, leaveRequestId: string, actorMembershipId: string, decision: 'APPROVED' | 'REJECTED', reviewNote?: string, correlationId?: string) {
     if (!['APPROVED','REJECTED'].includes(decision)) throw new BadRequestException({ code: 'LEAVE_DECISION_INVALID' });
     const client = await this.pool.connect();
     try {
@@ -204,8 +272,8 @@ class AttendanceRepository implements OnModuleDestroy {
       const result = await client.query(`UPDATE leave_requests SET status=$3,reviewed_by_membership_id=$4,reviewed_at=now(),review_note=$5
         WHERE school_id=$1 AND id=$2 RETURNING id,status,reviewed_at AS "reviewedAt",review_note AS "reviewNote"`,
         [schoolId, leaveRequestId, decision, actorMembershipId, reviewNote?.trim() ?? null]);
-      await client.query(`INSERT INTO outbox_events (event_type,aggregate_id,payload) VALUES ('attendance.leave-reviewed.v1',$1,$2)`,
-        [leaveRequestId, { schoolId, leaveRequestId, studentId: current.rows[0]!.student_id, guardianUserId: current.rows[0]!.guardian_user_id, status: decision, actorMembershipId }]);
+      await client.query(`INSERT INTO outbox_events (event_type,aggregate_id,payload) VALUES ($1,$2,$3)`,
+        [domainEventTypes.leaveReviewed, leaveRequestId, { schoolId, leaveRequestId, studentId: current.rows[0]!.student_id, guardianUserId: current.rows[0]!.guardian_user_id, status: decision, actorMembershipId, correlationId }]);
       await client.query('COMMIT'); return result.rows[0];
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
@@ -242,10 +310,12 @@ class AttendanceController {
   @Get('students/:studentId/attendance') history(@Param('studentId') studentId: string, @Query('schoolId') schoolId: string, @Query('guardianUserId') guardianUserId?: string) { return this.repository.history(schoolId, studentId, guardianUserId); }
   @Get('attendance/version') version(@Query('schoolId') schoolId: string, @Query('classId') classId: string, @Query('attendanceDate') attendanceDate: string) { return this.repository.version(schoolId, classId, attendanceDate); }
   @Get('attendance/current') current(@Query('schoolId') schoolId: string, @Query('classId') classId: string, @Query('attendanceDate') attendanceDate: string) { return this.repository.currentClass(schoolId, classId, attendanceDate); }
+  @Get('attendance/projection-consistency') projectionConsistency(@Query('schoolId') schoolId: string) { return this.repository.projectionConsistency(schoolId); }
+  @Post('attendance/rebuild-projection') rebuildProjection(@Body() body: { schoolId: string; actorMembershipId: string; correlationId?: string }) { return this.repository.rebuildProjection(body.schoolId, body.actorMembershipId, body.correlationId); }
   @Post('attendance/events/:eventId/acknowledgements') acknowledge(@Param('eventId') eventId: string, @Body() body: Omit<Parameters<AttendanceRepository['acknowledge']>[0], 'eventId'>) { return this.repository.acknowledge({ ...body, eventId }); }
   @Get('attendance/follow-ups') followUps(@Query('schoolId') schoolId: string, @Query('classId') classId: string, @Query('attendanceDate') attendanceDate: string) { return this.repository.followUps(schoolId, classId, attendanceDate); }
   @Get('leave-requests') leaveRequests(@Query('schoolId') schoolId: string, @Query('status') status?: string) { return this.repository.leaveRequests(schoolId, status); }
-  @Post('leave-requests/:leaveRequestId/review') reviewLeave(@Param('leaveRequestId') leaveRequestId: string, @Body() body: { schoolId: string; actorMembershipId: string; decision: 'APPROVED' | 'REJECTED'; reviewNote?: string }) { return this.repository.reviewLeave(body.schoolId, leaveRequestId, body.actorMembershipId, body.decision, body.reviewNote); }
+  @Post('leave-requests/:leaveRequestId/review') reviewLeave(@Param('leaveRequestId') leaveRequestId: string, @Body() body: { schoolId: string; actorMembershipId: string; decision: 'APPROVED' | 'REJECTED'; reviewNote?: string; correlationId?: string }) { return this.repository.reviewLeave(body.schoolId, leaveRequestId, body.actorMembershipId, body.decision, body.reviewNote, body.correlationId); }
   @Get('attendance/summary') summary(@Query('schoolId') schoolId: string, @Query('fromDate') fromDate: string, @Query('toDate') toDate: string) { return this.repository.summary(schoolId, fromDate, toDate); }
   @Get('outbox') outbox(@Query('limit') limit = '25') { return this.repository.claimOutbox(Number(limit)); }
   @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean }) { return this.repository.completeOutbox(eventId, body.success !== false); }
@@ -253,5 +323,5 @@ class AttendanceController {
 
 @Module({ controllers: [AttendanceController], providers: [AttendanceRepository] })
 class AttendanceModule {}
-async function bootstrap() { const app = await NestFactory.create(AttendanceModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.ATTENDANCE_PORT ?? 3104), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); }
+async function bootstrap() { const app = await NestFactory.create(AttendanceModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.ATTENDANCE_PORT ?? 3104), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); await startOutboxPublisher('attendance', app.get(AttendanceRepository)); }
 void bootstrap();

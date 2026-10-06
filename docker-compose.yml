@@ -31,6 +31,16 @@ services:
     volumes:
       - schoolconnect_minio:/data
     restart: unless-stopped
+  kafka:
+    image: apache/kafka:4.3.1
+    container_name: schoolconnect-kafka
+    profiles: ["broker"]
+    ports:
+      - "127.0.0.1:${KAFKA_PORT:-9092}:9092"
+    volumes:
+      - schoolconnect_kafka:/var/lib/kafka/data
+    restart: unless-stopped
 volumes:
   schoolconnect_pg:
   schoolconnect_minio:
+  schoolconnect_kafka:

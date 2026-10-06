@@ -17,7 +17,8 @@ test('every bundled migration targets only a known service database', async () =
     '010-identity.sql', '020-school.sql', '030-content.sql', '040-attendance.sql',
     '050-files.sql', '060-notifications.sql', '070-audit.sql', '080-admin-provisioning.sql',
     '095-security-and-scale.sql', '096-product-workflows.sql',
-    '097-publishing-permissions.sql', '090-development-seed.sql',
+    '097-publishing-permissions.sql', '098-observability.sql',
+    '099-notification-lifecycle.sql', '090-development-seed.sql',
   ];
   for (const fileName of files) {
     const source = await readFile(new URL(`../infra/postgres/init/${fileName}`, import.meta.url), 'utf8');

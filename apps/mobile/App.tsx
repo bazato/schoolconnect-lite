@@ -3596,25 +3596,17 @@ function MainApp() {
     if (!session || role !== "TEACHER") return;
     let active = true;
     const refresh = () => {
-      void Promise.all([
-        mobileApi.teacherPosts(session),
-        mobileApi.drafts(session),
-      ])
-        .then(([items, drafts]) => {
+      void mobileApi.teacherHome(session)
+        .then(({ posts, drafts, teachingScope }) => {
           if (active) {
-            setTeacherPosts(items);
+            setTeacherPosts(posts);
             setTeacherDrafts(drafts);
+            setTeachingScope(teachingScope);
           }
         })
         .catch(() => undefined);
     };
     refresh();
-    void mobileApi
-      .teachingScope(session)
-      .then((items) => {
-        if (active) setTeachingScope(items);
-      })
-      .catch(() => undefined);
     const timer = setInterval(refresh, POLL_INTERVAL_MS);
     return () => {
       active = false;
@@ -3634,13 +3626,11 @@ function MainApp() {
 
   const refreshTeacherPosts = () => {
     if (!session) return;
-    void Promise.all([
-      mobileApi.teacherPosts(session),
-      mobileApi.drafts(session),
-    ])
-      .then(([items, drafts]) => {
-        setTeacherPosts(items);
+    void mobileApi.teacherHome(session)
+      .then(({ posts, drafts, teachingScope }) => {
+        setTeacherPosts(posts);
         setTeacherDrafts(drafts);
+        setTeachingScope(teachingScope);
       })
       .catch(() => undefined);
   };

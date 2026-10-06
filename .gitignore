@@ -6,6 +6,8 @@ coverage/
 *.log
 .railway/
 dist-native/
+apps/mobile/dist-android-check/
+apps/mobile/dist-ios-check/
 apps/mobile/android/
 docs/screenshots/
 reference/kaksha-structure.json

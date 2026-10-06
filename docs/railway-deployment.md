@@ -1,5 +1,7 @@
 # Railway deployment
 
+> Historical deployment plan. The current application additionally requires a reachable Kafka broker, the stateless Authorization service and the Read Model service/database. The old worker entry below is obsolete; this document is not a deployable manifest for the current revision.
+
 ## Current attempt — 2026-09-28
 
 - GitHub `bazato/schoolconnect-lite`, branch `main`, contains the implementation and deployment packaging.

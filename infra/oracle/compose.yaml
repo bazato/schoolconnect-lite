@@ -5,7 +5,7 @@ x-app: &app
   image: schoolconnect-backend:oci
   init: true
   restart: unless-stopped
-  networks: [private]
+  networks: [private, egress] # Kafka can be an external private/TLS broker.
 
 x-db-dependent: &db-dependent
   postgres:
@@ -26,6 +26,7 @@ services:
       SC_FILES_DB_PASSWORD: ${SC_FILES_DB_PASSWORD:?Set SC_FILES_DB_PASSWORD}
       SC_NOTIFICATIONS_DB_PASSWORD: ${SC_NOTIFICATIONS_DB_PASSWORD:?Set SC_NOTIFICATIONS_DB_PASSWORD}
       SC_AUDIT_DB_PASSWORD: ${SC_AUDIT_DB_PASSWORD:?Set SC_AUDIT_DB_PASSWORD}
+      SC_READ_DB_PASSWORD: ${SC_READ_DB_PASSWORD:?Set SC_READ_DB_PASSWORD}
       SC_DEMO_SEED: ${SC_DEMO_SEED:-false}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -53,6 +54,7 @@ services:
       AUTH_JWT_AUDIENCE: schoolconnect-mobile
       OTP_PROVIDER: development
       DEVELOPMENT_OTP_CODE: ${DEVELOPMENT_OTP_CODE:-123456}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:?Set reachable Kafka brokers}
 
   school:
     <<: *app
@@ -63,6 +65,7 @@ services:
       NODE_ENV: production
       SCHOOL_DATABASE_URL: postgresql://sc_school:${SC_SCHOOL_DB_PASSWORD:?Set SC_SCHOOL_DB_PASSWORD}@postgres:5432/schoolconnect_school
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:?Set reachable Kafka brokers}
 
   content:
     <<: *app
@@ -73,6 +76,7 @@ services:
       NODE_ENV: production
       CONTENT_DATABASE_URL: postgresql://sc_content:${SC_CONTENT_DB_PASSWORD:?Set SC_CONTENT_DB_PASSWORD}@postgres:5432/schoolconnect_content
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:?Set reachable Kafka brokers}
 
   attendance:
     <<: *app
@@ -83,6 +87,7 @@ services:
       NODE_ENV: production
       ATTENDANCE_DATABASE_URL: postgresql://sc_attendance:${SC_ATTENDANCE_DB_PASSWORD:?Set SC_ATTENDANCE_DB_PASSWORD}@postgres:5432/schoolconnect_attendance
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:?Set reachable Kafka brokers}
 
   files:
     <<: *app
@@ -94,6 +99,7 @@ services:
       NODE_ENV: development # Development-clean scanner is not suitable for real uploads.
       FILE_DATABASE_URL: postgresql://sc_files:${SC_FILES_DB_PASSWORD:?Set SC_FILES_DB_PASSWORD}@postgres:5432/schoolconnect_files
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:?Set reachable Kafka brokers}
       FILE_SCANNER_PROVIDER: development-clean
       S3_ENDPOINT: ${S3_ENDPOINT:?Set the OCI S3 compatibility endpoint}
       S3_REGION: ${S3_REGION:?Set the OCI region}
@@ -111,6 +117,9 @@ services:
       NODE_ENV: production
       NOTIFICATION_DATABASE_URL: postgresql://sc_notifications:${SC_NOTIFICATIONS_DB_PASSWORD:?Set SC_NOTIFICATIONS_DB_PASSWORD}@postgres:5432/schoolconnect_notifications
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:?Set reachable Kafka brokers}
+      CONTENT_SERVICE_URL: http://content:3103
+      SCHOOL_SERVICE_URL: http://school:3102
 
   audit:
     <<: *app
@@ -121,24 +130,29 @@ services:
       NODE_ENV: production
       AUDIT_DATABASE_URL: postgresql://sc_audit:${SC_AUDIT_DB_PASSWORD:?Set SC_AUDIT_DB_PASSWORD}@postgres:5432/schoolconnect_audit
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:?Set reachable Kafka brokers}
 
-  workers:
+  authorization:
     <<: *app
-    depends_on:
-      content: { condition: service_started }
-      attendance: { condition: service_started }
-      school: { condition: service_started }
-      notifications: { condition: service_started }
-      audit: { condition: service_started }
+    depends_on: *db-dependent
     environment:
-      SERVICE_NAME: workers
+      SERVICE_NAME: authorization
+      SERVICE_BIND_HOST: 0.0.0.0
       NODE_ENV: production
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
-      CONTENT_SERVICE_URL: http://content:3103
-      ATTENDANCE_SERVICE_URL: http://attendance:3104
       SCHOOL_SERVICE_URL: http://school:3102
-      NOTIFICATION_SERVICE_URL: http://notifications:3106
-      AUDIT_SERVICE_URL: http://audit:3107
+
+  read-model:
+    <<: *app
+    depends_on: *db-dependent
+    environment:
+      SERVICE_NAME: read-model
+      SERVICE_BIND_HOST: 0.0.0.0
+      NODE_ENV: production
+      READ_DATABASE_URL: postgresql://sc_read:${SC_READ_DB_PASSWORD:?Set SC_READ_DB_PASSWORD}@postgres:5432/schoolconnect_read
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:?Set reachable Kafka brokers}
+      CONTENT_SERVICE_URL: http://content:3103
 
   api:
     <<: *app
@@ -151,6 +165,8 @@ services:
       files: { condition: service_started }
       notifications: { condition: service_started }
       audit: { condition: service_started }
+      authorization: { condition: service_started }
+      read-model: { condition: service_started }
     environment:
       SERVICE_NAME: api
       SERVICE_BIND_HOST: 0.0.0.0
@@ -166,6 +182,8 @@ services:
       FILE_SERVICE_URL: http://files:3105
       NOTIFICATION_SERVICE_URL: http://notifications:3106
       AUDIT_SERVICE_URL: http://audit:3107
+      AUTHORIZATION_SERVICE_URL: http://authorization:3108
+      READ_SERVICE_URL: http://read-model:3109
     ports:
       - "127.0.0.1:${API_LOOPBACK_PORT:-3000}:3000"
 

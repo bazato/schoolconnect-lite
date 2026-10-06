@@ -33,11 +33,13 @@ create_database sc_attendance schoolconnect_attendance "$SC_ATTENDANCE_DB_PASSWO
 create_database sc_files schoolconnect_files "$SC_FILES_DB_PASSWORD"
 create_database sc_notifications schoolconnect_notifications "$SC_NOTIFICATIONS_DB_PASSWORD"
 create_database sc_audit schoolconnect_audit "$SC_AUDIT_DB_PASSWORD"
+create_database sc_read schoolconnect_read "$SC_READ_DB_PASSWORD"
 
 for migration in \
   010-identity.sql 020-school.sql 030-content.sql 040-attendance.sql \
   050-files.sql 060-notifications.sql 070-audit.sql 080-admin-provisioning.sql \
-  095-security-and-scale.sql 096-product-workflows.sql 097-publishing-permissions.sql
+  095-security-and-scale.sql 096-product-workflows.sql 097-publishing-permissions.sql \
+  098-observability.sql 099-notification-lifecycle.sql 100-read-model.sql 101-read-model-backfill.sql
 do
   psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres \
     --file="/opt/schoolconnect/migrations/$migration"
@@ -65,6 +67,7 @@ grant_runtime_access sc_attendance schoolconnect_attendance
 grant_runtime_access sc_files schoolconnect_files
 grant_runtime_access sc_notifications schoolconnect_notifications
 grant_runtime_access sc_audit schoolconnect_audit
+grant_runtime_access sc_read schoolconnect_read
 
 case "${SC_DEMO_SEED:-false}" in
   true)

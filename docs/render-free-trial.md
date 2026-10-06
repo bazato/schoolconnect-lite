@@ -1,5 +1,7 @@
 # Render free-tier trial (30 days, synthetic data only)
 
+> Historical trial instructions. The current backend requires Kafka, an Authorization service and a Read Model database/service, and no longer contains the standalone worker. The existing `render.yaml` does not provision a broker and must not be used for this revision without redesign and verification.
+
 This is a disposable demo deployment, not the production architecture. `render.yaml` provisions **one Free web service** and **one Free Render Postgres instance**. The web service hosts the existing API, seven internal NestJS services, and the outbox worker in one Node.js process. Internal services bind to loopback. They remain separate code modules and databases, but no longer have independent runtime isolation in this trial. The single Postgres instance contains seven separate logical databases, one per service, using one Render database user.
 
 ## Deploy
