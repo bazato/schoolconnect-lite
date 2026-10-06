@@ -6,7 +6,7 @@ import { databaseUrl, DEMO_DATABASES, parseMigrationSegments } from './render-de
 test('one Render Postgres instance still uses distinct logical service databases', () => {
   const base = 'postgresql://demo:secret@postgres.internal/schoolconnect_demo?sslmode=require';
   const urls = DEMO_DATABASES.map((name) => databaseUrl(base, name));
-  assert.equal(new Set(urls).size, 7);
+  assert.equal(new Set(urls).size, 8);
   assert.equal(new URL(urls[0]).pathname, '/schoolconnect_identity');
   assert.equal(new URL(urls[0]).searchParams.get('sslmode'), 'require');
   assert.throws(() => databaseUrl(base, 'postgres'));
@@ -18,7 +18,8 @@ test('every bundled migration targets only a known service database', async () =
     '050-files.sql', '060-notifications.sql', '070-audit.sql', '080-admin-provisioning.sql',
     '095-security-and-scale.sql', '096-product-workflows.sql',
     '097-publishing-permissions.sql', '098-observability.sql',
-    '099-notification-lifecycle.sql', '090-development-seed.sql',
+    '099-notification-lifecycle.sql', '100-read-model.sql',
+    '101-read-model-backfill.sql', '090-development-seed.sql',
   ];
   for (const fileName of files) {
     const source = await readFile(new URL(`../infra/postgres/init/${fileName}`, import.meta.url), 'utf8');

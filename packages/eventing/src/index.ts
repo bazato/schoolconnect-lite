@@ -16,20 +16,28 @@ export function parseEventEnvelope(value: string): EventEnvelope {
   return { source: envelope.source!, event };
 }
 
-function client(clientId: string) {
-  const brokers = (process.env.KAFKA_BROKERS ?? '').split(',').map((value) => value.trim()).filter(Boolean);
+export function kafkaConnectionConfig(environment: NodeJS.ProcessEnv = process.env) {
+  const brokers = (environment.KAFKA_BROKERS ?? '').split(',').map((value) => value.trim()).filter(Boolean);
   if (!brokers.length) throw new Error('KAFKA_BROKERS_REQUIRED');
-  const ssl = process.env.KAFKA_SSL === 'true';
-  const mechanism = process.env.KAFKA_SASL_MECHANISM;
-  if (mechanism && !ssl) throw new Error('KAFKA_SASL_REQUIRES_TLS');
+  const tlsEnabled = environment.KAFKA_SSL === 'true';
+  const mechanism = environment.KAFKA_SASL_MECHANISM;
+  if (mechanism && !tlsEnabled) throw new Error('KAFKA_SASL_REQUIRES_TLS');
   if (mechanism && !['plain', 'scram-sha-256', 'scram-sha-512'].includes(mechanism)) throw new Error('KAFKA_SASL_MECHANISM_INVALID');
-  const username = process.env.KAFKA_SASL_USERNAME;
-  const password = process.env.KAFKA_SASL_PASSWORD;
+  const username = environment.KAFKA_SASL_USERNAME;
+  const password = environment.KAFKA_SASL_PASSWORD;
   if (mechanism && (!username || !password)) throw new Error('KAFKA_SASL_CREDENTIALS_REQUIRED');
+  const encodedCa = environment.KAFKA_CA_CERT_BASE64;
+  if (encodedCa && !tlsEnabled) throw new Error('KAFKA_CA_REQUIRES_TLS');
+  const ca = encodedCa ? Buffer.from(encodedCa, 'base64').toString('utf8') : undefined;
+  if (ca && !/^-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----\s*$/.test(ca)) throw new Error('KAFKA_CA_CERT_INVALID');
   const sasl: SASLOptions | undefined = mechanism === 'plain' ? { mechanism, username: username!, password: password! }
     : mechanism === 'scram-sha-256' ? { mechanism, username: username!, password: password! }
       : mechanism === 'scram-sha-512' ? { mechanism, username: username!, password: password! } : undefined;
-  return new Kafka({ clientId, brokers, ssl, sasl, logLevel: logLevel.WARN });
+  return { brokers, ssl: tlsEnabled ? ca ? { ca: [ca] } : true : false, sasl };
+}
+
+function client(clientId: string) {
+  return new Kafka({ clientId, ...kafkaConnectionConfig(), logLevel: logLevel.WARN });
 }
 
 const topic = () => process.env.KAFKA_EVENT_TOPIC ?? 'schoolconnect.domain-events.v1';

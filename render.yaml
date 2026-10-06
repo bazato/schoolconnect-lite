@@ -32,6 +32,8 @@ services:
         value: '123456'
       - key: AUTHORIZATION_PROVIDER
         value: local-jwt
+      - key: RESOURCE_AUTHORIZATION_PROVIDER
+        value: policy
       - key: AUTH_JWT_SECRET
         generateValue: true
       - key: INTERNAL_SERVICE_TOKEN
@@ -42,6 +44,26 @@ services:
         value: --max-old-space-size=384
       - key: OUTBOX_POLL_INTERVAL_MS
         value: '2000'
+      # Existing Blueprint services must receive sync:false secret values in
+      # the Render dashboard; Blueprint sync does not prompt for new secrets.
+      - key: KAFKA_BROKERS
+        sync: false
+      - key: KAFKA_SASL_USERNAME
+        sync: false
+      - key: KAFKA_SASL_PASSWORD
+        sync: false
+      - key: KAFKA_CA_CERT_BASE64
+        sync: false
+      - key: KAFKA_SSL
+        value: 'true'
+      - key: KAFKA_SASL_MECHANISM
+        value: scram-sha-256
+      - key: KAFKA_EVENT_TOPIC
+        value: schoolconnect.domain-events.v1
+      - key: KAFKA_CREATE_TOPIC
+        value: 'false'
+      - key: KAFKA_PARTITIONS
+        value: '2'
       - key: IDENTITY_DB_POOL_MAX
         value: '2'
       - key: SCHOOL_DB_POOL_MAX
@@ -55,4 +77,6 @@ services:
       - key: NOTIFICATIONS_DB_POOL_MAX
         value: '2'
       - key: AUDIT_DB_POOL_MAX
+        value: '2'
+      - key: READ_DB_POOL_MAX
         value: '2'
