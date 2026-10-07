@@ -12,7 +12,7 @@ services:
   - type: web
     name: schoolconnect-demo-admin
     runtime: static
-    buildCommand: corepack enable && pnpm install --frozen-lockfile --filter @schoolconnect/web... && pnpm --filter @schoolconnect/web build
+    buildCommand: pnpm install --frozen-lockfile --filter @schoolconnect/web... && pnpm --filter @schoolconnect/web build
     staticPublishPath: ./apps/web/dist
     envVars:
       - key: VITE_API_URL
