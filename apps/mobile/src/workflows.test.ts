@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { resolveAssignment, routeFromDeepLink } from './workflows';
-import type { ApiTeachingAssignment } from './api';
+import { mapApiChildren, resolveAssignment, routeFromDeepLink } from './workflows';
+import type { ApiChild, ApiTeachingAssignment } from './api';
 
 describe('role-aware workflow routing', () => {
   it('selects the requested class and subject without falling back to another class', () => {
@@ -15,5 +15,12 @@ describe('role-aware workflow routing', () => {
     expect(routeFromDeepLink(`schoolconnect://attendance/${id}`)).toEqual({ name: 'absence', eventId: id });
     expect(routeFromDeepLink(`https://example.com/posts/${id}`)).toBeNull();
     expect(routeFromDeepLink('schoolconnect://posts/invalid')).toBeNull();
+  });
+  it('keeps every child returned for one parent in the mobile child switcher', () => {
+    const items = [
+      { id: 'student-a', displayName: 'Ava Parent', admissionNumber: 'A-1', classId: 'class-a', className: 'Grade 1', schoolName: 'School One' },
+      { id: 'student-b', displayName: 'Ben Parent', admissionNumber: 'B-1', classId: 'class-b', className: 'Grade 3', schoolName: 'School One' },
+    ] as ApiChild[];
+    expect(mapApiChildren(items).map((child) => child.id)).toEqual(['student-a', 'student-b']);
   });
 });

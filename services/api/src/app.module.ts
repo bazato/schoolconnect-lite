@@ -525,7 +525,8 @@ class AdminController {
     if (!body.displayName || !body.phoneE164 || !body.studentDisplayName || !body.admissionNumber || !body.classId) throw new BadRequestException({ code: 'PARENT_AND_STUDENT_FIELDS_REQUIRED' });
     const classes = await this.clients.request<Array<{ id: string }>>('school', `/internal/v1/schools/${schoolId}/classes`);
     if (!classes.some((item) => item.id === body.classId)) throw new BadRequestException({ code: 'CLASS_NOT_FOUND_IN_SCHOOL' });
-    const parent = await this.clients.request<{ userId: string; membershipId: string; role: Role; invitationCode: string; expiresAt: string }>('identity', '/internal/v1/provisioning/accounts', {
+    const parent = await this.clients.request<{ userId: string; membershipId: string; role: Role; invitationCode: string | null; expiresAt: string | null;
+      membershipProvisioned?: boolean; membershipReused?: boolean; invitationStatus?: 'ISSUED' | 'ALREADY_PENDING' | 'ALREADY_ACTIVE' }>('identity', '/internal/v1/provisioning/accounts', {
       method: 'POST', body: JSON.stringify({ schoolId, role: 'PARENT', phoneE164: body.phoneE164, displayName: body.displayName }),
     });
     try {
@@ -535,7 +536,12 @@ class AdminController {
       });
       return { parent, student };
     } catch (error) {
-      await this.clients.request('identity', `/internal/v1/provisioning/accounts/${parent.membershipId}/revoke`, { method: 'POST', body: '{}' }).catch(() => undefined);
+      // A failed student link must not revoke an already-existing guardian who may
+      // already be linked to other children. Only compensate a membership this
+      // request actually provisioned or reactivated.
+      if (parent.membershipProvisioned === true) {
+        await this.clients.request('identity', `/internal/v1/provisioning/accounts/${parent.membershipId}/revoke`, { method: 'POST', body: '{}' }).catch(() => undefined);
+      }
       throw error;
     }
   }
@@ -563,13 +569,15 @@ class AdminController {
     const rows = parseStudentCsv(body.csv ?? '');
     const classes = await this.clients.request<Array<{ id: string; classCode: string }>>('school', `/internal/v1/schools/${schoolId}/classes`);
     if (rows.some((row) => !classes.some((item) => item.classCode === row.classCode))) throw new BadRequestException({ code: 'CSV_CLASS_NOT_FOUND' });
-    const results: Array<{ row: number; admissionNumber: string; status: 'IMPORTED' | 'FAILED'; invitationCode?: string; error?: string }> = [];
+    const results: Array<{ row: number; admissionNumber: string; status: 'IMPORTED' | 'FAILED'; invitationCode?: string | null;
+      parentInvitationStatus?: 'ISSUED' | 'ALREADY_PENDING' | 'ALREADY_ACTIVE'; error?: string }> = [];
     for (const [index, row] of rows.entries()) {
       try {
         const created = await this.createParent({ displayName: row.parentDisplayName, phoneE164: row.parentPhoneE164,
           studentDisplayName: row.studentDisplayName, admissionNumber: row.admissionNumber,
-          classId: classes.find((item) => item.classCode === row.classCode)!.id, relationship: row.relationship }, principal) as { parent: { invitationCode: string } };
-        results.push({ row: index + 2, admissionNumber: row.admissionNumber, status: 'IMPORTED', invitationCode: created.parent.invitationCode });
+          classId: classes.find((item) => item.classCode === row.classCode)!.id, relationship: row.relationship }, principal) as { parent: { invitationCode: string | null; invitationStatus?: 'ISSUED' | 'ALREADY_PENDING' | 'ALREADY_ACTIVE' } };
+        results.push({ row: index + 2, admissionNumber: row.admissionNumber, status: 'IMPORTED', invitationCode: created.parent.invitationCode ?? undefined,
+          parentInvitationStatus: created.parent.invitationStatus ?? (created.parent.invitationCode ? 'ISSUED' : undefined) });
       } catch (error) { results.push({ row: index + 2, admissionNumber: row.admissionNumber, status: 'FAILED', error: error instanceof Error ? error.message : 'IMPORT_FAILED' }); }
     }
     return { imported: results.filter((item) => item.status === 'IMPORTED').length, failed: results.filter((item) => item.status === 'FAILED').length, results };

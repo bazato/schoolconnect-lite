@@ -69,6 +69,7 @@ import {
 } from "./src/api";
 import { secureOfflineStorage } from "./src/secureOfflineStorage";
 import {
+  mapApiChildren,
   resolveAssignment,
   routeFromDeepLink,
   timelinePost,
@@ -338,7 +339,7 @@ function LoginScreen({
           </Text>
           <Text style={styles.helper}>
             {phase === "phone"
-              ? "Use the mobile number from your school invitation. The invitation is required only for first-time activation."
+              ? "Use the guardian's mobile number. Every child linked to that parent account will appear in the child switcher. The invitation is needed only for first-time activation."
               : `We sent a six-digit code to ${phone}.`}
           </Text>
           {phase === "phone" ? (
@@ -1643,15 +1644,16 @@ function SchoolAdminDashboard({
         classId: selectedClassId,
         relationship: "Parent",
       });
-      setInvitation({
-        displayName: parentName,
-        phone: parentPhone,
-        code: created.parent.invitationCode,
-        expiresAt: created.parent.expiresAt,
-      });
-      setMessage(
-        `${created.student.displayName} is linked securely to ${parentName}.`,
-      );
+      if (created.parent.invitationCode && created.parent.expiresAt) {
+        setInvitation({ displayName: parentName, phone: parentPhone,
+          code: created.parent.invitationCode, expiresAt: created.parent.expiresAt });
+      } else setInvitation(null);
+      const invitationMessage = created.parent.invitationStatus === "ALREADY_ACTIVE"
+        ? "The existing parent account was reused. No new invite was sent; the parent signs in with the same mobile number."
+        : created.parent.invitationStatus === "ALREADY_PENDING"
+          ? "The existing parent account was reused. Its current invitation remains valid; no duplicate invite was sent."
+          : "A new parent invitation was created.";
+      setMessage(`${created.student.displayName} is linked to ${parentName}. ${invitationMessage}`);
       setParentName("");
       setParentPhone("");
       setStudentName("");
@@ -3527,18 +3529,7 @@ function MainApp() {
     void mobileApi
       .children(session, (online) => setOffline(!online))
       .then((items) => {
-        const mapped = items.map((item) => ({
-          id: item.id,
-          name: item.displayName,
-          school: item.schoolName,
-          className: item.className,
-          avatar: item.displayName
-            .split(" ")
-            .map((part) => part[0])
-            .join("")
-            .slice(0, 2)
-            .toUpperCase(),
-        }));
+        const mapped = mapApiChildren(items);
         setLiveChildren(mapped);
         if (mapped[0] && !mapped.some((item) => item.id === childId))
           setChildId(mapped[0].id);

@@ -7,7 +7,8 @@ type MemberRow = { userId: string; membershipId: string; displayName: string; ph
 type ClassRow = { id: string; classCode: string; displayName: string; academicYear: string; gradeCode?: string; status: string };
 type StudentRow = { id: string; admissionNumber: string; displayName: string; classId: string; className: string | null; guardianCount: number; status: string };
 type StudentImportPreview = { count: number; valid: boolean; rows: Array<{ row: number; admissionNumber: string; studentDisplayName: string; classCode: string; classId: string | null }> };
-type StudentImportResult = { imported: number; failed: number; results: Array<{ row: number; admissionNumber: string; status: 'IMPORTED' | 'FAILED'; invitationCode?: string; error?: string }> };
+type ParentInvitationStatus = 'ISSUED' | 'ALREADY_PENDING' | 'ALREADY_ACTIVE';
+type StudentImportResult = { imported: number; failed: number; results: Array<{ row: number; admissionNumber: string; status: 'IMPORTED' | 'FAILED'; invitationCode?: string; parentInvitationStatus?: ParentInvitationStatus; error?: string }> };
 type Invitation = { code: string; phone: string; role: string; expiresAt?: string };
 type PreviewRow = ResultRow & { row: number; studentId: string | null; studentName: string | null; classId: string | null; className: string | null; guardianCount: number; status: 'READY' | 'INVALID'; error?: string };
 type Summary = { studentCount: number; teacherCount: number; attendance?: Array<{ classId: string; status: string; count: number }>; recentAudit?: Array<{ action: string; createdAt: string }> };
@@ -349,13 +350,20 @@ function StudentsPage({ students, classes, request, onInvite, onSaved }: {
   const createStudent = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true); setError('');
     try {
-      const created = await request<{ parent: { invitationCode: string; expiresAt: string }; student: unknown }>('/admin/parents', { method: 'POST', body: JSON.stringify({
+      const created = await request<{ parent: { invitationCode: string | null; expiresAt: string | null; invitationStatus?: ParentInvitationStatus }; student: unknown }>('/admin/parents', { method: 'POST', body: JSON.stringify({
         displayName: String(form.get('parentDisplayName')).trim(), phoneE164: String(form.get('parentPhoneE164')).replace(/\s/g, ''),
         studentDisplayName: String(form.get('studentDisplayName')).trim(), admissionNumber: String(form.get('admissionNumber')).trim().toUpperCase(),
         classId: String(form.get('classId')), relationship: String(form.get('relationship')).trim() || 'Parent',
       }) });
-      onInvite({ code: created.parent.invitationCode, phone: String(form.get('parentPhoneE164')).trim(), role: 'Parent', expiresAt: created.parent.expiresAt });
-      setFormOpen(false); onSaved();
+      if (created.parent.invitationCode) onInvite({ code: created.parent.invitationCode, phone: String(form.get('parentPhoneE164')).trim(), role: 'Parent', expiresAt: created.parent.expiresAt ?? undefined });
+      const confirmation = created.parent.invitationStatus === 'ALREADY_ACTIVE'
+        ? 'Student linked to the existing parent account. No new invitation was sent; the parent can sign in with the same mobile number.'
+        : created.parent.invitationStatus === 'ALREADY_PENDING'
+          ? 'Student linked to the existing parent account. Its current invitation is still valid; no duplicate invitation was sent.'
+          : created.parent.invitationCode
+            ? 'Student linked and a parent invitation was created.'
+            : 'Student linked to the existing parent account. No new invitation was needed.';
+      setFormOpen(false); onSaved(confirmation);
     } catch (failure) { setError(displayError(failure)); }
     finally { setBusy(false); }
   };
@@ -372,12 +380,16 @@ function StudentsPage({ students, classes, request, onInvite, onSaved }: {
   };
   const importCsv = async () => {
     if (!preview?.valid || !csvText) return;
-    if (!window.confirm(`Create ${preview.count} student records and parent invitations? Review the row results before retrying any failures.`)) return;
+    if (!window.confirm(`Create ${preview.count} student records and link parent accounts? Existing parent accounts will be reused and will not receive duplicate invitations.`)) return;
     setBusy(true); setError(''); setImportResult(null);
     try {
       const result = await request<StudentImportResult>('/admin/students/import', { method: 'POST', body: JSON.stringify({ csv: csvText }) });
       setImportResult(result);
-      if (result.imported > 0) onSaved(`Imported ${result.imported} student${result.imported === 1 ? '' : 's'} and created parent invitations.`);
+      if (result.imported > 0) {
+        const issued = result.results.filter((item) => item.status === 'IMPORTED' && item.invitationCode).length;
+        const linkedExisting = result.results.filter((item) => item.status === 'IMPORTED' && (item.parentInvitationStatus === 'ALREADY_ACTIVE' || item.parentInvitationStatus === 'ALREADY_PENDING')).length;
+        onSaved(`Imported ${result.imported} student${result.imported === 1 ? '' : 's'}; ${issued} new parent invitation${issued === 1 ? '' : 's'} issued and ${linkedExisting} linked to an existing parent account.`);
+      }
     } catch (failure) { setError(displayError(failure)); }
     finally { setBusy(false); }
   };
@@ -400,20 +412,20 @@ function StudentsPage({ students, classes, request, onInvite, onSaved }: {
           <label>Student name<input name="studentDisplayName" required maxLength={160} placeholder="Student full name" /></label>
           <label>Admission number<input name="admissionNumber" required maxLength={80} pattern="[A-Za-z0-9_-]+" placeholder="SC-1001" /></label>
           <label>Class<select name="classId" required defaultValue=""><option value="" disabled>Select an active class</option>{activeClasses.map((item) => <option key={item.id} value={item.id}>{item.displayName} ({item.classCode})</option>)}</select></label>
-          <div className="form-divider">PARENT / GUARDIAN INVITATION</div>
+          <div className="form-divider">PARENT / GUARDIAN ACCOUNT</div>
           <label>Parent or guardian name<input name="parentDisplayName" required maxLength={160} placeholder="Full name" /></label>
           <label>Parent mobile<input name="parentPhoneE164" required inputMode="tel" pattern="\+[1-9][0-9]{7,14}" placeholder="+966501234567" /></label>
           <label>Relationship<input name="relationship" maxLength={80} defaultValue="Parent" placeholder="Parent, Guardian…" /></label>
-          <div className="form-actions"><button className="button secondary" type="button" onClick={() => setFormOpen(false)}>Cancel</button><button className="button primary" disabled={busy || activeClasses.length === 0}>{busy ? 'Creating…' : 'Create student & invite parent'}</button></div>
+          <div className="form-actions"><button className="button secondary" type="button" onClick={() => setFormOpen(false)}>Cancel</button><button className="button primary" disabled={busy || activeClasses.length === 0}>{busy ? 'Creating…' : 'Create student & link parent'}</button></div>
         </form>
       </section>}
       {importOpen && <section className="section-card form-card student-form-card" style={{ marginTop: 12 }}><div className="card-heading"><div><span className="eyebrow">BULK ONBOARDING</span><h3>Import students from CSV</h3></div><button className="icon-button" onClick={() => setImportOpen(false)} aria-label="Close student import">×</button></div>
-        <p className="muted">Upload a CSV with one student and guardian per row. The CSV contents are sent to the school API to create accounts; invitation codes are shown after import.</p>
+        <p className="muted">Upload a CSV with one student and guardian per row. Guardians with the same mobile number in this school share one parent account. New invitation codes are shown only when needed.</p>
         <div className="student-import-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap', margin: '12px 0 14px' }}><button className="button secondary small" onClick={downloadTemplate}>↓ Download CSV template</button><button className="button secondary small" onClick={() => csvInputRef.current?.click()}>Choose CSV file</button><input ref={csvInputRef} type="file" accept=".csv,text/csv" hidden aria-label="Choose student CSV file" onChange={(event) => { void previewCsv(event.target.files?.[0]); event.currentTarget.value = ''; }} /><span className="muted">{csvName || 'Maximum 200 rows · file up to 1 MB'}</span></div>
         <div className="column-guide"><strong>Required columns, in this exact order</strong><p><code>studentDisplayName</code> <code>admissionNumber</code> <code>classCode</code> <code>parentDisplayName</code> <code>parentPhoneE164</code> <code>relationship</code></p><small>Parent mobile numbers must use international format, e.g. +966501234567. Class codes must match an active class in this school.</small></div>
         {busy && <div className="progress-row"><div className="spinner small-spinner" /><span>{importResult ? 'Importing student accounts…' : 'Checking CSV rows and class codes…'}</span></div>}
-        {preview && <><div className={`alert ${preview.valid ? 'success' : 'danger'}`}>{preview.valid ? `${preview.count} rows validated. Review them before creating accounts.` : 'One or more class codes do not match classes in this school.'}</div><div className="table-wrap"><table><thead><tr><th>Row</th><th>Student</th><th>Admission number</th><th>Class</th><th>Validation</th></tr></thead><tbody>{preview.rows.map((row) => { const classroom = classes.find((item) => item.classCode === row.classCode); return <tr key={row.row}><td>{row.row}</td><td>{row.studentDisplayName}</td><td><code>{row.admissionNumber}</code></td><td>{classroom?.displayName ?? row.classCode}</td><td><StatusPill value={row.classId ? 'READY' : 'CLASS_NOT_FOUND'} /></td></tr>; })}</tbody></table></div><div className="form-actions"><button className="button primary" disabled={busy || !preview.valid} onClick={() => { void importCsv(); }}>{busy ? 'Importing…' : `Create ${preview.count} students & invitations`}</button></div></>}
-        {importResult && <><div className={`alert ${importResult.failed ? 'danger' : 'success'}`}>Imported {importResult.imported}; failed {importResult.failed}. Retry failed rows only to avoid duplicate admissions.</div><div className="table-wrap"><table><thead><tr><th>Row</th><th>Admission number</th><th>Result</th><th>Parent invitation</th></tr></thead><tbody>{importResult.results.map((item) => <tr key={`${item.row}-${item.admissionNumber}`}><td>{item.row}</td><td><code>{item.admissionNumber}</code></td><td><StatusPill value={item.status} />{item.error && <small className="table-subtitle">{item.error.replaceAll('_', ' ').toLowerCase()}</small>}</td><td>{item.invitationCode ? <><code>{item.invitationCode}</code> <button className="text-button" onClick={() => { void copyInvitation(item.admissionNumber, item.invitationCode!); }}>{copiedAdmission === item.admissionNumber ? 'Copied' : 'Copy'}</button></> : '—'}</td></tr>)}</tbody></table></div></>}
+        {preview && <><div className={`alert ${preview.valid ? 'success' : 'danger'}`}>{preview.valid ? `${preview.count} rows validated. Review them before creating accounts.` : 'One or more class codes do not match classes in this school.'}</div><div className="table-wrap"><table><thead><tr><th>Row</th><th>Student</th><th>Admission number</th><th>Class</th><th>Validation</th></tr></thead><tbody>{preview.rows.map((row) => { const classroom = classes.find((item) => item.classCode === row.classCode); return <tr key={row.row}><td>{row.row}</td><td>{row.studentDisplayName}</td><td><code>{row.admissionNumber}</code></td><td>{classroom?.displayName ?? row.classCode}</td><td><StatusPill value={row.classId ? 'READY' : 'CLASS_NOT_FOUND'} /></td></tr>; })}</tbody></table></div><div className="form-actions"><button className="button primary" disabled={busy || !preview.valid} onClick={() => { void importCsv(); }}>{busy ? 'Importing…' : `Create ${preview.count} students & link guardians`}</button></div></>}
+        {importResult && <><div className={`alert ${importResult.failed ? 'danger' : 'success'}`}>Imported {importResult.imported}; failed {importResult.failed}. Retry failed rows only to avoid duplicate admissions.</div><div className="table-wrap"><table><thead><tr><th>Row</th><th>Admission number</th><th>Result</th><th>Parent account / invitation</th></tr></thead><tbody>{importResult.results.map((item) => <tr key={`${item.row}-${item.admissionNumber}`}><td>{item.row}</td><td><code>{item.admissionNumber}</code></td><td><StatusPill value={item.status} />{item.error && <small className="table-subtitle">{item.error.replaceAll('_', ' ').toLowerCase()}</small>}</td><td>{item.invitationCode ? <><code>{item.invitationCode}</code> <button className="text-button" onClick={() => { void copyInvitation(item.admissionNumber, item.invitationCode!); }}>{copiedAdmission === item.admissionNumber ? 'Copied' : 'Copy'}</button></> : item.parentInvitationStatus === 'ALREADY_ACTIVE' ? 'Existing parent account; no invite needed' : item.parentInvitationStatus === 'ALREADY_PENDING' ? 'Existing invitation remains valid' : '—'}</td></tr>)}</tbody></table></div></>}
       </section>}
       {activeClasses.length === 0 && <div className="alert danger">Set up an active class before adding or importing students.</div>}
       {students.length ? <div className="table-wrap"><table><thead><tr><th>Student</th><th>Admission number</th><th>Class</th><th>Linked guardians</th><th>Status</th></tr></thead><tbody>{filtered.map((student) => <tr key={student.id}><td><div className="table-person"><span className="person-avatar lilac">{student.displayName.slice(0, 1)}</span><strong>{student.displayName}</strong></div></td><td><code>{student.admissionNumber}</code></td><td>{student.className ?? '—'}</td><td>{student.guardianCount}</td><td><StatusPill value={student.status} /></td></tr>)}</tbody></table></div> : <EmptyState title="No students in the roster" body="Add one student and guardian, or import a CSV for multiple students." />}

@@ -116,6 +116,13 @@ export type ProvisionedAccount = {
   invitationCode: string;
   expiresAt: string;
 };
+export type ParentProvisionedAccount = Omit<ProvisionedAccount, 'invitationCode' | 'expiresAt'> & {
+  invitationCode: string | null;
+  expiresAt: string | null;
+  membershipProvisioned?: boolean;
+  membershipReused?: boolean;
+  invitationStatus?: 'ISSUED' | 'ALREADY_PENDING' | 'ALREADY_ACTIVE';
+};
 
 let refreshInFlight: Promise<MobileSession> | null = null;
 export const isNetworkError = (error: unknown) => error instanceof TypeError || (error instanceof Error && (error.name === 'AbortError' || /SERVICE_UNAVAILABLE|Failed to fetch|Network request failed/.test(error.message)));
@@ -302,12 +309,12 @@ export const mobileApi = {
   teacherAssignments: (session: MobileSession, membershipId: string) => request<ApiAssignment[]>(`/admin/teachers/${membershipId}/assignments`, undefined, session),
   updateAssignment: (session: MobileSession, assignmentId: string, payload: Record<string, unknown>) => request<ApiAssignment>(`/admin/assignments/${assignmentId}`, { method: 'PATCH', body: JSON.stringify(payload) }, session),
   createTeacher: (session: MobileSession, payload: Record<string, unknown>) => request<{ teacher: ProvisionedAccount; assignment: ApiTeachingAssignment }>('/admin/teachers', { method: 'POST', body: JSON.stringify(payload) }, session),
-  createParent: (session: MobileSession, payload: Record<string, unknown>) => request<{ parent: ProvisionedAccount; student: { studentId: string; displayName: string; admissionNumber: string; classId: string } }>('/admin/parents', { method: 'POST', body: JSON.stringify(payload) }, session),
+  createParent: (session: MobileSession, payload: Record<string, unknown>) => request<{ parent: ParentProvisionedAccount; student: { studentId: string; displayName: string; admissionNumber: string; classId: string } }>('/admin/parents', { method: 'POST', body: JSON.stringify(payload) }, session),
   adminStudents: (session: MobileSession) => request<ApiStudent[]>('/admin/students', undefined, session),
   updateStudent: (session: MobileSession, studentId: string, payload: Record<string, unknown>) => request<ApiStudent>(`/admin/students/${studentId}`, { method: 'PATCH', body: JSON.stringify(payload) }, session),
   linkGuardian: (session: MobileSession, studentId: string, guardianUserId: string, active: boolean, relationship?: string) => request(`/admin/students/${studentId}/guardians/${guardianUserId}/link`, { method: 'POST', body: JSON.stringify({ active, relationship }) }, session),
   previewStudentCsv: (session: MobileSession, csv: string) => request<{ count: number; valid: boolean; rows: Array<{ row: number; admissionNumber: string; classCode: string; classId: string | null }> }>('/admin/students/import-preview', { method: 'POST', body: JSON.stringify({ csv }) }, session),
-  importStudentCsv: (session: MobileSession, csv: string) => request<{ imported: number; failed: number; results: Array<{ row: number; status: string; invitationCode?: string; error?: string }> }>('/admin/students/import', { method: 'POST', body: JSON.stringify({ csv }) }, session),
+  importStudentCsv: (session: MobileSession, csv: string) => request<{ imported: number; failed: number; results: Array<{ row: number; status: string; invitationCode?: string; parentInvitationStatus?: 'ISSUED' | 'ALREADY_PENDING' | 'ALREADY_ACTIVE'; error?: string }> }>('/admin/students/import', { method: 'POST', body: JSON.stringify({ csv }) }, session),
   leaveRequests: (session: MobileSession) => request<ApiLeaveRequest[]>('/admin/leave-requests', undefined, session),
   reviewLeave: (session: MobileSession, id: string, decision: 'APPROVED' | 'REJECTED', reviewNote: string) => request(`/admin/leave-requests/${id}/review`, { method: 'POST', body: JSON.stringify({ decision, reviewNote }) }, session),
   adminCorrectionContext: (session: MobileSession, classId: string, attendanceDate: string) => request<{ roster: ApiRosterStudent[]; current: Array<{ studentId: string; status: 'PRESENT' | 'ABSENT' | 'LATE' | 'LEAVE' }>; version: number }>(`/admin/attendance/correction-context?classId=${encodeURIComponent(classId)}&attendanceDate=${encodeURIComponent(attendanceDate)}`, undefined, session),

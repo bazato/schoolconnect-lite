@@ -9,6 +9,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { domainEventTypes } from '@schoolconnect/contracts';
 import { AccessTokenValidationError, AuthorizationProvider, createAuthorizationProvider } from './authorization';
+import { parentInvitationStatus } from './provisioning';
 import { startOutboxPublisher } from '@schoolconnect/eventing';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -271,40 +272,70 @@ class IdentityRepository implements OnModuleDestroy {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      let user = await client.query<{ id: string }>('SELECT id FROM users WHERE phone_e164=$1 FOR UPDATE', [input.phoneE164]);
-      if (!user.rowCount) {
-        user = await client.query<{ id: string }>(
-          `INSERT INTO users (phone_e164, display_name) VALUES ($1,$2) RETURNING id`,
-          [input.phoneE164, input.displayName.trim()]);
-      }
+      const user = await client.query<{ id: string }>(
+        `INSERT INTO users (phone_e164, display_name) VALUES ($1,$2)
+         ON CONFLICT (phone_e164) DO UPDATE SET display_name=users.display_name RETURNING id`,
+        [input.phoneE164, input.displayName.trim()]);
       const userId = user.rows[0]!.id;
-      const membership = await client.query<{ id: string }>(input.role === 'PLATFORM_OWNER'
-        ? `INSERT INTO memberships (user_id, school_id, role, display_name_override) VALUES ($1,NULL,'PLATFORM_OWNER',$2)
-           ON CONFLICT (user_id, role) WHERE role='PLATFORM_OWNER' DO UPDATE SET status='ACTIVE', display_name_override=excluded.display_name_override,updated_at=now() RETURNING id`
-        : `INSERT INTO memberships (user_id, school_id, role, display_name_override)
-           VALUES ($1,$2,$3,$4)
-           ON CONFLICT (user_id, school_id, role) DO UPDATE SET status='ACTIVE',display_name_override=excluded.display_name_override,updated_at=now()
-           RETURNING id`,
-        input.role === 'PLATFORM_OWNER' ? [userId, input.displayName.trim()] : [userId, input.schoolId, input.role, input.displayName.trim()]);
+      const existingMembership = await client.query<{ id: string; status: string }>(
+        `SELECT id,status FROM memberships
+         WHERE user_id=$1 AND school_id IS NOT DISTINCT FROM $2 AND role=$3 FOR UPDATE`,
+        [userId, input.schoolId, input.role]);
+      const wasActive = existingMembership.rows[0]?.status === 'ACTIVE';
+      const membership = existingMembership.rowCount
+        ? await client.query<{ id: string }>(
+          `UPDATE memberships SET status='ACTIVE',
+             display_name_override=CASE WHEN status='ACTIVE' THEN display_name_override ELSE $2 END,
+             updated_at=now() WHERE id=$1 RETURNING id`,
+          [existingMembership.rows[0]!.id, input.displayName.trim()])
+        : await client.query<{ id: string }>(input.role === 'PLATFORM_OWNER'
+          ? `INSERT INTO memberships (user_id, school_id, role, display_name_override) VALUES ($1,NULL,'PLATFORM_OWNER',$2) RETURNING id`
+          : `INSERT INTO memberships (user_id, school_id, role, display_name_override) VALUES ($1,$2,$3,$4) RETURNING id`,
+          input.role === 'PLATFORM_OWNER' ? [userId, input.displayName.trim()] : [userId, input.schoolId, input.role, input.displayName.trim()]);
       const membershipId = membership.rows[0]!.id;
-      const invitationCode = `SC-${randomBytes(9).toString('base64url').toUpperCase()}`;
-      const invitation = await client.query<{ id: string; expires_at: Date }>(
-        `INSERT INTO invitations (school_id, invitation_code_hash, phone_hash, role, expires_at)
-         VALUES ($1,$2,$3,$4,now()+interval '30 days') RETURNING id, expires_at`,
-        [input.schoolId, hash(invitationCode), hash(input.phoneE164), input.role]);
-      const eventId = randomUUID();
-      await client.query(
-        `INSERT INTO outbox_events (id, event_type, aggregate_id, payload)
-         VALUES ($1,$2,$3,$4)`,
-        [eventId, domainEventTypes.accountProvisioned, membershipId, { schoolId: input.schoolId, userId, membershipId, role: input.role, actorUserId, correlationId }]);
+      const membershipProvisioned = !wasActive;
+
+      let invitationCode: string | null = null;
+      let invitationId: string | null = null;
+      let expiresAt: Date | null = null;
+      let invitationStatus: ReturnType<typeof parentInvitationStatus> = 'ISSUED';
+      if (input.role === 'PARENT' && wasActive) {
+        const phoneHash = hash(input.phoneE164);
+        const accepted = await client.query(`SELECT id FROM invitations WHERE school_id IS NOT DISTINCT FROM $1 AND role='PARENT' AND phone_hash=$2
+          AND accepted_by_user_id=$3 AND accepted_at IS NOT NULL AND revoked_at IS NULL LIMIT 1`, [input.schoolId, phoneHash, userId]);
+        const pending = await client.query(`SELECT id FROM invitations WHERE school_id IS NOT DISTINCT FROM $1 AND role='PARENT' AND phone_hash=$2
+          AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>now() ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, [input.schoolId, phoneHash]);
+        invitationStatus = parentInvitationStatus({ hasAcceptedInvitation: Boolean(accepted.rowCount), hasUnexpiredInvitation: Boolean(pending.rowCount) });
+      }
+
+      if (invitationStatus === 'ISSUED') {
+        invitationCode = `SC-${randomBytes(9).toString('base64url').toUpperCase()}`;
+        const invitation = await client.query<{ id: string; expires_at: Date }>(
+          `INSERT INTO invitations (school_id, invitation_code_hash, phone_hash, role, expires_at)
+           VALUES ($1,$2,$3,$4,now()+interval '30 days') RETURNING id, expires_at`,
+          [input.schoolId, hash(invitationCode), hash(input.phoneE164), input.role]);
+        invitationId = invitation.rows[0]!.id;
+        expiresAt = invitation.rows[0]!.expires_at;
+      }
+
+      if (membershipProvisioned || invitationStatus === 'ISSUED') {
+        const eventType = membershipProvisioned ? domainEventTypes.accountProvisioned : domainEventTypes.invitationReissued;
+        await client.query(
+          `INSERT INTO outbox_events (id, event_type, aggregate_id, payload) VALUES ($1,$2,$3,$4)`,
+          [randomUUID(), eventType, membershipId, { schoolId: input.schoolId, userId, membershipId, role: input.role,
+            invitationId, actorUserId, correlationId }]);
+      }
       await client.query('COMMIT');
       return {
         userId,
         membershipId,
         role: input.role,
-        invitationId: invitation.rows[0]!.id,
+        invitationId,
         invitationCode,
-        expiresAt: invitation.rows[0]!.expires_at,
+        expiresAt,
+        membershipProvisioned,
+        membershipReused: wasActive,
+        invitationStatus,
       };
     } catch (error) {
       await client.query('ROLLBACK');

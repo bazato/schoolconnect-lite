@@ -1,8 +1,18 @@
-import type { ApiTeachingAssignment, ApiTimelinePost } from './api';
-import type { Route, TimelinePost } from './domain';
+import type { ApiChild, ApiTeachingAssignment, ApiTimelinePost } from './api';
+import type { Child, Route, TimelinePost } from './domain';
 
 export function resolveAssignment(scope: ApiTeachingAssignment[], classId: string, subjectCode?: string) {
   return scope.find((item) => item.classId === classId && (!subjectCode || item.subjectCode === subjectCode));
+}
+
+export function mapApiChildren(items: ApiChild[]): Child[] {
+  return items.map((item) => ({
+    id: item.id,
+    name: item.displayName,
+    school: item.schoolName,
+    className: item.className,
+    avatar: item.displayName.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase(),
+  }));
 }
 
 export function timelinePost(item: ApiTimelinePost, childId: string): TimelinePost {

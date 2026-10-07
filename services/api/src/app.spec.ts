@@ -310,4 +310,36 @@ describe('API gateway authorization and service boundaries', () => {
     await request(app.getHttpServer()).post('/api/v1/admin/teachers').set('Authorization', 'Bearer admin-token').send(payload).expect(400);
     expect(serviceClient.request.mock.calls.some((call) => call[0] === 'identity' && call[1] === '/internal/v1/provisioning/accounts')).toBe(false);
   });
+
+  it('links another student to an existing parent membership without requiring a second invitation', async () => {
+    const fallback = serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service: string, path: string, init?: RequestInit) => {
+      if (service === 'identity' && path === '/internal/v1/provisioning/accounts') return Promise.resolve({
+        userId: 'parent-1', membershipId: 'membership-parent', role: 'PARENT', invitationCode: null,
+        expiresAt: null, membershipProvisioned: false, membershipReused: true, invitationStatus: 'ALREADY_ACTIVE',
+      });
+      if (service === 'school' && path.endsWith('/students-and-guardians')) return Promise.resolve({ studentId: 'student-2', displayName: 'Child Two' });
+      return fallback(service, path, init);
+    });
+    const response = await request(app.getHttpServer()).post('/api/v1/admin/parents').set('Authorization', 'Bearer admin-token')
+      .send({ displayName: 'Parent', phoneE164: '+919800000001', studentDisplayName: 'Child Two', admissionNumber: 'A-002', classId: 'class-1' }).expect(201);
+    expect(response.body.parent).toMatchObject({ userId: 'parent-1', invitationCode: null, invitationStatus: 'ALREADY_ACTIVE' });
+    const link = serviceClient.request.mock.calls.find((call) => call[0] === 'school' && call[1].endsWith('/students-and-guardians'));
+    expect(JSON.parse(String(link?.[2]?.body))).toMatchObject({ guardianUserId: 'parent-1', admissionNumber: 'A-002' });
+  });
+
+  it('does not revoke an existing parent if linking the next student fails', async () => {
+    const fallback = serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service: string, path: string, init?: RequestInit) => {
+      if (service === 'identity' && path === '/internal/v1/provisioning/accounts') return Promise.resolve({
+        userId: 'parent-1', membershipId: 'membership-parent', role: 'PARENT', invitationCode: null,
+        expiresAt: null, membershipProvisioned: false, membershipReused: true, invitationStatus: 'ALREADY_ACTIVE',
+      });
+      if (service === 'school' && path.endsWith('/students-and-guardians')) return Promise.reject(new Error('STUDENT_CREATE_FAILED'));
+      return fallback(service, path, init);
+    });
+    await request(app.getHttpServer()).post('/api/v1/admin/parents').set('Authorization', 'Bearer admin-token')
+      .send({ displayName: 'Parent', phoneE164: '+919800000001', studentDisplayName: 'Child Two', admissionNumber: 'A-002', classId: 'class-1' }).expect(500);
+    expect(serviceClient.request.mock.calls.some((call) => call[0] === 'identity' && call[1].endsWith('/revoke'))).toBe(false);
+  });
 });
