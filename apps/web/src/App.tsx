@@ -5,7 +5,9 @@ import { downloadResultsTemplate, parseResultsWorkbook, type ResultRow } from '.
 type SchoolRow = { id: string; schoolCode: string; displayName: string; timezone: string; status: string; activeStudentCount?: number; totalStudentCount?: number; activeTeacherCount?: number; activeParentCount?: number; activeAdminCount?: number };
 type MemberRow = { userId: string; membershipId: string; displayName: string; phoneE164: string; role: Role; status: string };
 type ClassRow = { id: string; classCode: string; displayName: string; academicYear: string; gradeCode?: string; status: string };
-type StudentRow = { id: string; admissionNumber: string; displayName: string; classId: string; className: string; guardianCount: number; status: string };
+type StudentRow = { id: string; admissionNumber: string; displayName: string; classId: string; className: string | null; guardianCount: number; status: string };
+type StudentImportPreview = { count: number; valid: boolean; rows: Array<{ row: number; admissionNumber: string; studentDisplayName: string; classCode: string; classId: string | null }> };
+type StudentImportResult = { imported: number; failed: number; results: Array<{ row: number; admissionNumber: string; status: 'IMPORTED' | 'FAILED'; invitationCode?: string; error?: string }> };
 type Invitation = { code: string; phone: string; role: string; expiresAt?: string };
 type PreviewRow = ResultRow & { row: number; studentId: string | null; studentName: string | null; classId: string | null; className: string | null; guardianCount: number; status: 'READY' | 'INVALID'; error?: string };
 type Summary = { studentCount: number; teacherCount: number; attendance?: Array<{ classId: string; status: string; count: number }>; recentAudit?: Array<{ action: string; createdAt: string }> };
@@ -183,7 +185,7 @@ function Portal({ context, session, onSession, request, onSignOut }: {
         {page === 'Schools' && <OwnerSchools schools={schools} request={request} selectedSchool={selectedSchool} setSelectedSchool={setSelectedSchool} members={members} setMembers={setMembers} formOpen={formOpen} setFormOpen={setFormOpen} onInvite={invite} onMessage={announce} />}
         {page === 'Classes' && <ClassesPage classes={classes} formOpen={formOpen} setFormOpen={setFormOpen} request={request} onSaved={() => { void reload(); announce('Class created successfully.'); }} />}
         {page === 'Teachers' && <TeachersPage teachers={teachers} classes={classes} formOpen={formOpen} setFormOpen={setFormOpen} request={request} onInvite={invite} onSaved={() => { void reload(); announce('Teacher account and class assignment created.'); }} />}
-        {page === 'Students' && <StudentsPage students={students} />}
+        {page === 'Students' && <StudentsPage students={students} classes={classes} request={request} onInvite={invite} onSaved={(message) => { void reload(); announce(message ?? 'Student account and guardian invitation created.'); }} />}
         {page === 'Results' && <ResultsPage students={students} request={request} onMessage={announce} />}
         <footer className="page-footer"><span>SchoolConnect Lite</span><span>Role-scoped workspace · {context.school?.displayName ?? 'All schools'}</span></footer>
       </section>
@@ -327,10 +329,97 @@ function TeachersPage({ teachers, classes, formOpen, setFormOpen, request, onInv
   </div>;
 }
 
-function StudentsPage({ students }: { students: StudentRow[] }) {
+function StudentsPage({ students, classes, request, onInvite, onSaved }: {
+  students: StudentRow[]; classes: ClassRow[]; request: <T,>(path: string, init?: RequestInit) => Promise<T>;
+  onInvite: (value: Invitation) => void; onSaved: (message?: string) => void;
+}) {
+  const [formOpen, setFormOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
   const [search, setSearch] = useState('');
+  const [csvText, setCsvText] = useState('');
+  const [csvName, setCsvName] = useState('');
+  const [preview, setPreview] = useState<StudentImportPreview | null>(null);
+  const [importResult, setImportResult] = useState<StudentImportResult | null>(null);
+  const [copiedAdmission, setCopiedAdmission] = useState('');
+  const csvInputRef = useRef<HTMLInputElement>(null);
+  const activeClasses = classes.filter((item) => item.status === 'ACTIVE');
   const filtered = useMemo(() => students.filter((student) => `${student.displayName} ${student.admissionNumber} ${student.className}`.toLowerCase().includes(search.toLowerCase())), [students, search]);
-  return <section className="section-card"><div className="card-heading"><div><span className="eyebrow">SCHOOL ROSTER</span><h3>{students.length} students</h3></div><span className="directory-search">⌕ <input placeholder="Search name or admission number" value={search} onChange={(event) => setSearch(event.target.value)} /></span></div>{students.length ? <div className="table-wrap"><table><thead><tr><th>Student</th><th>Admission number</th><th>Class</th><th>Linked guardians</th><th>Status</th></tr></thead><tbody>{filtered.map((student) => <tr key={student.id}><td><div className="table-person"><span className="person-avatar lilac">{student.displayName.slice(0, 1)}</span><strong>{student.displayName}</strong></div></td><td><code>{student.admissionNumber}</code></td><td>{student.className ?? '—'}</td><td>{student.guardianCount}</td><td><StatusPill value={student.status} /></td></tr>)}</tbody></table></div> : <EmptyState title="No students in the roster" body="Student and guardian accounts can be onboarded by the school through your existing student import workflow." />}{students.length > 0 && filtered.length === 0 && <div className="empty-inline">No students match “{search}”.</div>}</section>;
+  const createStudent = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true); setError('');
+    try {
+      const created = await request<{ parent: { invitationCode: string; expiresAt: string }; student: unknown }>('/admin/parents', { method: 'POST', body: JSON.stringify({
+        displayName: String(form.get('parentDisplayName')).trim(), phoneE164: String(form.get('parentPhoneE164')).replace(/\s/g, ''),
+        studentDisplayName: String(form.get('studentDisplayName')).trim(), admissionNumber: String(form.get('admissionNumber')).trim().toUpperCase(),
+        classId: String(form.get('classId')), relationship: String(form.get('relationship')).trim() || 'Parent',
+      }) });
+      onInvite({ code: created.parent.invitationCode, phone: String(form.get('parentPhoneE164')).trim(), role: 'Parent', expiresAt: created.parent.expiresAt });
+      setFormOpen(false); onSaved();
+    } catch (failure) { setError(displayError(failure)); }
+    finally { setBusy(false); }
+  };
+  const previewCsv = async (file?: File) => {
+    if (!file) return;
+    if (file.size > 1_000_000) { setError('CSV file is larger than the 1 MB limit.'); return; }
+    setBusy(true); setError(''); setPreview(null); setImportResult(null); setCsvName(file.name);
+    try {
+      const text = await file.text();
+      const checked = await request<StudentImportPreview>('/admin/students/import-preview', { method: 'POST', body: JSON.stringify({ csv: text }) });
+      setCsvText(text); setPreview(checked);
+    } catch (failure) { setCsvText(''); setError(displayError(failure)); }
+    finally { setBusy(false); }
+  };
+  const importCsv = async () => {
+    if (!preview?.valid || !csvText) return;
+    if (!window.confirm(`Create ${preview.count} student records and parent invitations? Review the row results before retrying any failures.`)) return;
+    setBusy(true); setError(''); setImportResult(null);
+    try {
+      const result = await request<StudentImportResult>('/admin/students/import', { method: 'POST', body: JSON.stringify({ csv: csvText }) });
+      setImportResult(result);
+      if (result.imported > 0) onSaved(`Imported ${result.imported} student${result.imported === 1 ? '' : 's'} and created parent invitations.`);
+    } catch (failure) { setError(displayError(failure)); }
+    finally { setBusy(false); }
+  };
+  const downloadTemplate = () => {
+    const contents = 'studentDisplayName,admissionNumber,classCode,parentDisplayName,parentPhoneE164,relationship\r\n"Aria Student",SC-1001,G5A,"Parent Name",+966501234567,Parent\r\n';
+    const url = URL.createObjectURL(new Blob([contents], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a'); link.href = url; link.download = 'schoolconnect-students-template.csv'; link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+  const copyInvitation = async (admissionNumber: string, invitationCode: string) => {
+    try { await navigator.clipboard.writeText(invitationCode); setCopiedAdmission(admissionNumber); }
+    catch { setError('Clipboard access is unavailable. Copy the invitation code directly from the table.'); }
+  };
+  return <div className="content-stack">
+    <section className="section-card">
+      <div className="card-heading"><div><span className="eyebrow">SCHOOL ROSTER</span><h3>{students.length} students</h3></div><div className="student-actions" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}><span className="directory-search">⌕ <input placeholder="Search name or admission number" value={search} onChange={(event) => setSearch(event.target.value)} /></span><button className="button secondary small" onClick={() => { setImportOpen(!importOpen); setFormOpen(false); setError(''); }}>Import CSV</button><button className="button primary small" onClick={() => { setFormOpen(!formOpen); setImportOpen(false); setError(''); }}>＋ Add student</button></div></div>
+      {error && <div className="alert danger">{error}</div>}
+      {formOpen && <section className="section-card form-card student-form-card" style={{ marginTop: 12 }}><div className="card-heading"><div><span className="eyebrow">STUDENT ONBOARDING</span><h3>Student & parent account</h3></div><button className="icon-button" onClick={() => setFormOpen(false)} aria-label="Close add student form">×</button></div>
+        <form className="data-form" onSubmit={(event) => { void createStudent(event); }}>
+          <label>Student name<input name="studentDisplayName" required maxLength={160} placeholder="Student full name" /></label>
+          <label>Admission number<input name="admissionNumber" required maxLength={80} pattern="[A-Za-z0-9_-]+" placeholder="SC-1001" /></label>
+          <label>Class<select name="classId" required defaultValue=""><option value="" disabled>Select an active class</option>{activeClasses.map((item) => <option key={item.id} value={item.id}>{item.displayName} ({item.classCode})</option>)}</select></label>
+          <div className="form-divider">PARENT / GUARDIAN INVITATION</div>
+          <label>Parent or guardian name<input name="parentDisplayName" required maxLength={160} placeholder="Full name" /></label>
+          <label>Parent mobile<input name="parentPhoneE164" required inputMode="tel" pattern="\+[1-9][0-9]{7,14}" placeholder="+966501234567" /></label>
+          <label>Relationship<input name="relationship" maxLength={80} defaultValue="Parent" placeholder="Parent, Guardian…" /></label>
+          <div className="form-actions"><button className="button secondary" type="button" onClick={() => setFormOpen(false)}>Cancel</button><button className="button primary" disabled={busy || activeClasses.length === 0}>{busy ? 'Creating…' : 'Create student & invite parent'}</button></div>
+        </form>
+      </section>}
+      {importOpen && <section className="section-card form-card student-form-card" style={{ marginTop: 12 }}><div className="card-heading"><div><span className="eyebrow">BULK ONBOARDING</span><h3>Import students from CSV</h3></div><button className="icon-button" onClick={() => setImportOpen(false)} aria-label="Close student import">×</button></div>
+        <p className="muted">Upload a CSV with one student and guardian per row. The CSV contents are sent to the school API to create accounts; invitation codes are shown after import.</p>
+        <div className="student-import-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap', margin: '12px 0 14px' }}><button className="button secondary small" onClick={downloadTemplate}>↓ Download CSV template</button><button className="button secondary small" onClick={() => csvInputRef.current?.click()}>Choose CSV file</button><input ref={csvInputRef} type="file" accept=".csv,text/csv" hidden aria-label="Choose student CSV file" onChange={(event) => { void previewCsv(event.target.files?.[0]); event.currentTarget.value = ''; }} /><span className="muted">{csvName || 'Maximum 200 rows · file up to 1 MB'}</span></div>
+        <div className="column-guide"><strong>Required columns, in this exact order</strong><p><code>studentDisplayName</code> <code>admissionNumber</code> <code>classCode</code> <code>parentDisplayName</code> <code>parentPhoneE164</code> <code>relationship</code></p><small>Parent mobile numbers must use international format, e.g. +966501234567. Class codes must match an active class in this school.</small></div>
+        {busy && <div className="progress-row"><div className="spinner small-spinner" /><span>{importResult ? 'Importing student accounts…' : 'Checking CSV rows and class codes…'}</span></div>}
+        {preview && <><div className={`alert ${preview.valid ? 'success' : 'danger'}`}>{preview.valid ? `${preview.count} rows validated. Review them before creating accounts.` : 'One or more class codes do not match classes in this school.'}</div><div className="table-wrap"><table><thead><tr><th>Row</th><th>Student</th><th>Admission number</th><th>Class</th><th>Validation</th></tr></thead><tbody>{preview.rows.map((row) => { const classroom = classes.find((item) => item.classCode === row.classCode); return <tr key={row.row}><td>{row.row}</td><td>{row.studentDisplayName}</td><td><code>{row.admissionNumber}</code></td><td>{classroom?.displayName ?? row.classCode}</td><td><StatusPill value={row.classId ? 'READY' : 'CLASS_NOT_FOUND'} /></td></tr>; })}</tbody></table></div><div className="form-actions"><button className="button primary" disabled={busy || !preview.valid} onClick={() => { void importCsv(); }}>{busy ? 'Importing…' : `Create ${preview.count} students & invitations`}</button></div></>}
+        {importResult && <><div className={`alert ${importResult.failed ? 'danger' : 'success'}`}>Imported {importResult.imported}; failed {importResult.failed}. Retry failed rows only to avoid duplicate admissions.</div><div className="table-wrap"><table><thead><tr><th>Row</th><th>Admission number</th><th>Result</th><th>Parent invitation</th></tr></thead><tbody>{importResult.results.map((item) => <tr key={`${item.row}-${item.admissionNumber}`}><td>{item.row}</td><td><code>{item.admissionNumber}</code></td><td><StatusPill value={item.status} />{item.error && <small className="table-subtitle">{item.error.replaceAll('_', ' ').toLowerCase()}</small>}</td><td>{item.invitationCode ? <><code>{item.invitationCode}</code> <button className="text-button" onClick={() => { void copyInvitation(item.admissionNumber, item.invitationCode!); }}>{copiedAdmission === item.admissionNumber ? 'Copied' : 'Copy'}</button></> : '—'}</td></tr>)}</tbody></table></div></>}
+      </section>}
+      {activeClasses.length === 0 && <div className="alert danger">Set up an active class before adding or importing students.</div>}
+      {students.length ? <div className="table-wrap"><table><thead><tr><th>Student</th><th>Admission number</th><th>Class</th><th>Linked guardians</th><th>Status</th></tr></thead><tbody>{filtered.map((student) => <tr key={student.id}><td><div className="table-person"><span className="person-avatar lilac">{student.displayName.slice(0, 1)}</span><strong>{student.displayName}</strong></div></td><td><code>{student.admissionNumber}</code></td><td>{student.className ?? '—'}</td><td>{student.guardianCount}</td><td><StatusPill value={student.status} /></td></tr>)}</tbody></table></div> : <EmptyState title="No students in the roster" body="Add one student and guardian, or import a CSV for multiple students." />}
+      {students.length > 0 && filtered.length === 0 && <div className="empty-inline">No students match “{search}”.</div>}
+    </section>
+  </div>;
 }
 
 function ResultsPage({ students, request, onMessage }: {
