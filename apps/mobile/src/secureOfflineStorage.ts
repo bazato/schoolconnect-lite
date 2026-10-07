@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { AESEncryptionKey, AESSealedData, aesDecryptAsync, aesEncryptAsync } from 'expo-crypto';
-import { offlineSecretSecureKey } from './secureStoreKeys';
+import { assertSecureStoreKey, offlineSecretSecureKey } from './secureStoreKeys';
 
 const keyPromises = new Map<string, Promise<AESEncryptionKey>>();
 
@@ -10,10 +10,11 @@ async function userKey(userId: string): Promise<AESEncryptionKey> {
   const existing = keyPromises.get(userId);
   if (existing) return existing;
   const pending = (async () => {
-    const stored = await SecureStore.getItemAsync(offlineSecretSecureKey(userId));
+    const key = assertSecureStoreKey(offlineSecretSecureKey(userId));
+    const stored = await SecureStore.getItemAsync(key);
     if (stored) return AESEncryptionKey.import(stored, 'base64');
     const generated = await AESEncryptionKey.generate();
-    await SecureStore.setItemAsync(offlineSecretSecureKey(userId), await generated.encoded('base64'), {
+    await SecureStore.setItemAsync(key, await generated.encoded('base64'), {
       keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
     });
     return generated;
@@ -45,6 +46,6 @@ export const secureOfflineStorage = {
   multiRemove: (keys: string[]) => AsyncStorage.multiRemove(keys),
   async clearUserKey(userId: string) {
     keyPromises.delete(userId);
-    if (Platform.OS !== 'web') await SecureStore.deleteItemAsync(offlineSecretSecureKey(userId));
+    if (Platform.OS !== 'web') await SecureStore.deleteItemAsync(assertSecureStoreKey(offlineSecretSecureKey(userId)));
   },
 };

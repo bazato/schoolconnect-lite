@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { offlineSecretSecureKey, SESSION_SECURE_KEY } from './secureStoreKeys';
+import { assertSecureStoreKey, offlineSecretSecureKey, SESSION_SECURE_KEY } from './secureStoreKeys';
 
 const validSecureStoreKey = /^[A-Za-z0-9._-]+$/;
 
@@ -20,5 +20,10 @@ describe('native SecureStore keys', () => {
   it('rejects unsafe or empty user IDs before accessing native storage', () => {
     expect(() => offlineSecretSecureKey('')).toThrow('INVALID_OFFLINE_USER_ID');
     expect(() => offlineSecretSecureKey('school:parent')).toThrow('INVALID_OFFLINE_USER_ID');
+  });
+
+  it('rejects accidental AsyncStorage names before passing them to native SecureStore', () => {
+    expect(() => assertSecureStoreKey('schoolconnect:session')).toThrow('INVALID_SECURE_STORE_KEY');
+    expect(assertSecureStoreKey(SESSION_SECURE_KEY)).toBe('schoolconnect.session');
   });
 });

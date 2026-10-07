@@ -1,6 +1,6 @@
 # Implementation status
 
-## Current local architecture (2026-10-06)
+## Current local architecture (2026-10-07)
 
 - Docker PostgreSQL and Kafka are running locally. Eight isolated databases include the new `schoolconnect_read`; migrations through `101-read-model-backfill.sql` are applied.
 - A separate stateless Authorization service decides gateway routes and guardian/teacher resource access using configurable rules and live School facts. Gateway controller checks still restrict some role expansions; the external policy is not yet the sole place to change every role behavior.
@@ -9,7 +9,11 @@
 - More School administration changes and Identity role switching now emit audit events in the owner-service transaction. Kafka delivery remains asynchronous, so audit/read visibility may lag a successful business response.
 - The local integration suite (8/8), product suite (9/9), unit tests, lint, typecheck, application build and backend Docker image build passed during this change. A 100-client/500-request local synthetic load check had zero failures and p95 around 1.7 seconds; this is not production-capacity certification.
 - After the latest product run, Content and Read Model each contained 70 posts, Attendance and Read Model each contained 26 current attendance rows, and the three active Kafka consumer groups had zero lag. An obsolete pre-migration consumer group remains registered with lag but has no active members or role in this version.
-- The current remote demo has **not** been upgraded to this Kafka-required version. It needs a reachable broker, deployment configuration, migration and monitoring work first. No separate worker is needed.
+- A separate `apps/web` administration portal now uses the same gateway: platform owners create schools and first administrators; school administrators manage classes and teachers and prepare student result imports from Excel. Result rows are validated against the tenant roster, published as per-student posts in one content transaction, and exposed only to linked guardians. The workbook is parsed in-browser and is not uploaded.
+- Scheduled-post delivery now reconciles due content at startup and every five seconds in addition to PostgreSQL notifications, so a missed notification or process restart does not strand a due announcement.
+- Mobile SecureStore calls now validate allowed key characters and user-id length before reaching the native module. The existing missing-browser-hostname fallback is covered by tests. These source fixes do not update an already-installed APK; a fresh JS bundle/native build must reach the phone. The Expo web export succeeds, but this machine's debug APK build currently stops when Ninja hits Windows' 260-character path limit in pnpm-generated C++ files.
+- Current local verification: 8/8 integration security/concurrency flows passed; 10/10 end-to-end product workflows passed, including delayed announcement publication and Excel preview → role denial → idempotent batch publish → guardian timeline delivery. The OTP rate-limit record for the synthetic seeded owner phone was reset narrowly for the repeated local test run; no business records were cleared.
+- Local Docker PostgreSQL and Kafka were used for the workflow tests. This confirms local event publication and projection delivery; it does not confirm that the newly changed portal/API code has been deployed to Render.
 
 ## Open hardening after this change
 
@@ -17,6 +21,8 @@
 - Event-build remaining read surfaces where justified, add projection rebuild/replay tooling and stronger event schema evolution tests.
 - Add Kafka lag/outbox-age alerts, dead-letter/recovery handling and operational readiness checks; run failover and larger distinct-user load tests.
 - Configure real OTP/SMS, mobile push, malware scan and private object storage; finish device/offline QA, backups, TLS/secrets, native signing and deployment.
+- Deploy the web portal as a static site and add its final origin to the API's CORS allowlist; deploy the matching API and migrations. The web app currently runs locally and is not yet a hosted portal.
+- Build and reinstall a fresh Android APK/Expo bundle to replace the stale installed app, then verify on the user's device. The screenshot error cannot be fully cleared from an already-installed bundle by changing source alone.
 
 The sections below record earlier implementation history and may mention the removed worker or prior database fallback. The current architecture above and `docs/architecture.md` supersede those historical statements.
 

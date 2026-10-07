@@ -47,6 +47,28 @@ type CreatePostRevisionRequest = {
   correlationId?: string;
 };
 
+type BulkResultInput = {
+  schoolId: string;
+  actorUserId: string;
+  authorMembershipId: string;
+  idempotencyKey: string;
+  correlationId?: string;
+  rows: Array<{
+    admissionNumber: string;
+    studentId: string;
+    classId: string;
+    examName: string;
+    subjectCode?: string;
+    subjectName: string;
+    marksObtained: number;
+    maxMarks: number;
+    grade?: string;
+    remarks?: string;
+    resultDate?: string;
+    recipients: Array<{ studentId: string; guardianUserId: string; snapshot?: Record<string, unknown> }>;
+  }>;
+};
+
 const requestHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 @Injectable()
@@ -186,6 +208,64 @@ class ContentRepository implements OnModuleDestroy {
       await client.query('ROLLBACK');
       throw error;
     } finally { client.release(); }
+  }
+
+  async publishResultBatch(input: BulkResultInput) {
+    if (!input.idempotencyKey || !input.rows?.length || input.rows.length > 200) throw new BadRequestException({ code: 'RESULT_BATCH_INVALID' });
+    for (const row of input.rows) {
+      if (!row.studentId || !row.classId || !row.admissionNumber || !row.examName || !row.subjectName ||
+          !Number.isFinite(row.marksObtained) || !Number.isFinite(row.maxMarks) || row.marksObtained < 0 ||
+          row.maxMarks <= 0 || row.marksObtained > row.maxMarks || !row.recipients.length ||
+          row.recipients.some((recipient) => recipient.studentId !== row.studentId || !recipient.guardianUserId)) {
+        throw new BadRequestException({ code: 'RESULT_BATCH_ROW_INVALID' });
+      }
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const hash = requestHash({ ...input, correlationId: undefined });
+      const existing = await client.query<{ request_hash: string; response_body: unknown }>(
+        `SELECT request_hash,response_body FROM idempotency_keys WHERE actor_id=$1 AND operation='PUBLISH_RESULT_BATCH' AND idempotency_key=$2 AND expires_at>now() FOR UPDATE`,
+        [input.actorUserId, input.idempotencyKey]);
+      if (existing.rowCount) {
+        if (existing.rows[0]!.request_hash !== hash) throw new BadRequestException({ code: 'IDEMPOTENCY_KEY_REUSED' });
+        await client.query('COMMIT');
+        return existing.rows[0]!.response_body;
+      }
+      const publishedRows: Array<{ admissionNumber: string; studentId: string; postId: string; recipientCount: number }> = [];
+      for (const row of input.rows) {
+        const postId = randomUUID();
+        const revisionId = randomUUID();
+        const title = `${row.examName} — ${row.subjectName}`.slice(0, 150);
+        const resultBody = [
+          `Subject: ${row.subjectName}`,
+          `Score: ${row.marksObtained} / ${row.maxMarks}`,
+          row.grade ? `Grade: ${row.grade}` : undefined,
+          row.resultDate ? `Result date: ${row.resultDate}` : undefined,
+          row.remarks ? `Remarks: ${row.remarks}` : undefined,
+        ].filter(Boolean).join('\n');
+        await client.query(`INSERT INTO posts (id,school_id,author_membership_id,class_id,post_type,status,published_at,created_correlation_id)
+          VALUES ($1,$2,$3,$4,'RESULT','PUBLISHED',now(),$5)`, [postId,input.schoolId,input.authorMembershipId,row.classId,input.correlationId ?? null]);
+        await client.query(`INSERT INTO post_revisions (id,post_id,revision_number,title,body,subject_code,exam_name,audience_type,created_by_membership_id)
+          VALUES ($1,$2,1,$3,$4,$5,$6,'STUDENT',$7)`, [revisionId,postId,title,resultBody,row.subjectCode ?? null,row.examName,input.authorMembershipId]);
+        for (const recipient of row.recipients) {
+          await client.query(`INSERT INTO post_recipients (post_id,school_id,student_id,guardian_user_id,recipient_snapshot)
+            VALUES ($1,$2,$3,$4,$5)`, [postId,input.schoolId,recipient.studentId,recipient.guardianUserId,recipient.snapshot ?? {}]);
+        }
+        const eventId = randomUUID();
+        // Result marks stay in the content database. The read-model consumer
+        // fetches this snapshot over the authenticated internal service link.
+        await client.query(`INSERT INTO outbox_events (id,event_type,aggregate_id,payload) VALUES ($1,$2,$3,$4)`,
+          [eventId,domainEventTypes.postPublished,postId,{ schoolId: input.schoolId,postId,postType: 'RESULT',correlationId: input.correlationId,
+            recipients: row.recipients, notification: { title: 'New academic result available', body: `${row.examName} result is ready to view.` } }]);
+        publishedRows.push({ admissionNumber: row.admissionNumber,studentId: row.studentId,postId,recipientCount: row.recipients.length });
+      }
+      const response = { batchId: input.idempotencyKey,published: publishedRows.length,results: publishedRows };
+      await client.query(`INSERT INTO idempotency_keys (actor_id,operation,idempotency_key,request_hash,response_status,response_body,expires_at)
+        VALUES ($1,'PUBLISH_RESULT_BATCH',$2,$3,201,$4,now()+interval '7 days')`, [input.actorUserId,input.idempotencyKey,hash,response]);
+      await client.query('COMMIT');
+      return response;
+    } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
 
   async saveDraft(input: { schoolId: string; authorMembershipId: string; classId: string; postType: CreatePostRequest['postType']; payload: Record<string, unknown> }) {
@@ -385,6 +465,7 @@ class ContentController {
   @Get('posts/:postId') post(@Param('postId') postId: string, @Query('schoolId') schoolId: string, @Query('guardianUserId') guardianUserId?: string, @Query('studentId') studentId?: string) { return this.repository.findPost(schoolId, postId, guardianUserId, studentId); }
   @Get('files/:fileId/context') fileContext(@Param('fileId') fileId: string, @Query('schoolId') schoolId: string) { return this.repository.fileContext(schoolId, fileId); }
   @Post('posts') create(@Body() body: CreatePostRequest) { return this.repository.create(body); }
+  @Post('results/bulk-publish') publishResultBatch(@Body() body: BulkResultInput) { return this.repository.publishResultBatch(body); }
   @Post('drafts') saveDraft(@Body() body: Parameters<ContentRepository['saveDraft']>[0]) { return this.repository.saveDraft(body); }
   @Get('drafts') drafts(@Query('schoolId') schoolId: string, @Query('authorMembershipId') authorMembershipId: string) { return this.repository.drafts(schoolId, authorMembershipId); }
   @Post('drafts/:draftId/delete') deleteDraft(@Param('draftId') draftId: string, @Body() body: { schoolId: string; authorMembershipId: string }) { return this.repository.deleteDraft(body.schoolId, body.authorMembershipId, draftId); }

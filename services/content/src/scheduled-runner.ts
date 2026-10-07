@@ -14,13 +14,21 @@ export class ScheduledPostRunner implements OnModuleInit, OnModuleDestroy {
   private listener?: Client;
   private timer?: NodeJS.Timeout;
   private retry?: NodeJS.Timeout;
+  private reconcile?: NodeJS.Timeout;
   private closed = false;
   private generation = 0;
   private connecting = false;
+  private publishingDue = false;
 
   constructor(private readonly store: ScheduledStore, private readonly databaseUrl: string) {}
 
-  onModuleInit() { void this.connect(); }
+  onModuleInit() {
+    void this.connect();
+    // LISTEN makes schedule changes immediate; reconciliation also recovers from
+    // missed notifications, transient DB disconnects, and process restarts.
+    this.reconcile = setInterval(() => { void this.runDue(); }, 5_000);
+    void this.runDue();
+  }
 
   private async connect() {
     if (this.closed || this.connecting || this.listener) return;
@@ -73,6 +81,8 @@ export class ScheduledPostRunner implements OnModuleInit, OnModuleDestroy {
   }
 
   private async runDue() {
+    if (this.closed || this.publishingDue) return;
+    this.publishingDue = true;
     try {
       let batch: { published: number };
       do { batch = await this.store.publishDue(25); } while (batch.published === 25 && !this.closed);
@@ -80,13 +90,14 @@ export class ScheduledPostRunner implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       console.error('scheduled-publish-failed', error instanceof Error ? error.message : error);
       this.timer = setTimeout(() => { void this.runDue(); }, 5_000);
-    }
+    } finally { this.publishingDue = false; }
   }
 
   async onModuleDestroy() {
     this.closed = true;
     if (this.timer) clearTimeout(this.timer);
     if (this.retry) clearTimeout(this.retry);
+    if (this.reconcile) clearInterval(this.reconcile);
     await this.listener?.end().catch(() => undefined);
   }
 }

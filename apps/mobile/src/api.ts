@@ -3,7 +3,7 @@ import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import type { Role } from './domain';
 import { isDemoMode, resolveApiUrl } from './config';
-import { SESSION_SECURE_KEY } from './secureStoreKeys';
+import { assertSecureStoreKey, SESSION_SECURE_KEY } from './secureStoreKeys';
 import { withReturningMemberFallback } from './otp-request';
 import { cacheChildren, cachedChildren, cachePublicTimeline, cachedPublicTimeline, cacheScopedRead, cachedScopedRead, clearOfflineUserData, queueMutation, queuedMutations, replayMutations, type QueuedMutation } from './offline';
 
@@ -184,11 +184,11 @@ export function verifyOtp(challengeId: string, code: string) {
 export async function saveSession(session: MobileSession) {
   const value = JSON.stringify(session);
   if (Platform.OS === 'web') await AsyncStorage.setItem(SESSION_KEY, value);
-  else await SecureStore.setItemAsync(SESSION_KEY, value, { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY });
+  else await SecureStore.setItemAsync(assertSecureStoreKey(SESSION_KEY), value, { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY });
 }
 
 export async function loadSession(): Promise<MobileSession | null> {
-  const value = Platform.OS === 'web' ? await AsyncStorage.getItem(SESSION_KEY) : await SecureStore.getItemAsync(SESSION_KEY);
+  const value = Platform.OS === 'web' ? await AsyncStorage.getItem(SESSION_KEY) : await SecureStore.getItemAsync(assertSecureStoreKey(SESSION_KEY));
   return value ? JSON.parse(value) as MobileSession : null;
 }
 
@@ -196,7 +196,7 @@ export async function clearSession() {
   const session = await loadSession().catch(() => null);
   if (session) await clearOfflineUserData(session.user.id);
   if (Platform.OS === 'web') await AsyncStorage.removeItem(SESSION_KEY);
-  else await SecureStore.deleteItemAsync(SESSION_KEY);
+  else await SecureStore.deleteItemAsync(assertSecureStoreKey(SESSION_KEY));
 }
 
 async function resilientMutation<T>(session: MobileSession, path: string, body: Record<string, unknown>, allowQueue: boolean): Promise<T | { status: 'QUEUED' }> {

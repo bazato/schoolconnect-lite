@@ -26,7 +26,7 @@ const login = async (phoneE164, invitationCode) => {
 };
 
 const suffix = String(Date.now()).slice(-8);
-console.log('1/9 owner and school account lifecycle');
+console.log('1/10 owner and school account lifecycle');
 const owner = await login('+919876543200', 'OWNER-INVITE');
 const newOwner = await send('/admin/platform-owners', owner.accessToken, { displayName: 'Additional Owner', phoneE164: `+96659${suffix}` });
 assert.equal((await call('/admin/platform-owners', { token: owner.accessToken })).some((item) => item.membershipId === newOwner.membershipId), true);
@@ -36,7 +36,7 @@ const admin = await login(`+96650${suffix}`, school.administrator.invitationCode
 await send(`/admin/schools/${school.school.id}/admins`, owner.accessToken, { displayName: 'Second Admin', phoneE164: `+96658${suffix}` });
 assert.equal((await call(`/admin/schools/${school.school.id}/admins`, { token: owner.accessToken })).length, 2);
 
-console.log('2/9 class, teacher, parent and audience configuration');
+console.log('2/10 class, teacher, parent and audience configuration');
 const firstClass = await send('/admin/classes', admin.accessToken, { classCode: 'G1A', gradeCode: 'G1', displayName: 'Grade 1 A', academicYear: '2026-2027' });
 const secondClass = await send('/admin/classes', admin.accessToken, { classCode: 'G1B', gradeCode: 'G1', displayName: 'Grade 1 B', academicYear: '2026-2027' });
 await send('/admin/configuration', admin.accessToken, { scheduledAnnouncementsEnabled: true, gradeWideAnnouncementsEnabled: true, schoolWideAnnouncementsEnabled: true }, 'PATCH');
@@ -47,7 +47,7 @@ const secondParentProvision = await send('/admin/parents', admin.accessToken, { 
 const firstParent = await login(`+96652${suffix}`, firstParentProvision.parent.invitationCode);
 const secondParent = await login(`+96653${suffix}`, secondParentProvision.parent.invitationCode);
 
-console.log('3/9 grade publishing, read report and archive');
+console.log('3/10 grade publishing, read report and archive');
 const gradePost = await send('/posts', teacher.accessToken, { classId: firstClass.id, postType: 'ANNOUNCEMENT', title: 'Grade announcement', body: 'For the entire grade', audienceType: 'GRADE', urgent: false, idempotencyKey: randomUUID() });
 assert.equal(gradePost.recipientCount, 2);
 await eventually(async () => (await call(`/timeline/${firstParentProvision.student.studentId}`, { token: firstParent.accessToken })).some((item) => item.id === gradePost.id));
@@ -72,7 +72,7 @@ const draft = await send('/drafts',teacher.accessToken,{ classId:firstClass.id,p
 assert.ok((await call('/drafts',{ token:teacher.accessToken })).some((item)=>item.id===draft.id && item.payload.title==='Restorable draft'));
 await send(`/drafts/${draft.id}/delete`,teacher.accessToken,{});
 
-console.log('4/9 scheduled announcement');
+console.log('4/10 scheduled announcement');
 const scheduled = await send('/posts', teacher.accessToken, { classId: firstClass.id, postType: 'ANNOUNCEMENT', title: 'Scheduled notice', body: 'Published by worker', audienceType: 'CLASS', urgent: false, scheduledFor: new Date(Date.now() + 5000).toISOString(), idempotencyKey: randomUUID() });
 assert.equal(scheduled.status, 'SCHEDULED');
 await eventually(async () => (await call('/teacher-posts',{ token:teacher.accessToken })).find((item)=>item.id===scheduled.id)?.scheduledFor);
@@ -81,7 +81,7 @@ assert.equal(scheduledRevision.status,'SCHEDULED');
 await new Promise((resolve) => setTimeout(resolve, 8000));
 await eventually(async () => (await call(`/timeline/${firstParentProvision.student.studentId}`, { token: firstParent.accessToken })).find((item) => item.id === scheduled.id)?.title === 'Edited scheduled notice');
 
-console.log('5/9 CSV import and student/guardian lifecycle');
+console.log('5/10 CSV import and student/guardian lifecycle');
 const csv = `studentDisplayName,admissionNumber,classCode,parentDisplayName,parentPhoneE164,relationship\nImported Student,IMP-${suffix},G1A,Imported Parent,+96654${suffix},Parent`;
 const preview = await send('/admin/students/import-preview', admin.accessToken, { csv });
 assert.equal(preview.valid, true);
@@ -98,7 +98,24 @@ assert.equal((await call(`/me/children`, { token: firstParent.accessToken })).le
 await send(`/admin/students/${importedStudent.id}/guardians/${firstParentProvision.parent.userId}/link`, admin.accessToken, { active: false });
 assert.equal((await call(`/me/children`, { token: firstParent.accessToken })).length, 1);
 
-console.log('6/9 leave review and attendance correction');
+console.log('6/10 Excel result preview, scoped publish and guardian delivery');
+const importedParent = await login(`+96654${suffix}`, imported.results[0].invitationCode);
+const resultRows = [{ admissionNumber: `IMP-${suffix}`, examName: 'Term 1', subjectName: 'Mathematics', marksObtained: 87, maxMarks: 100, grade: 'A', remarks: 'Great progress' }];
+const resultPreview = await send('/admin/results/import-preview', admin.accessToken, { rows: resultRows });
+assert.equal(resultPreview.valid, true);
+assert.equal(resultPreview.rows[0].guardianCount, 1);
+await call('/admin/results/import-preview', { token: firstParent.accessToken, method: 'POST', body: JSON.stringify({ rows: resultRows }), expected: 403 });
+const resultBatchId = randomUUID();
+const resultBatch = await send('/admin/results/import-publish', admin.accessToken, { batchId: resultBatchId, rows: resultRows });
+assert.equal(resultBatch.published, 1);
+const importedTimeline = await eventually(async () => (await call(`/timeline/${importedStudent.id}`, { token: importedParent.accessToken })).find((item) => item.id === resultBatch.results[0].postId));
+assert.match(importedTimeline.title, /Term 1.*Mathematics/);
+const resultDetail = await call(`/posts/${resultBatch.results[0].postId}?studentId=${importedStudent.id}`, { token: importedParent.accessToken });
+assert.match(resultDetail.body, /Score: 87 \/ 100/);
+const duplicateResultBatch = await send('/admin/results/import-publish', admin.accessToken, { batchId: resultBatchId, rows: resultRows });
+assert.equal(duplicateResultBatch.results[0].postId, resultBatch.results[0].postId);
+
+console.log('7/10 leave review and attendance correction');
 const date = new Date().toISOString().slice(0, 10);
 const roster = await call(`/attendance/roster?classId=${firstClass.id}`, { token: teacher.accessToken });
 const version = await call(`/attendance/version?classId=${firstClass.id}&attendanceDate=${date}`, { token: teacher.accessToken });
@@ -120,7 +137,7 @@ await call(`/admin/attendance/correction-context?classId=${firstClass.id}&attend
 await send('/admin/attendance/corrections', admin.accessToken, { classId: firstClass.id, attendanceDate: date, expectedVersion: correctionContext.version, correctionReason: 'Administrator escalation after parent review', idempotencyKey: randomUUID(), rows: correctionContext.roster.map((item) => ({ studentId: item.id, status: item.id === firstParentProvision.student.studentId ? 'LATE' : 'PRESENT' })) });
 assert.equal((await call(`/attendance/students/${firstParentProvision.student.studentId}`, { token: firstParent.accessToken }))[0].attendanceStatus, 'LATE');
 
-console.log('7/9 teacher lifecycle and school reports');
+console.log('8/10 teacher lifecycle and school reports');
 const assignments = await call(`/admin/teachers/${teacherProvision.teacher.membershipId}/assignments`, { token: admin.accessToken });
 assert.equal(assignments.length, 1);
 await send(`/admin/assignments/${assignments[0].assignmentId}`, admin.accessToken, { classId: secondClass.id }, 'PATCH');
@@ -133,12 +150,12 @@ const platformReport = await call('/admin/reports/platform-summary', { token: ow
 assert.ok(platformReport.schools.some((item) => item.schoolId === school.school.id && item.activeStudentCount >= 3 && item.activeTeacherCount >= 1));
 await call('/admin/reports/platform-summary', { token: admin.accessToken, expected: 403 });
 
-console.log('8/9 academic rollover');
+console.log('9/10 academic rollover');
 const rollover = await send('/admin/academic-years/rollover', admin.accessToken, { fromYear: '2026-2027', toYear: '2027-2028' });
 assert.equal(rollover.classesCreated, 2);
 assert.equal((await call('/admin/classes', { token: admin.accessToken })).filter((item) => item.academicYear === '2027-2028').length, 2);
 
-console.log('9/9 school suspension and tenant access');
+console.log('10/10 school suspension and tenant access');
 await send(`/admin/schools/${school.school.id}`, owner.accessToken, { status: 'SUSPENDED' }, 'PATCH');
 await call('/admin/classes', { token: admin.accessToken, expected: 403 });
 await send(`/admin/schools/${school.school.id}`, owner.accessToken, { status: 'ACTIVE' }, 'PATCH');

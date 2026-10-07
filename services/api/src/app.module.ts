@@ -6,6 +6,7 @@ import { APP_GUARD, Reflector } from '@nestjs/core';
 import { randomUUID } from 'node:crypto';
 import type { Request } from 'express';
 import { parseStudentCsv } from './csv';
+import { parseResultImportRows } from './results-import';
 import { currentRequestContext } from './request-context';
 
 type Role = 'PLATFORM_OWNER' | 'SCHOOL_ADMIN' | 'TEACHER' | 'PARENT';
@@ -572,6 +573,62 @@ class AdminController {
       } catch (error) { results.push({ row: index + 2, admissionNumber: row.admissionNumber, status: 'FAILED', error: error instanceof Error ? error.message : 'IMPORT_FAILED' }); }
     }
     return { imported: results.filter((item) => item.status === 'IMPORTED').length, failed: results.filter((item) => item.status === 'FAILED').length, results };
+  }
+
+  private async resolveResultImport(principal: Principal, input: unknown) {
+    const rows = parseResultImportRows(input);
+    const schoolId = this.schoolId(principal);
+    const [students, classes] = await Promise.all([
+      this.clients.request<Array<{ id: string; admissionNumber: string; displayName: string; classId: string | null; className?: string; guardianCount: number; status: string }>>('school', `/internal/v1/schools/${schoolId}/students`),
+      this.clients.request<Array<{ id: string; classCode: string; displayName: string; status: string }>>('school', `/internal/v1/schools/${schoolId}/classes`),
+    ]);
+    const studentByAdmission = new Map(students.map((student) => [student.admissionNumber.toUpperCase(), student]));
+    const activeClasses = new Map(classes.filter((item) => item.status === 'ACTIVE').map((item) => [item.id, item]));
+    return rows.map((row, index) => {
+      const student = studentByAdmission.get(row.admissionNumber);
+      const classroom = student?.classId ? activeClasses.get(student.classId) : undefined;
+      const error = !student ? 'STUDENT_NOT_FOUND_IN_SCHOOL'
+        : student.status !== 'ACTIVE' ? 'STUDENT_NOT_ACTIVE'
+          : !classroom ? 'STUDENT_CLASS_NOT_ACTIVE'
+            : student.guardianCount < 1 ? 'NO_ACTIVE_GUARDIAN' : undefined;
+      return { ...row, row: index + 2, studentId: student?.id ?? null, studentName: student?.displayName ?? null,
+        classId: classroom?.id ?? null, className: classroom?.displayName ?? null, guardianCount: student?.guardianCount ?? 0,
+        status: error ? 'INVALID' : 'READY', error };
+    });
+  }
+
+  @Post('results/import-preview')
+  async previewResultImport(@Body() body: { rows?: unknown }, @CurrentPrincipal() principal: Principal) {
+    const rows = await this.resolveResultImport(principal, body.rows);
+    return { count: rows.length, valid: rows.every((row) => row.status === 'READY'), rows };
+  }
+
+  @Post('results/import-publish')
+  async publishResultImport(@Body() body: { batchId?: string; rows?: unknown }, @CurrentPrincipal() principal: Principal) {
+    if (!body.batchId || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.batchId)) {
+      throw new BadRequestException({ code: 'RESULT_BATCH_ID_INVALID' });
+    }
+    const rows = await this.resolveResultImport(principal, body.rows);
+    const invalid = rows.find((row) => row.status !== 'READY');
+    if (invalid) throw new BadRequestException({ code: 'RESULT_IMPORT_HAS_INVALID_ROWS', row: invalid.row, reason: invalid.error });
+    const schoolId = this.schoolId(principal);
+    const recipientCache = new Map<string, Array<{ studentId: string; guardianUserId: string; snapshot?: Record<string, unknown> }>>();
+    for (const row of rows) {
+      if (!recipientCache.has(row.classId!)) {
+        const recipients = await this.clients.request<Array<{ studentId: string; guardianUserId: string; snapshot?: Record<string, unknown> }>>(
+          'school', `/internal/v1/schools/${schoolId}/classes/${row.classId}/recipients`);
+        recipientCache.set(row.classId!, recipients);
+      }
+    }
+    const resultRows = rows.map((row) => ({ admissionNumber: row.admissionNumber, studentId: row.studentId!, classId: row.classId!,
+      examName: row.examName, subjectCode: row.subjectCode, subjectName: row.subjectName, marksObtained: row.marksObtained,
+      maxMarks: row.maxMarks, grade: row.grade, remarks: row.remarks, resultDate: row.resultDate,
+      recipients: (recipientCache.get(row.classId!) ?? []).filter((recipient) => recipient.studentId === row.studentId) }));
+    if (resultRows.some((row) => row.recipients.length === 0)) throw new BadRequestException({ code: 'RESULT_GUARDIAN_CHANGED_REVIEW_IMPORT' });
+    return this.clients.request('content', '/internal/v1/results/bulk-publish', { method: 'POST', body: JSON.stringify({
+      schoolId, actorUserId: principal.userId, authorMembershipId: principal.membershipId, idempotencyKey: body.batchId,
+      correlationId: currentRequestContext()?.correlationId, rows: resultRows,
+    }) });
   }
 
   @Get('leave-requests')

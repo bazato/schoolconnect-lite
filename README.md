@@ -19,8 +19,10 @@ One Expo/React Native application for Platform Owner, School Admin, Teacher and 
 - Secure mobile session storage for non-web native builds and a typed mobile API adapter
 - Encrypted native offline cache and ordered, role-scoped mutation queue with conflict review
 - Scheduled/archived announcement lifecycle, broader audience grants, read reports, CSV import, academic rollover, leave review and administrator attendance escalation
+- Separate role-aware web portal for platform owners and school administrators: school/admin setup, classes, teacher/student views, and Excel result preview/publishing
+- Excel import parses locally in the browser, validates rows against the signed-in school roster, and creates private student-scoped result posts with transactional outbox events
 
-The optional administration web console remains intentionally excluded.
+The web portal is a separate administration interface over the same API gateway; teacher and parent day-to-day use remains in the mobile app.
 
 Railway backend packaging and environment requirements are in [docs/railway-deployment.md](docs/railway-deployment.md). Deployment is separate from native app distribution; mocked OTP must not be exposed as a public production login.
 
@@ -44,6 +46,8 @@ pnpm build
 pnpm dev:services
 pnpm dev:mobile
 ```
+
+In a second terminal, run the school administration portal with `pnpm --filter @schoolconnect/web dev` (default `http://localhost:5173`). For local browser access, include that origin in `CORS_ALLOWED_ORIGINS`. The portal defaults to the deployed demo API; set `VITE_API_URL=http://localhost:3000/api/v1` when testing against local services. Workbook contents are parsed in-browser and sent as validated JSON; the original Excel file is not uploaded or retained.
 
 Internal services bind to `127.0.0.1:3101–3109`; the public gateway uses port `3000`. If another demo instance already uses port 3000, set `PORT=3001` for the gateway and use that port in the mobile API URL. Set `EXPO_PUBLIC_DEMO_MODE=false` in `apps/mobile/.env` for database-backed login. For a physical device, set `EXPO_PUBLIC_API_URL` to the computer's LAN address (for example `http://192.168.x.x:3000/api/v1`); `localhost` points at the device itself. Development OTP is `123456`. Copy `.env.example` to a root `.env` and replace `AUTH_JWT_SECRET` before using persistent local sessions. The in-repo `apps/mobile/.env` is local and may need its LAN IP refreshed.
 

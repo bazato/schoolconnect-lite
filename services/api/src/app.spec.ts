@@ -28,7 +28,9 @@ describe('API gateway authorization and service boundaries', () => {
       if (service === 'school' && path === '/internal/v1/schools') return Promise.resolve([{ id: 'school-1', schoolCode: 'S1', displayName: 'School One' }]);
       if (service === 'school' && path === '/internal/v1/schools/school-1') return Promise.resolve({ id: 'school-1', active: true });
       if (service === 'school' && path.endsWith('/classes') && init?.method === 'POST') return Promise.resolve({ id: 'class-created', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027' });
-      if (service === 'school' && path.endsWith('/classes')) return Promise.resolve([{ id: 'class-1', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027' }]);
+      if (service === 'school' && path.endsWith('/classes')) return Promise.resolve([{ id: 'class-1', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027', status: 'ACTIVE' }]);
+      if (service === 'school' && path.endsWith('/students')) return Promise.resolve([{ id: 'student-1', admissionNumber: 'A-001', displayName: 'Child One', classId: 'class-1', className: 'Grade 5A', guardianCount: 1, status: 'ACTIVE' }]);
+      if (service === 'school' && path.endsWith('/recipients')) return Promise.resolve([{ studentId: 'student-1', guardianUserId: 'parent-1', snapshot: { studentName: 'Child One' } }]);
       if (service === 'school' && path.endsWith('/roster')) return Promise.resolve([{ id: 'student-1', displayName: 'Child One' }]);
       if (service === 'school' && path.endsWith('/children')) return Promise.resolve([{ id: 'student-1', displayName: 'Child One' }]);
       if (service === 'school' && path.endsWith('/scope')) return Promise.resolve([{ classId: 'class-1' }]);
@@ -43,7 +45,14 @@ describe('API gateway authorization and service boundaries', () => {
         const body = JSON.parse(String(init?.body)) as { classId?: string; studentId?: string };
         return Promise.resolve({ allowed: body.classId !== 'class-denied' && body.studentId !== 'student-denied', reason: 'TEST_POLICY' });
       }
-      if (service === 'authorization' && path === '/internal/v1/decisions/route') return Promise.resolve({ allowed: true, reason: 'TEST_POLICY' });
+      if (service === 'authorization' && path === '/internal/v1/decisions/route') {
+        const input = JSON.parse(String(init?.body)) as { path: string; principal: { role: string } };
+        if (!input.path.startsWith('/api/v1/admin/')) return Promise.resolve({ allowed: true, reason: 'TEST_POLICY' });
+        const platformOwnerRoute = /^\/api\/v1\/admin\/(schools|platform-owners|reports\/platform-summary)(?:\/|$)/.test(input.path);
+        const auditRoute = input.path === '/api/v1/admin/reports/audit';
+        const allowedRole = platformOwnerRoute ? 'PLATFORM_OWNER' : auditRoute ? undefined : 'SCHOOL_ADMIN';
+        return Promise.resolve({ allowed: allowedRole ? input.principal.role === allowedRole : ['PLATFORM_OWNER', 'SCHOOL_ADMIN'].includes(input.principal.role), reason: 'TEST_POLICY' });
+      }
       if (service === 'school' && path.includes('/audience-recipients')) return Promise.resolve([{ studentId: 'student-1', guardianUserId: 'parent-1', snapshot: {} }]);
       if (service === 'read' && path.startsWith('/internal/v1/timeline')) return Promise.resolve([{ id: 'post-1', title: 'Homework' }]);
       if (service === 'read' && path.startsWith('/internal/v1/teacher-posts')) return Promise.resolve([{ id: 'post-2', postType: 'ANNOUNCEMENT', title: 'School closed' }]);
@@ -52,6 +61,7 @@ describe('API gateway authorization and service boundaries', () => {
       if (service === 'attendance' && path.startsWith('/internal/v1/attendance/projection-consistency')) return Promise.resolve({ consistent: true, mismatches: [] });
       if (service === 'notifications' && path.startsWith('/internal/v1/notifications?')) return Promise.resolve([{ id: 'notice-1' }]);
       if (service === 'content' && path === '/internal/v1/posts') return Promise.resolve({ id: 'post-created', status: 'PUBLISHED' });
+      if (service === 'content' && path === '/internal/v1/results/bulk-publish') return Promise.resolve({ batchId: '123e4567-e89b-42d3-a456-426614174000', published: 1, results: [{ admissionNumber: 'A-001', studentId: 'student-1', postId: 'result-post-1', recipientCount: 1 }] });
       if (service === 'content' && path.startsWith('/internal/v1/posts/post-owned?')) return Promise.resolve({ id: 'post-owned', classId: 'class-1', postType: 'ANNOUNCEMENT', authorMembershipId: 'membership-teacher' });
       if (service === 'content' && path.startsWith('/internal/v1/posts/post-other?')) return Promise.resolve({ id: 'post-other', classId: 'class-1', postType: 'ANNOUNCEMENT', authorMembershipId: 'another-teacher' });
       if (service === 'content' && path === '/internal/v1/posts/post-owned/revisions') return Promise.resolve({ id: 'post-owned', revisionNumber: 2, status: 'UPDATED' });
@@ -134,7 +144,7 @@ describe('API gateway authorization and service boundaries', () => {
     await request(app.getHttpServer()).get('/api/v1/bff/teacher/home').set('Authorization', 'Bearer parent-token').expect(403);
     const adminHome = await request(app.getHttpServer()).get('/api/v1/bff/admin/home')
       .set('Authorization', 'Bearer admin-token').expect(200);
-    expect(adminHome.body.classes).toEqual([{ id: 'class-1', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027' }]);
+    expect(adminHome.body.classes).toEqual([{ id: 'class-1', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027', status: 'ACTIVE' }]);
     await request(app.getHttpServer()).get('/api/v1/bff/admin/home').set('Authorization', 'Bearer teacher-token').expect(403);
   });
 
@@ -257,6 +267,22 @@ describe('API gateway authorization and service boundaries', () => {
     const provision = serviceClient.request.mock.calls.find((call) => call[0] === 'identity' && call[1] === '/internal/v1/provisioning/accounts');
     expect(JSON.parse(String(provision?.[2]?.body))).toMatchObject({ schoolId: 'school-1', role: 'TEACHER' });
     expect(serviceClient.request).toHaveBeenCalledWith('school', '/internal/v1/schools/school-1/teacher-assignments', expect.objectContaining({ method: 'POST' }));
+  });
+
+  it('previews school-scoped result rows and publishes only to the matched student guardians', async () => {
+    const row = { admissionNumber: 'a-001', examName: 'Term 1', subjectName: 'Mathematics', marksObtained: 82, maxMarks: 100, grade: 'A' };
+    const preview = await request(app.getHttpServer()).post('/api/v1/admin/results/import-preview')
+      .set('Authorization', 'Bearer admin-token').send({ rows: [row] }).expect(201);
+    expect(preview.body).toMatchObject({ valid: true, rows: [{ status: 'READY', studentId: 'student-1', classId: 'class-1', guardianCount: 1 }] });
+
+    const response = await request(app.getHttpServer()).post('/api/v1/admin/results/import-publish')
+      .set('Authorization', 'Bearer admin-token').send({ batchId: '123e4567-e89b-42d3-a456-426614174000', rows: [row] }).expect(201);
+    expect(response.body.published).toBe(1);
+    const downstream = serviceClient.request.mock.calls.find((call) => call[0] === 'content' && call[1] === '/internal/v1/results/bulk-publish');
+    const payload = JSON.parse(String(downstream?.[2]?.body));
+    expect(payload).toMatchObject({ schoolId: 'school-1', authorMembershipId: 'membership-admin', rows: [{ studentId: 'student-1', recipients: [{ studentId: 'student-1', guardianUserId: 'parent-1' }] }] });
+    await request(app.getHttpServer()).post('/api/v1/admin/results/import-publish')
+      .set('Authorization', 'Bearer parent-token').send({ batchId: '123e4567-e89b-42d3-a456-426614174001', rows: [row] }).expect(403);
   });
 
   it('rejects a teacher assignment to a class outside the administrator school before creating the identity', async () => {
