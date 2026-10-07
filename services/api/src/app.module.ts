@@ -1,6 +1,6 @@
 import {
   BadGatewayException, BadRequestException, Body, CanActivate, ConflictException, Controller, createParamDecorator,
-  ExecutionContext, ForbiddenException, Get, HttpException, Inject, Injectable, Module, NotFoundException, Param, Patch, Post, Query, SetMetadata, UnauthorizedException,
+  ExecutionContext, ForbiddenException, Get, HttpException, Inject, Injectable, Module, NotFoundException, Param, ParseUUIDPipe, Patch, Post, Query, SetMetadata, UnauthorizedException,
 } from '@nestjs/common';
 import { APP_GUARD, Reflector } from '@nestjs/core';
 import { randomUUID } from 'node:crypto';
@@ -358,7 +358,7 @@ class AdminController {
   }
 
   @Get('schools/:schoolId/admins')
-  schoolAdmins(@Param('schoolId') schoolId: string, @CurrentPrincipal() principal: Principal) {
+  schoolAdmins(@Param('schoolId', new ParseUUIDPipe()) schoolId: string, @CurrentPrincipal() principal: Principal) {
     if (principal.role !== 'PLATFORM_OWNER') throw new ForbiddenException({ code: 'PLATFORM_OWNER_ROLE_REQUIRED' });
     return this.clients.request('identity', `/internal/v1/schools/${schoolId}/members?role=SCHOOL_ADMIN`);
   }
@@ -729,7 +729,7 @@ class AdminController {
     ]);
     const counts = new Map(memberships.map((item) => [item.schoolId, item]));
     return { schoolCount: schools.length, activeSchoolCount: schools.filter((item) => item.status === 'ACTIVE').length,
-      schools: schools.map((school) => ({ ...school, activeTeacherCount: counts.get(school.schoolId)?.activeTeacherCount ?? 0,
+      schools: schools.map((school) => ({ ...school, id: school.schoolId, activeTeacherCount: counts.get(school.schoolId)?.activeTeacherCount ?? 0,
         activeParentCount: counts.get(school.schoolId)?.activeParentCount ?? 0, activeAdminCount: counts.get(school.schoolId)?.activeAdminCount ?? 0 })) };
   }
 }

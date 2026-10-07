@@ -26,6 +26,9 @@ describe('API gateway authorization and service boundaries', () => {
       }
       if (service === 'school' && path === '/internal/v1/schools' && init?.method === 'POST') return Promise.resolve({ id: 'school-created', schoolCode: 'NEW1', displayName: 'New School', timezone: 'Asia/Riyadh', status: 'ACTIVE', created: true });
       if (service === 'school' && path === '/internal/v1/schools') return Promise.resolve([{ id: 'school-1', schoolCode: 'S1', displayName: 'School One' }]);
+      if (service === 'school' && path === '/internal/v1/reports/platform-summary') return Promise.resolve([{ schoolId: '123e4567-e89b-42d3-a456-426614174000', schoolCode: 'S1', displayName: 'School One', status: 'ACTIVE', activeStudentCount: 12, totalStudentCount: 12 }]);
+      if (service === 'identity' && path === '/internal/v1/reports/platform-memberships') return Promise.resolve([{ schoolId: '123e4567-e89b-42d3-a456-426614174000', activeTeacherCount: 2, activeParentCount: 10, activeAdminCount: 1 }]);
+      if (service === 'identity' && path.includes('/members?role=SCHOOL_ADMIN')) return Promise.resolve([{ userId: 'admin-user', membershipId: 'admin-membership', displayName: 'School Admin', phoneE164: '+966500000001', role: 'SCHOOL_ADMIN', status: 'ACTIVE' }]);
       if (service === 'school' && path === '/internal/v1/schools/school-1') return Promise.resolve({ id: 'school-1', active: true });
       if (service === 'school' && path.endsWith('/classes') && init?.method === 'POST') return Promise.resolve({ id: 'class-created', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027' });
       if (service === 'school' && path.endsWith('/classes')) return Promise.resolve([{ id: 'class-1', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027', status: 'ACTIVE' }]);
@@ -253,6 +256,23 @@ describe('API gateway authorization and service boundaries', () => {
     const provision = serviceClient.request.mock.calls.find((call) => call[0] === 'identity' && call[1] === '/internal/v1/provisioning/accounts');
     expect(JSON.parse(String(provision?.[2]?.body))).toMatchObject({ schoolId: 'school-created', role: 'SCHOOL_ADMIN' });
     await request(app.getHttpServer()).post('/api/v1/admin/schools').set('Authorization', 'Bearer parent-token').send(payload).expect(403);
+  });
+
+  it('includes the school id expected by the administrator selector in platform summaries', async () => {
+    const response = await request(app.getHttpServer()).get('/api/v1/admin/reports/platform-summary')
+      .set('Authorization', 'Bearer owner-token').expect(200);
+    const schoolId = '123e4567-e89b-42d3-a456-426614174000';
+    expect(response.body.schools[0]).toMatchObject({ id: schoolId, schoolId, activeAdminCount: 1 });
+    const admins = await request(app.getHttpServer()).get(`/api/v1/admin/schools/${response.body.schools[0].id}/admins`)
+      .set('Authorization', 'Bearer owner-token').expect(200);
+    expect(admins.body).toMatchObject([{ membershipId: 'admin-membership', role: 'SCHOOL_ADMIN' }]);
+    expect(serviceClient.request).toHaveBeenCalledWith('identity', `/internal/v1/schools/${schoolId}/members?role=SCHOOL_ADMIN`);
+  });
+
+  it('rejects an invalid school id before querying the identity service', async () => {
+    await request(app.getHttpServer()).get('/api/v1/admin/schools/undefined/admins')
+      .set('Authorization', 'Bearer owner-token').expect(400);
+    expect(serviceClient.request.mock.calls.some((call) => call[0] === 'identity' && call[1].includes('/schools/undefined/members'))).toBe(false);
   });
 
   it('locks class creation to the school administrator school context', async () => {
