@@ -4,12 +4,14 @@ import { resolve } from 'node:path';
 config({ path: resolve(__dirname, '../../../.env') });
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import helmet from 'helmet';
 import { requestContextMiddleware } from './request-context';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser:false });
+  app.useBodyParser('json',{ limit:'512kb' });
   app.use(requestContextMiddleware);
   app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: 'cross-origin' } }));
   app.setGlobalPrefix('api/v1');

@@ -3,7 +3,7 @@ import { config } from 'dotenv';
 import { resolve } from 'node:path';
 config({ path: resolve(__dirname, '../../../.env') });
 import 'reflect-metadata';
-import { BadRequestException, Body, ConflictException, Controller, Get, Headers, Inject, Injectable, Module, NotFoundException, OnModuleDestroy, Param, Patch, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, ForbiddenException, Get, Headers, Inject, Injectable, Module, NotFoundException, OnModuleDestroy, Param, Patch, Post, Query } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { Pool, type PoolClient } from 'pg';
 import { domainEventTypes } from '@schoolconnect/contracts';
@@ -241,6 +241,14 @@ class SchoolRepository implements OnModuleDestroy {
     return { completed: success };
   }
 
+  async feeRoster(schoolId: string, input: { admissionNumbers?: string[]; grade?: string }) {
+    if (input.grade !== undefined && !/^(?:[1-9]|1[0-2])$/.test(input.grade) || input.admissionNumbers !== undefined && (!Array.isArray(input.admissionNumbers) || input.admissionNumbers.length > 200 || input.admissionNumbers.some((number) => typeof number !== 'string' || number.length > 120))) throw new BadRequestException({ code:'FEE_ROSTER_FILTER_INVALID' });
+    if (!input.grade && !input.admissionNumbers) throw new BadRequestException({ code:'FEE_ROSTER_FILTER_REQUIRED' });
+    const result = await this.pool.query(`SELECT DISTINCT st.id,st.admission_number AS "admissionNumber",st.display_name AS "displayName",st.status FROM students st WHERE st.school_id=$1 AND ($2::text[] IS NULL OR upper(st.admission_number)=ANY($2::text[])) AND ($3::text IS NULL OR st.status='ACTIVE' AND EXISTS(SELECT 1 FROM enrollments e JOIN school_classes c ON c.school_id=e.school_id AND c.id=e.class_id WHERE e.school_id=st.school_id AND e.student_id=st.id AND e.status='ACTIVE' AND c.status='ACTIVE' AND upper(c.grade_code)=ANY($4::text[]))) LIMIT 20001`, [schoolId,input.admissionNumbers?.map((number) => number.toUpperCase()) ?? null,input.grade ?? null,input.grade ? [input.grade,`G${input.grade}`,`GRADE_${input.grade}`,`GRADE-${input.grade}`] : []]);
+    if (result.rows.length > 20000) throw new BadRequestException({ code:'FEE_GRADE_ROSTER_TOO_LARGE' });
+    return result.rows;
+  }
+
   async students(schoolId: string) {
     const result = await this.pool.query(
       `SELECT st.id,st.admission_number AS "admissionNumber",st.display_name AS "displayName",st.status,
@@ -471,6 +479,7 @@ class SchoolRepository implements OnModuleDestroy {
 @Controller('internal/v1')
 class SchoolController {
   constructor(@Inject(SchoolRepository) private readonly repository: SchoolRepository) {}
+  @Post('schools/:schoolId/fee-roster') feeRoster(@Param('schoolId') schoolId: string, @Body() body: { admissionNumbers?: string[]; grade?: string }, @Headers('x-schoolconnect-school-id') scopedSchool?: string) { if (schoolId !== scopedSchool) throw new ForbiddenException({ code:'SCHOOL_SCOPE_REQUIRED' }); return this.repository.feeRoster(schoolId,body); }
   @Get('health') async health() { return { status: 'ok', service: 'school', database: await this.repository.health() }; }
   @Get('schools/:schoolId') school(@Param('schoolId') schoolId: string) { return this.repository.school(schoolId); }
   @Get('reports/platform-summary') platformSummary() { return this.repository.platformSummary(); }

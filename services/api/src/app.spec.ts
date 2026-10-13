@@ -14,6 +14,24 @@ describe('API gateway authorization and service boundaries', () => {
   let app: INestApplication;
   const serviceClient = { request: vi.fn() };
 
+  it('denies fee uploads and reports to parent, teacher and platform-only roles', async () => {
+    for (const token of ['parent-token','teacher-token','owner-token']) for (const path of ['import-preview','import-commit','search']) await request(app.getHttpServer()).post(`/api/v1/admin/fees/${path}`).set('Authorization',`Bearer ${token}`).send({}).expect(403);
+    expect(serviceClient.request.mock.calls.some((call) => call[0]==='fees')).toBe(false);
+  });
+  it('derives school and actor context from the session, never the uploaded body', async () => {
+    const fallback=serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit) => {
+      if(service==='school' && path.endsWith('/fee-roster')) return Promise.resolve([{id:'student-1',admissionNumber:'001',displayName:'Child',status:'ACTIVE'}]);
+      if(service==='fees') return Promise.resolve({valid:true});
+      return fallback(service,path,init);
+    });
+    const body={schoolId:'another-school',actorUserId:'someone-else',fees:[{admissionNumber:'001',feeReference:'OCT',academicYear:'2026-27',dueDate:'2026-10-01',amount:'100.00',currency:'INR'}],collections:[]};
+    await request(app.getHttpServer()).post('/api/v1/admin/fees/import-preview').set('Authorization','Bearer admin-token').send(body).expect(201);
+    const sent=serviceClient.request.mock.calls.find((call) => call[0]==='fees');
+    expect(JSON.parse(String(sent?.[2]?.body))).toMatchObject({schoolId:'school-1',actorUserId:'admin-1',actorMembershipId:'membership-admin'});
+    expect(serviceClient.request.mock.calls.find((call) => call[1].endsWith('/fee-roster'))?.[1]).toBe('/internal/v1/schools/school-1/fee-roster');
+  });
+
   beforeEach(async () => {
     serviceClient.request.mockReset();
     serviceClient.request.mockImplementation((service: string, path: string, init?: RequestInit) => {
@@ -82,7 +100,7 @@ describe('API gateway authorization and service boundaries', () => {
   it('aggregates service health without authentication', async () => {
     const response = await request(app.getHttpServer()).get('/api/v1/health').expect(200);
     expect(response.body.status).toBe('ok');
-    expect(response.body.services).toHaveLength(9);
+    expect(response.body.services).toHaveLength(10);
   });
 
   it('keeps class edits within the administrator school and rejects parents', async () => {

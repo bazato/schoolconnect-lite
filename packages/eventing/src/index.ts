@@ -1,6 +1,6 @@
 import { Kafka, logLevel, type Consumer, type Producer, type SASLOptions } from 'kafkajs';
 
-export type EventSource = 'identity' | 'school' | 'content' | 'attendance' | 'files' | 'notifications';
+export type EventSource = 'identity' | 'school' | 'content' | 'attendance' | 'files' | 'notifications' | 'fees';
 export type OutboxEvent = { id: string; eventType: string; aggregateId: string; payload: Record<string, unknown>; occurredAt: string };
 export type EventEnvelope = { source: EventSource; event: OutboxEvent };
 export type OutboxRepository = { claimOutbox(limit: number): Promise<OutboxEvent[]>; completeOutbox(eventId: string, success: boolean): Promise<unknown> };
@@ -9,7 +9,7 @@ export function parseEventEnvelope(value: string): EventEnvelope {
   const parsed: unknown = JSON.parse(value);
   if (!parsed || typeof parsed !== 'object') throw new Error('KAFKA_EVENT_ENVELOPE_INVALID');
   const envelope = parsed as Partial<EventEnvelope>;
-  if (!['identity', 'school', 'content', 'attendance', 'files', 'notifications'].includes(String(envelope.source))) throw new Error('KAFKA_EVENT_SOURCE_INVALID');
+  if (!['identity', 'school', 'content', 'attendance', 'files', 'notifications', 'fees'].includes(String(envelope.source))) throw new Error('KAFKA_EVENT_SOURCE_INVALID');
   const event = envelope.event;
   if (!event || typeof event.id !== 'string' || typeof event.eventType !== 'string' || typeof event.aggregateId !== 'string' || typeof event.occurredAt !== 'string' ||
       !event.payload || typeof event.payload !== 'object' || Array.isArray(event.payload)) throw new Error('KAFKA_EVENT_PAYLOAD_INVALID');

@@ -8,9 +8,10 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts,.tsx",
     "test": "vitest run",
-    "build": "tsc --noEmit && vite build"
+    "build": "pnpm --filter @schoolconnect/contracts build && tsc --noEmit && vite build"
   },
   "dependencies": {
+    "@schoolconnect/contracts": "workspace:*",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"

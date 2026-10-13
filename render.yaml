@@ -95,3 +95,5 @@ services:
         value: '2'
       - key: READ_DB_POOL_MAX
         value: '2'
+      - key: FEES_DB_POOL_MAX
+        value: '2'

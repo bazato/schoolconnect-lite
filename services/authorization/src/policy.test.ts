@@ -29,6 +29,13 @@ describe('resource policy', () => {
 
 describe('route policy', () => {
   const routes = new RoutePolicy();
+  it('keeps fees administrator-only in the central replaceable route policy', () => {
+    for(const action of ['import-preview','import-commit','search']) {
+      const path=`/api/v1/admin/fees/${action}`;
+      expect(routes.decide('POST',path,'SCHOOL_ADMIN').allowed).toBe(true);
+      for(const role of ['PLATFORM_OWNER','TEACHER','PARENT'] as const) expect(routes.decide('POST',path,role).allowed).toBe(false);
+    }
+  });
   it('allows only the owner to provision schools', () => {
     expect(routes.decide('POST','/api/v1/admin/schools','PLATFORM_OWNER').allowed).toBe(true);
     expect(routes.decide('POST','/api/v1/admin/schools','SCHOOL_ADMIN').allowed).toBe(false);

@@ -14,6 +14,7 @@ export const defaultRouteRules: RouteRule[] = [
   { methods: ['GET'], pattern: '^/api/v1/bff/admin/home$', roles: ['SCHOOL_ADMIN'] },
   { methods: ['GET','POST','PATCH'], pattern: '^/api/v1/admin/(schools(?:/[^/]+(?:/admins(?:/[^/]+(?:/reissue-invitation)?)?)?)?|platform-owners(?:/[^/]+(?:/reissue-invitation)?)?|reports/platform-summary)$', roles: ['PLATFORM_OWNER'] },
   { methods: ['GET'], pattern: '^/api/v1/admin/reports/audit$', roles: ['PLATFORM_OWNER','SCHOOL_ADMIN'] },
+  { methods: ['POST'], pattern: '^/api/v1/admin/fees/(import-preview|import-commit|search)$', roles: ['SCHOOL_ADMIN'] },
   { methods: ['GET','POST','PATCH'], pattern: '^/api/v1/admin/.+$', roles: ['SCHOOL_ADMIN'] },
   { methods: ['GET'], pattern: '^/api/v1/timeline/[^/]+$', roles: ['PARENT'] },
   { methods: ['GET'], pattern: '^/api/v1/teacher-posts$', roles: ['TEACHER'] },

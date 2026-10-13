@@ -3,6 +3,7 @@ import { apiBaseUrl, apiRequest, readSession, requestOtp, saveSession, verifyOtp
 import { ClassEditor, StudentEditor, TeacherEditor } from './AdminEditors';
 import { portalMemberships } from './portal-roles';
 import { downloadResultsTemplate, parseResultsWorkbook, type ResultRow } from './results-workbook';
+import { FeesPage } from './FeesPage';
 
 type SchoolRow = { id: string; schoolCode: string; displayName: string; timezone: string; status: string; activeStudentCount?: number; totalStudentCount?: number; activeTeacherCount?: number; activeParentCount?: number; activeAdminCount?: number };
 type MemberRow = { userId: string; membershipId: string; displayName: string; phoneE164: string; role: Role; status: string };
@@ -14,7 +15,7 @@ type StudentImportResult = { imported: number; failed: number; results: Array<{ 
 type Invitation = { code: string; phone: string; role: string; expiresAt?: string };
 type PreviewRow = ResultRow & { row: number; studentId: string | null; studentName: string | null; classId: string | null; className: string | null; guardianCount: number; status: 'READY' | 'INVALID'; error?: string };
 type Summary = { studentCount: number; teacherCount: number; attendance?: Array<{ classId: string; status: string; count: number }>; recentAudit?: Array<{ action: string; createdAt: string }> };
-type Page = 'Overview' | 'Schools' | 'Classes' | 'Teachers' | 'Students' | 'Results';
+type Page = 'Overview' | 'Schools' | 'Classes' | 'Teachers' | 'Students' | 'Results' | 'Fees';
 
 const roleLabel: Record<Role, string> = { PLATFORM_OWNER: 'Platform owner', SCHOOL_ADMIN: 'School administrator', TEACHER: 'Teacher', PARENT: 'Parent' };
 const displayError = (error: unknown) => error instanceof Error ? error.message.replaceAll('_', ' ').toLowerCase() : 'Something went wrong. Please try again.';
@@ -121,7 +122,7 @@ function Portal({ context, session, onSession, request, onSignOut }: {
   const adminMemberships = portalMemberships(session.memberships);
   const owner = context.principal.role === 'PLATFORM_OWNER';
   const admin = context.principal.role === 'SCHOOL_ADMIN';
-  const allowedPages: Page[] = owner ? ['Overview', 'Schools'] : admin ? ['Overview', 'Classes', 'Teachers', 'Students', 'Results'] : ['Overview'];
+  const allowedPages: Page[] = owner ? ['Overview', 'Schools'] : admin ? ['Overview', 'Classes', 'Teachers', 'Students', 'Results', 'Fees'] : ['Overview'];
   const [page, setPage] = useState<Page>('Overview');
   const [schools, setSchools] = useState<SchoolRow[]>([]);
   const [classes, setClasses] = useState<ClassRow[]>([]);
@@ -206,19 +207,21 @@ function Portal({ context, session, onSession, request, onSignOut }: {
         {page === 'Teachers' && <TeachersPage teachers={teachers} classes={classes} formOpen={formOpen} setFormOpen={setFormOpen} request={request} onInvite={invite} onSaved={() => { void reload(); announce('Teacher details and class assignments saved.'); }} />}
         {page === 'Students' && <StudentsPage students={students} classes={classes} request={request} onInvite={invite} onSaved={(message) => { void reload(); announce(message ?? 'Student account and guardian invitation created.'); }} />}
         {page === 'Results' && <ResultsPage students={students} request={request} onMessage={announce} />}
+        {page === 'Fees' && <FeesPage request={request} />}
         <footer className="page-footer"><span>Nexqon School App</span><span>Role-scoped workspace · {context.school?.displayName ?? 'All schools'}</span></footer>
       </section>
     </main>
   </div>;
 }
 
-function headingFor(page: Page) { return page === 'Overview' ? 'Good to see you' : page === 'Schools' ? 'Schools' : page === 'Classes' ? 'Classes & grades' : page === 'Teachers' ? 'Teachers' : page === 'Students' ? 'Students' : 'Publish results'; }
+function headingFor(page: Page) { return page === 'Overview' ? 'Good to see you' : page === 'Schools' ? 'Schools' : page === 'Classes' ? 'Classes & grades' : page === 'Teachers' ? 'Teachers' : page === 'Students' ? 'Students' : page === 'Fees' ? 'Fees & collections' : 'Publish results'; }
 function descriptionFor(page: Page, context: AppContext) {
   if (page === 'Overview') return context.principal.role === 'PLATFORM_OWNER' ? 'Here is what is happening across your school network.' : 'A clear view of your school, team and academic activity.';
   if (page === 'Schools') return 'Create schools and provision their first school administrator.';
   if (page === 'Classes') return 'Set up the academic year and keep class rosters organized.';
   if (page === 'Teachers') return 'Invite teachers and assign the classes and capabilities they need.';
   if (page === 'Students') return 'Review the current student roster and guardian links.';
+  if (page === 'Fees') return 'Import your fee ledger and ask school-scoped questions by voice or text.';
   return 'Import a spreadsheet, review every row, then publish private results to each student’s linked guardians.';
 }
 

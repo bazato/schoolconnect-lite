@@ -4,14 +4,15 @@ The application is branded as Nexqon School App. Existing `schoolconnect` reposi
 
 [Download the Nexqon School App Android trial APK](https://raw.githubusercontent.com/bazato/schoolconnect-lite/refs/heads/android-apk-nexqon-0.1.1/nexqon-school-app-android-preview-2026-10-13.apk) — version 0.1.1 / build 2, same app ID and preview signing certificate. This is a standalone Render-connected trial, not a Play Store production release. [Branding and verification details](docs/nexqon-branding-2026-10-13.md).
 
-One Expo/React Native application for Platform Owner, School Admin, Teacher and Parent roles, backed by a NestJS API gateway, eight database-isolated services, and a stateless authorization service. The mobile experience follows the supplied Kaksha `.fig`; product behavior and security boundaries come from the supplied product and technical specifications plus the approved owner/school administration extension.
+One Expo/React Native application for Platform Owner, School Admin, Teacher and Parent roles, backed by a NestJS API gateway, nine database-isolated services, and a stateless authorization service. The mobile experience follows the supplied Kaksha `.fig`; product behavior and security boundaries come from the supplied product and technical specifications plus the approved owner/school administration and fees-information extensions.
 
 ## Implemented
 
 - One role-aware mobile app with Owner school/account management, School Admin user/class/student lifecycle, F01–F08, login, profile/role switch, attendance/follow-ups, private-file states, drafts, upload/error/offline states
 - Public API gateway with live identity, guardian-child and teacher-assignment authorization
-- Independently runnable Identity, School, Content, Attendance, Files, Notifications, Audit, Authorization and Read Model services
-- Eight service-owned PostgreSQL databases with no cross-database foreign keys; Authorization is stateless
+- Independently runnable Identity, School, Content, Attendance, Files, Notifications, Audit, Authorization, Read Model and Fees services
+- Nine service-owned PostgreSQL databases with no cross-database foreign keys; Authorization is stateless
+- School-administrator fee Excel import with admission-number validation, atomic add/update, receipt idempotency, preview conflict protection, and read-only voice/typed monthly and grade reports. [Fees workflow, APIs and limitations](docs/fees-import-and-voice-reports.md).
 - Immutable content revisions, recipient snapshots, attendance revisions, separate guardian responses, leave requests, idempotency and transactional outboxes
 - Database-backed development flow for OTP, school scope, publication/editing, timeline, attendance, acknowledgement, file metadata, notifications and audit
 - Configurable Identity-owned authorization provider with signed, expiring, session-bound access tokens

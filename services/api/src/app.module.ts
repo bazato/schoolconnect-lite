@@ -8,11 +8,12 @@ import type { Request } from 'express';
 import { parseStudentCsv } from './csv';
 import { parseResultImportRows } from './results-import';
 import { currentRequestContext } from './request-context';
+import { parseFeeImport, parseFeeQuery, type FeeStudent } from '@schoolconnect/contracts';
 
 type Role = 'PLATFORM_OWNER' | 'SCHOOL_ADMIN' | 'TEACHER' | 'PARENT';
 type Principal = { userId: string; displayName: string; membershipId: string; schoolId: string | null; role: Role; sessionId: string };
 type ScopedRequest = Request & { principal?: Principal };
-type ServiceName = 'identity' | 'school' | 'content' | 'attendance' | 'files' | 'notifications' | 'audit' | 'authorization' | 'read';
+type ServiceName = 'identity' | 'school' | 'content' | 'attendance' | 'files' | 'notifications' | 'audit' | 'authorization' | 'read' | 'fees';
 
 const IS_PUBLIC = 'schoolconnect:is-public';
 const Public = () => SetMetadata(IS_PUBLIC, true);
@@ -62,6 +63,7 @@ export class ServiceClient {
     audit: process.env.AUDIT_SERVICE_URL ?? 'http://127.0.0.1:3107',
     authorization: process.env.AUTHORIZATION_SERVICE_URL ?? 'http://127.0.0.1:3108',
     read: process.env.READ_SERVICE_URL ?? 'http://127.0.0.1:3109',
+    fees: process.env.FEES_SERVICE_URL ?? 'http://127.0.0.1:3110',
   };
 
   async request<T>(service: ServiceName, path: string, init?: RequestInit): Promise<T> {
@@ -195,7 +197,7 @@ class HealthController {
   constructor(@Inject(ServiceClient) private readonly clients: ServiceClient) {}
   @Public() @Get()
   async health() {
-    const services = await Promise.all((['identity', 'school', 'content', 'attendance', 'files', 'notifications', 'audit', 'authorization', 'read'] as ServiceName[])
+    const services = await Promise.all((['identity', 'school', 'content', 'attendance', 'files', 'notifications', 'audit', 'authorization', 'read', 'fees'] as ServiceName[])
       .map(async (service) => {
         try { await this.clients.request(service, '/internal/v1/health'); return { service, status: 'ok' }; }
         catch { return { service, status: 'unavailable' }; }
@@ -311,6 +313,35 @@ class AdminController {
   private schoolId(principal: Principal) {
     if (!principal.schoolId) throw new ForbiddenException({ code: 'SCHOOL_CONTEXT_REQUIRED' });
     return principal.schoolId;
+  }
+
+  private async feeImportContext(body: unknown, principal: Principal) {
+    // Role decisions belong to the configurable Authorization route policy.
+    const schoolId = this.schoolId(principal);
+    let data: ReturnType<typeof parseFeeImport>;
+    try { data = parseFeeImport(body); } catch (error) { throw new BadRequestException(error instanceof Error ? error.message : 'Invalid fee workbook.'); }
+    const admissionNumbers = [...new Set([...data.fees,...data.collections].map((row) => row.admissionNumber.toUpperCase()))];
+    const students = await this.clients.request<FeeStudent[]>('school', `/internal/v1/schools/${schoolId}/fee-roster`, { method:'POST',body:JSON.stringify({ admissionNumbers }) });
+    return { schoolId,actorUserId:principal.userId,actorMembershipId:principal.membershipId,correlationId:currentRequestContext()?.correlationId ?? randomUUID(),data,students };
+  }
+  @Post('fees/import-preview')
+  async previewFees(@Body() body: unknown, @CurrentPrincipal() principal: Principal) {
+    return this.clients.request('fees','/internal/v1/fees/import-preview', { method:'POST',body:JSON.stringify(await this.feeImportContext(body,principal)) });
+  }
+  @Post('fees/import-commit')
+  async commitFees(@Body() body: { batchId: string; revision: number }, @CurrentPrincipal() principal: Principal) {
+    if (!body || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.batchId) || !Number.isInteger(body.revision) || body.revision < 0) throw new BadRequestException({ code:'FEE_BATCH_AND_REVISION_REQUIRED' });
+    const context = await this.feeImportContext(body,principal);
+    return this.clients.request('fees','/internal/v1/fees/import-commit', { method:'POST',body:JSON.stringify({ ...context,batchId:body.batchId,revision:body.revision }) });
+  }
+  @Post('fees/search')
+  async searchFees(@Body() body: { question?: string }, @CurrentPrincipal() principal: Principal) {
+    const schoolId = this.schoolId(principal);
+    const school = await this.clients.request<{ timezone: string }>('school',`/internal/v1/schools/${schoolId}`);
+    let query: ReturnType<typeof parseFeeQuery>;
+    try { query = parseFeeQuery(body?.question,school.timezone); } catch (error) { throw new BadRequestException(error instanceof Error ? error.message : 'Invalid fee question.'); }
+    const students = query.grade ? await this.clients.request<FeeStudent[]>('school',`/internal/v1/schools/${schoolId}/fee-roster`,{ method:'POST',body:JSON.stringify({ grade:query.grade }) }) : null;
+    return this.clients.request('fees','/internal/v1/fees/report',{ method:'POST',body:JSON.stringify({ schoolId,question:body.question,timezone:school.timezone,studentIds:students?.map((student) => student.id) ?? null }) });
   }
 
   @Get('schools')

@@ -1,3 +1,4 @@
+export * from './fees';
 export type Role = 'PLATFORM_OWNER' | 'SCHOOL_ADMIN' | 'TEACHER' | 'PARENT';
 
 export type RequestPrincipal = {
@@ -20,6 +21,7 @@ export type DomainEvent<T extends Record<string, unknown> = Record<string, unkno
 // Versioned events already emitted by the service-owned transactional outboxes.
 // Add a new version when a consumer-visible payload changes incompatibly.
 export const domainEventTypes = {
+  feesImported: 'fees.imported.v1',
   postPublished: 'content.post-published.v1',
   postScheduled: 'content.post-scheduled.v1',
   postSnapshot: 'content.post-snapshot.v1',

@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 
 const databases = {
+  schoolconnect_fees: ['fee_ledger_state', 'fee_invoices', 'fee_collections', 'fee_import_batches', 'outbox_events'],
   schoolconnect_identity: ['users', 'memberships', 'otp_challenges', 'auth_sessions'],
   schoolconnect_school: ['schools', 'school_classes', 'students', 'guardian_links', 'teacher_assignments'],
   schoolconnect_content: ['posts', 'post_revisions', 'post_recipients', 'post_attachments'],

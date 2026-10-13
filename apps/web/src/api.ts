@@ -37,6 +37,7 @@ function errorCode(payload: unknown, status: number) {
   if (payload && typeof payload === 'object') {
     const object = payload as { code?: unknown; message?: unknown };
     if (typeof object.code === 'string') return object.code;
+    if (typeof object.message === 'string') return object.message;
     if (object.message && typeof object.message === 'object' && 'code' in object.message) {
       const code = (object.message as { code?: unknown }).code;
       if (typeof code === 'string') return code;

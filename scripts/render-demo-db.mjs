@@ -6,7 +6,7 @@ const requireIdentityDependency = createRequire(new URL('../services/identity/pa
 export const DEMO_DATABASES = [
   'schoolconnect_identity', 'schoolconnect_school', 'schoolconnect_content',
   'schoolconnect_attendance', 'schoolconnect_files',
-  'schoolconnect_notifications', 'schoolconnect_audit', 'schoolconnect_read',
+  'schoolconnect_notifications', 'schoolconnect_audit', 'schoolconnect_read', 'schoolconnect_fees',
 ];
 
 const SERVICE_DATABASES = {
@@ -18,6 +18,7 @@ const SERVICE_DATABASES = {
   NOTIFICATION_DATABASE_URL: 'schoolconnect_notifications',
   AUDIT_DATABASE_URL: 'schoolconnect_audit',
   READ_DATABASE_URL: 'schoolconnect_read',
+  FEES_DATABASE_URL: 'schoolconnect_fees',
 };
 
 const MIGRATIONS = [
@@ -26,7 +27,7 @@ const MIGRATIONS = [
   '070-audit.sql', '080-admin-provisioning.sql',
   '095-security-and-scale.sql', '096-product-workflows.sql',
   '097-publishing-permissions.sql',
-  '098-observability.sql', '099-notification-lifecycle.sql', '100-read-model.sql', '101-read-model-backfill.sql',
+  '098-observability.sql', '099-notification-lifecycle.sql', '100-read-model.sql', '101-read-model-backfill.sql', '102-fees.sql',
 ];
 
 export function databaseUrl(baseUrl, databaseName) {

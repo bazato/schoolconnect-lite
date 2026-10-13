@@ -14,6 +14,6 @@ process.env.SERVICE_BIND_HOST = '127.0.0.1';
 process.env.S3_ENDPOINT ??= 'http://127.0.0.1:9'; // No private object store in the free trial.
 await prepareRenderDemoDatabase(process.env.DATABASE_URL, true);
 
-for (const service of ['identity', 'school', 'content', 'attendance', 'files', 'notifications', 'audit', 'authorization', 'read-model', 'api']) {
+for (const service of ['identity', 'school', 'content', 'attendance', 'files', 'notifications', 'audit', 'authorization', 'read-model', 'fees', 'api']) {
   await import(`../services/${service}/dist/main.js`);
 }

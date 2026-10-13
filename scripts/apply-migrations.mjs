@@ -9,6 +9,8 @@ const migrations = readdirSync(directory)
 
 const exists = execFileSync('docker', ['exec', 'schoolconnect-postgres', 'psql', '-U', process.env.POSTGRES_USER ?? 'schoolconnect', '-d', 'postgres', '-tAc', "SELECT 1 FROM pg_database WHERE datname='schoolconnect_read'"], { encoding: 'utf8' }).trim();
 if (!exists) execFileSync('docker', ['exec', 'schoolconnect-postgres', 'psql', '-U', process.env.POSTGRES_USER ?? 'schoolconnect', '-d', 'postgres', '-c', 'CREATE DATABASE schoolconnect_read'], { stdio: 'inherit' });
+const feesExists = execFileSync('docker', ['exec', 'schoolconnect-postgres', 'psql', '-U', process.env.POSTGRES_USER ?? 'schoolconnect', '-d', 'postgres', '-tAc', "SELECT 1 FROM pg_database WHERE datname='schoolconnect_fees'"], { encoding: 'utf8' }).trim();
+if (!feesExists) execFileSync('docker', ['exec', 'schoolconnect-postgres', 'psql', '-U', process.env.POSTGRES_USER ?? 'schoolconnect', '-d', 'postgres', '-c', 'CREATE DATABASE schoolconnect_fees'], { stdio: 'inherit' });
 
 for (const migration of migrations) {
   execFileSync('docker', [
