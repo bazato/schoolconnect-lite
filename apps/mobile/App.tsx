@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Image,
   KeyboardAvoidingView,
   Linking,
   Platform,
@@ -50,6 +51,7 @@ import {
   TimelinePost,
 } from "./src/domain";
 import { colors, radius } from "./src/theme";
+import nexqonIcon from './assets/nexqon-icon.png';
 import { TeachingClassSelector } from './src/TeachingClassSelector';
 import {
   clearSession,
@@ -327,9 +329,9 @@ function LoginScreen({
       >
         <View style={styles.loginHero}>
           <View style={styles.loginLogo}>
-            <GraduationCap size={42} color="#fff" />
+            <Image source={nexqonIcon} style={styles.loginLogoImage} accessibilityLabel="Nexqon School App logo" />
           </View>
-          <Text style={styles.loginTitle}>Welcome to SchoolConnect</Text>
+          <Text style={styles.loginTitle}>Welcome to Nexqon School App</Text>
           <Text style={styles.loginBody}>
             One secure place for school updates, homework and attendance.
           </Text>
@@ -3528,7 +3530,7 @@ function MainApp() {
     if (!session) return;
     let active = true;
     void mobileApi.context(session).then((context) => {
-      if (active) setActiveSchoolName(context.school?.displayName ?? 'SchoolConnect');
+      if (active) setActiveSchoolName(context.school?.displayName ?? 'Nexqon School App');
     }).catch(() => undefined);
     return () => { active = false; };
   }, [session]);
@@ -4077,7 +4079,9 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: colors.primary,
     marginBottom: 18,
+    overflow: 'hidden',
   },
+  loginLogoImage: { width: 82, height: 82 },
   loginTitle: {
     fontFamily: "Poppins_700Bold",
     fontSize: 26,

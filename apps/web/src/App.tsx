@@ -20,6 +20,10 @@ const roleLabel: Record<Role, string> = { PLATFORM_OWNER: 'Platform owner', SCHO
 const displayError = (error: unknown) => error instanceof Error ? error.message.replaceAll('_', ' ').toLowerCase() : 'Something went wrong. Please try again.';
 const localDate = () => new Date().toLocaleDateString('en-CA');
 
+function BrandMark() {
+  return <span className="brand-mark"><img src="/nexqon-icon.png" alt="Nexqon School App logo" /></span>;
+}
+
 export function App() {
   const [session, setSession] = useState<Session | null>(() => readSession());
   const [context, setContext] = useState<AppContext | null>(null);
@@ -49,7 +53,7 @@ export function App() {
   }, [session?.accessToken, request, updateSession]);
 
   if (!session) return <SignIn onSignedIn={updateSession} />;
-  if (loading || !context) return <div className="boot-screen"><div className="brand-mark">✦</div><div className="spinner" /><p>{error || 'Opening your secure school workspace…'}</p><button className="button quiet" onClick={() => { updateSession(null); setError(''); }}>Sign in again</button></div>;
+  if (loading || !context) return <div className="boot-screen"><BrandMark /><div className="spinner" /><p>{error || 'Opening your secure school workspace…'}</p><button className="button quiet" onClick={() => { updateSession(null); setError(''); }}>Sign in again</button></div>;
   const signOut = () => { void apiRequest('/auth/logout', session, () => undefined, { method: 'POST' }, false).catch(() => undefined); updateSession(null); };
   if (!['PLATFORM_OWNER', 'SCHOOL_ADMIN'].includes(context.principal.role)) return <div className="boot-screen"><p>Please use the mobile app for teacher or parent access. This portal is for school administrators and application owners.</p><button className="button primary" onClick={signOut}>Sign out</button></div>;
   return <Portal key={context.principal.membershipId} context={context} session={session} onSession={updateSession} request={request} onSignOut={signOut} />;
@@ -82,13 +86,13 @@ function SignIn({ onSignedIn }: { onSignedIn: (session: Session) => void }) {
 
   return <main className="login-layout">
     <section className="login-brand-panel">
-      <div className="brand-lockup"><span className="brand-mark">✦</span><span>SchoolConnect<span className="brand-lite"> Lite</span></span></div>
+      <div className="brand-lockup"><BrandMark /><span>Nexqon<span className="brand-lite"> School App</span></span></div>
       <div className="login-message"><span className="eyebrow">SCHOOL OPERATIONS, IN ONE PLACE</span><h1>Make every school day run a little smoother.</h1><p>Manage your schools, people and academic results through one clear, role-aware workspace.</p></div>
       <div className="login-panel-footer"><span className="security-dot" /> Private access for invited school teams</div>
     </section>
     <section className="login-form-panel">
       <div className="login-form-wrap">
-        <div className="mobile-brand brand-lockup"><span className="brand-mark">✦</span><span>SchoolConnect<span className="brand-lite"> Lite</span></span></div>
+        <div className="mobile-brand brand-lockup"><BrandMark /><span>Nexqon<span className="brand-lite"> School App</span></span></div>
         <span className="eyebrow">WELCOME BACK</span>
         <h2>{challengeId ? 'Verify your number' : 'Sign in to your workspace'}</h2>
         <p className="muted">{challengeId ? `Enter the one-time code sent to ${phone}.` : 'Use the mobile number registered by your platform owner or school administrator.'}</p>
@@ -103,7 +107,7 @@ function SignIn({ onSignedIn }: { onSignedIn: (session: Session) => void }) {
           <button type="button" className="text-button" onClick={() => { setChallengeId(''); setOtp(''); setDevelopmentCode(''); }}>Use a different number</button>
         </form>}
         {error && <div className="alert danger">{error}</div>}
-        <div className="login-note"><span>⌑</span><p>School and role permissions are checked by the SchoolConnect services each time you use the portal.</p></div>
+        <div className="login-note"><span>⌑</span><p>School and role permissions are checked by the Nexqon School App services each time you use the portal.</p></div>
         <div className="api-footnote">Connected to <code>{apiBaseUrl}</code></div>
       </div>
     </section>
@@ -168,7 +172,7 @@ function Portal({ context, session, onSession, request, onSignOut }: {
 
   return <div className="app-shell">
     <aside className="sidebar">
-      <div className="brand-lockup sidebar-brand"><span className="brand-mark">✦</span><span>SchoolConnect<span className="brand-lite"> Lite</span></span></div>
+      <div className="brand-lockup sidebar-brand"><BrandMark /><span>Nexqon<span className="brand-lite"> School App</span></span></div>
       <div className="workspace-label">WORKSPACE</div>
       <div className="workspace-card"><div className="workspace-avatar">{context.principal.displayName.slice(0, 1).toUpperCase()}</div><div className="workspace-copy"><strong>{context.school?.displayName ?? 'Platform workspace'}</strong><small>{roleLabel[context.principal.role]}</small></div><span className="workspace-chevron">⌄</span></div>
       <nav className="side-nav" aria-label="Main navigation">
@@ -181,7 +185,7 @@ function Portal({ context, session, onSession, request, onSignOut }: {
       <div className="sidebar-bottom"><div className="help-card"><div className="help-icon">?</div><div><strong>Need a hand?</strong><small>Ask your platform owner</small></div></div><div className="profile-row"><div className="profile-avatar">{context.principal.displayName.slice(0, 1).toUpperCase()}</div><div className="profile-info"><strong>{context.principal.displayName}</strong><small>{context.principal.role.toLowerCase().replaceAll('_', ' ')}</small></div><button className="signout" title="Sign out" onClick={onSignOut}>↗</button></div></div>
     </aside>
     <main className="main-area">
-      <header className="topbar"><div className="breadcrumb"><span>SchoolConnect</span><b>/</b><strong>{page}</strong></div><div className="topbar-actions">
+      <header className="topbar"><div className="breadcrumb"><span>Nexqon School App</span><b>/</b><strong>{page}</strong></div><div className="topbar-actions">
         {adminMemberships.length > 1 && <label className="role-switch"><span>View as</span><select aria-label="Switch role" value={context.principal.membershipId} onChange={(event) => { void switchRole(event); }}>
           {adminMemberships.map((membership) => <option key={membership.id} value={membership.id}>{roleLabel[membership.role]}{membership.schoolId && membership.schoolId !== context.principal.schoolId ? ' · another school' : ''}</option>)}
         </select></label>}
@@ -202,7 +206,7 @@ function Portal({ context, session, onSession, request, onSignOut }: {
         {page === 'Teachers' && <TeachersPage teachers={teachers} classes={classes} formOpen={formOpen} setFormOpen={setFormOpen} request={request} onInvite={invite} onSaved={() => { void reload(); announce('Teacher details and class assignments saved.'); }} />}
         {page === 'Students' && <StudentsPage students={students} classes={classes} request={request} onInvite={invite} onSaved={(message) => { void reload(); announce(message ?? 'Student account and guardian invitation created.'); }} />}
         {page === 'Results' && <ResultsPage students={students} request={request} onMessage={announce} />}
-        <footer className="page-footer"><span>SchoolConnect Lite</span><span>Role-scoped workspace · {context.school?.displayName ?? 'All schools'}</span></footer>
+        <footer className="page-footer"><span>Nexqon School App</span><span>Role-scoped workspace · {context.school?.displayName ?? 'All schools'}</span></footer>
       </section>
     </main>
   </div>;

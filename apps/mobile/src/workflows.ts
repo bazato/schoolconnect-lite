@@ -34,7 +34,7 @@ export function timelinePost(item: ApiTimelinePost, childId: string): TimelinePo
     id: item.id, childId, type: item.postType, title: item.title, body: item.body,
     subject: item.subjectCode ?? item.examName,
     dueDate: item.dueDate ? new Date(item.dueDate).toLocaleDateString() : undefined,
-    author: 'SchoolConnect', timestamp: new Date(item.publishedAt).toLocaleString(),
+    author: 'Nexqon School App', timestamp: new Date(item.publishedAt).toLocaleString(),
     unread: false, updated: item.status === 'UPDATED',
     attachment: item.attachments[0] ? { fileId: item.attachments[0].fileId, name: 'Private attachment', size: 'Authorized file', state: 'READY' } : undefined,
   };
