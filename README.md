@@ -1,4 +1,8 @@
-# SchoolConnect Lite
+# Nexqon School App
+
+The application is branded as Nexqon School App. Existing `schoolconnect` repository, package and API identifiers remain unchanged for compatibility.
+
+[Download the Nexqon School App Android trial APK](https://raw.githubusercontent.com/bazato/schoolconnect-lite/refs/heads/android-apk-nexqon-0.1.1/nexqon-school-app-android-preview-2026-10-13.apk) — version 0.1.1 / build 2, same app ID and preview signing certificate. This is a standalone Render-connected trial, not a Play Store production release. [Branding and verification details](docs/nexqon-branding-2026-10-13.md).
 
 One Expo/React Native application for Platform Owner, School Admin, Teacher and Parent roles, backed by a NestJS API gateway, eight database-isolated services, and a stateless authorization service. The mobile experience follows the supplied Kaksha `.fig`; product behavior and security boundaries come from the supplied product and technical specifications plus the approved owner/school administration extension.
 
