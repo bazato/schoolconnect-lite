@@ -421,6 +421,12 @@ class AdminController {
     });
   }
 
+  @Patch('classes/:classId')
+  updateClass(@Param('classId', ParseUUIDPipe) classId: string, @Body() body: { classCode?: string; displayName?: string; gradeCode?: string; status?: 'ACTIVE' | 'ARCHIVED' }, @CurrentPrincipal() principal: Principal) {
+    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
+    return this.clients.request('school', `/internal/v1/schools/${this.schoolId(principal)}/classes/${classId}`, { method: 'PATCH', body: JSON.stringify(body) });
+  }
+
   @Patch('configuration')
   configuration(@Body() body: { scheduledAnnouncementsEnabled?: boolean; schoolWideAnnouncementsEnabled?: boolean; gradeWideAnnouncementsEnabled?: boolean; urgentAnnouncementsEnabled?: boolean }, @CurrentPrincipal() principal: Principal) {
     if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
@@ -449,6 +455,22 @@ class AdminController {
   assignments(@Param('membershipId') membershipId: string, @CurrentPrincipal() principal: Principal) {
     if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     return this.clients.request('school', `/internal/v1/schools/${this.schoolId(principal)}/teachers/${membershipId}/assignments`);
+  }
+
+  @Post('teachers/:membershipId/assignments')
+  async addAssignment(@Param('membershipId', ParseUUIDPipe) membershipId: string, @Body() body: { classId?: string; subjectCode?: string; subjectName?: string; canPublishResults?: boolean; canPublishAnnouncements?: boolean; canRecordAttendance?: boolean }, @CurrentPrincipal() principal: Principal) {
+    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
+    const schoolId = this.schoolId(principal);
+    const teachers = await this.clients.request<Array<{ membershipId: string; status: string }>>('identity', `/internal/v1/schools/${schoolId}/members?role=TEACHER`);
+    if (!teachers.some((teacher) => teacher.membershipId === membershipId && teacher.status === 'ACTIVE')) throw new ForbiddenException({ code: 'TEACHER_NOT_ACTIVE_IN_SCHOOL' });
+    if (!body.classId || !body.subjectCode?.trim() || !body.subjectName?.trim()) throw new BadRequestException({ code: 'TEACHER_AND_ASSIGNMENT_FIELDS_REQUIRED' });
+    for (const value of [body.canPublishResults, body.canPublishAnnouncements, body.canRecordAttendance]) {
+      if (value !== undefined && typeof value !== 'boolean') throw new BadRequestException({ code: 'ASSIGNMENT_PERMISSION_INVALID' });
+    }
+    return this.clients.request('school', `/internal/v1/schools/${schoolId}/teacher-assignments`, { method: 'POST', body: JSON.stringify({
+      teacherMembershipId: membershipId, classId: body.classId, subjectCode: body.subjectCode, subjectName: body.subjectName,
+      canPublishResults: body.canPublishResults ?? false, canPublishAnnouncements: body.canPublishAnnouncements ?? true, canRecordAttendance: body.canRecordAttendance ?? true,
+    }) });
   }
 
   @Patch('assignments/:assignmentId')

@@ -1,5 +1,19 @@
 import type { ApiChild, ApiTeachingAssignment, ApiTimelinePost } from './api';
-import type { Child, Route, TimelinePost } from './domain';
+import type { Child, PostType, Route, TimelinePost } from './domain';
+
+export function assignmentsForAction(scope: ApiTeachingAssignment[], action: PostType | 'ATTENDANCE' | 'FOLLOW_UPS') {
+  return scope.filter((item) => action === 'RESULT' ? item.canPublishResults
+    : action === 'ANNOUNCEMENT' ? item.canPublishAnnouncements
+    : action === 'ATTENDANCE' || action === 'FOLLOW_UPS' ? item.canRecordAttendance : true);
+}
+
+export function rosterContextKey(classId: string | undefined, date: string) {
+  return `${classId ?? ''}:${date}`;
+}
+
+export function teacherDraftKey(userId: string, membershipId: string, type: PostType, assignmentId?: string, editing?: { id: string; revisionNumber: number }) {
+  return `schoolconnect:draft:${userId}:${membershipId}:${editing ? `edit:${editing.id}:${editing.revisionNumber}` : `${assignmentId ?? 'unassigned'}:${type}`}`;
+}
 
 export function resolveAssignment(scope: ApiTeachingAssignment[], classId: string, subjectCode?: string) {
   return scope.find((item) => item.classId === classId && (!subjectCode || item.subjectCode === subjectCode));

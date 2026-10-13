@@ -1,3 +1,4 @@
+import { portalMemberships } from './portal-roles';
 export type Role = 'PLATFORM_OWNER' | 'SCHOOL_ADMIN' | 'TEACHER' | 'PARENT';
 export type Membership = { id: string; schoolId: string | null; role: Role };
 export type Session = {
@@ -85,6 +86,16 @@ export async function verifyOtp(challengeId: string, code: string): Promise<Sess
   const verified = await apiRequest<Omit<Session, 'deviceId' | 'activeMembershipId'>>('/auth/otp/verify', null, () => undefined,
     { method: 'POST', body: JSON.stringify({ challengeId, code, deviceId: DEVICE_ID }) });
   const session: Session = { ...verified, deviceId: DEVICE_ID, activeMembershipId: verified.memberships[0]?.id ?? '' };
+  const adminMembership = portalMemberships(verified.memberships)[0];
+  if (!adminMembership) {
+    await apiRequest('/auth/logout', session, () => undefined, { method: 'POST' }, false).catch(() => undefined);
+    throw new Error('This portal is for school administrators and application owners. Please use the mobile app for teacher or parent access.');
+  }
+  if (session.activeMembershipId !== adminMembership.id) {
+    const switched = await apiRequest<{ accessToken: string; expiresInSeconds: number; activeMembership: Membership }>('/auth/switch-role', session, () => undefined,
+      { method: 'POST', body: JSON.stringify({ membershipId: adminMembership.id }) }, false);
+    session.accessToken = switched.accessToken; session.expiresInSeconds = switched.expiresInSeconds; session.activeMembershipId = switched.activeMembership.id;
+  }
   saveSession(session);
   return session;
 }

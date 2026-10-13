@@ -85,6 +85,37 @@ describe('API gateway authorization and service boundaries', () => {
     expect(response.body.services).toHaveLength(9);
   });
 
+  it('keeps class edits within the administrator school and rejects parents', async () => {
+    const classId = '123e4567-e89b-42d3-a456-426614174000';
+    await request(app.getHttpServer()).patch(`/api/v1/admin/classes/${classId}`).set('Authorization', 'Bearer admin-token').send({ displayName: 'Renamed class' }).expect(200);
+    expect(serviceClient.request).toHaveBeenCalledWith('school', `/internal/v1/schools/school-1/classes/${classId}`, { method: 'PATCH', body: JSON.stringify({ displayName: 'Renamed class' }) });
+    await request(app.getHttpServer()).patch(`/api/v1/admin/classes/${classId}`).set('Authorization', 'Bearer parent-token').send({ displayName: 'Unauthorized' }).expect(403);
+  });
+
+  it('adds a class to an existing active teacher without provisioning another identity', async () => {
+    const id = '123e4567-e89b-42d3-a456-426614174000';
+    const fallback = serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service: string, path: string, init?: RequestInit) => {
+      if (service === 'identity' && path.endsWith('/members?role=TEACHER')) return Promise.resolve([{ membershipId: id, status: 'ACTIVE' }]);
+      return fallback(service, path, init);
+    });
+    await request(app.getHttpServer()).post(`/api/v1/admin/teachers/${id}/assignments`).set('Authorization', 'Bearer admin-token').send({ classId: 'class-2', subjectCode: 'SCI', subjectName: 'Science' }).expect(201);
+    const assignment = serviceClient.request.mock.calls.find((call) => call[0] === 'school' && call[1].endsWith('/teacher-assignments'));
+    expect(JSON.parse(String(assignment?.[2]?.body))).toMatchObject({ teacherMembershipId: id, classId: 'class-2', canRecordAttendance: true });
+    expect(serviceClient.request.mock.calls.some((call) => call[1] === '/internal/v1/provisioning/accounts')).toBe(false);
+  });
+
+  it('rejects assigning a teacher who does not belong to the current school', async () => {
+    const fallback = serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service: string, path: string, init?: RequestInit) => {
+      if (service === 'identity' && path.endsWith('/members?role=TEACHER')) return Promise.resolve([]);
+      return fallback(service, path, init);
+    });
+    const response = await request(app.getHttpServer()).post('/api/v1/admin/teachers/123e4567-e89b-42d3-a456-426614174000/assignments').set('Authorization', 'Bearer admin-token').send({ classId: 'class-2', subjectCode: 'SCI', subjectName: 'Science' }).expect(403);
+    expect(response.body.code).toBe('TEACHER_NOT_ACTIVE_IN_SCHOOL');
+    expect(serviceClient.request.mock.calls.some((call) => call[0] === 'school' && call[1].endsWith('/teacher-assignments'))).toBe(false);
+  });
+
   it('requires authentication for protected routes', async () => {
     await request(app.getHttpServer()).get('/api/v1/me/context').expect(401);
   });

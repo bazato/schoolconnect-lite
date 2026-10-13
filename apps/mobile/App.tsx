@@ -22,7 +22,6 @@ import {
   BookOpen,
   CalendarCheck,
   Check,
-  ChevronDown,
   ChevronRight,
   CircleAlert,
   ClipboardCheck,
@@ -51,6 +50,7 @@ import {
   TimelinePost,
 } from "./src/domain";
 import { colors, radius } from "./src/theme";
+import { TeachingClassSelector } from './src/TeachingClassSelector';
 import {
   clearSession,
   demoMode,
@@ -69,9 +69,12 @@ import {
 } from "./src/api";
 import { secureOfflineStorage } from "./src/secureOfflineStorage";
 import {
+  assignmentsForAction,
   mapApiChildren,
   resolveAssignment,
+  rosterContextKey,
   routeFromDeepLink,
+  teacherDraftKey,
   timelinePost,
 } from "./src/workflows";
 import {
@@ -684,6 +687,7 @@ function ParentHome({
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
+        style={styles.childSwitchViewport}
         contentContainerStyle={styles.childSwitchRow}
       >
         {availableChildren.map((child) => (
@@ -711,8 +715,9 @@ function ParentHome({
                 {child.avatar}
               </Text>
             </View>
-            <View>
+            <View style={styles.flex}>
               <Text
+                numberOfLines={1}
                 style={[
                   styles.childName,
                   child.id === selected.id && styles.childNameActive,
@@ -725,6 +730,7 @@ function ParentHome({
                   styles.childClass,
                   child.id === selected.id && styles.childClassActive,
                 ]}
+                numberOfLines={1}
               >
                 {child.className}
               </Text>
@@ -737,8 +743,8 @@ function ParentHome({
           <Text style={styles.avatarLargeText}>{selected.avatar}</Text>
         </View>
         <View style={styles.flex}>
-          <Text style={styles.scopeTitle}>{selected.name}</Text>
-          <Text style={styles.scopeMeta}>{selected.school}</Text>
+          <Text style={styles.scopeTitle} numberOfLines={2}>{selected.name}</Text>
+          <Text style={styles.scopeMeta} numberOfLines={2}>{selected.school}</Text>
         </View>
       </View>
       {pendingAbsenceId ? (
@@ -1241,6 +1247,7 @@ function ProfileScreen({
   setRole,
   availableRoles,
   displayName,
+  schoolName,
   switchingRole,
   roleError,
   offline,
@@ -1252,6 +1259,7 @@ function ProfileScreen({
   setRole: (role: Role) => void;
   availableRoles: Role[];
   displayName: string;
+  schoolName: string;
   switchingRole: boolean;
   roleError: string;
   offline: boolean;
@@ -1274,7 +1282,7 @@ function ProfileScreen({
         </View>
         <View style={styles.flex}>
           <Text style={styles.scopeTitle}>{displayName}</Text>
-          <Text style={styles.scopeMeta}>Thomas Jefferson High School</Text>
+          <Text style={styles.scopeMeta}>{schoolName}</Text>
         </View>
       </View>
       {availableRoles.length > 1 ? (
@@ -1904,6 +1912,7 @@ function ComposeScreen({
   editing,
   assignment,
   draft,
+  classSelector,
 }: {
   type: PostType;
   onBack: () => void;
@@ -1913,6 +1922,7 @@ function ComposeScreen({
   editing?: ApiTeacherPost;
   assignment?: ApiTeachingAssignment;
   draft?: ApiDraft;
+  classSelector?: { scope: ApiTeachingAssignment[]; schoolName: string; onSelect: (id: string) => void };
 }) {
   const [title, setTitle] = useState(
     editing?.title ?? draft?.payload.title ?? "",
@@ -1975,8 +1985,9 @@ function ComposeScreen({
   const draftSave = useRef<Promise<{ id: string }> | null>(null);
   const [serverDraftId, setServerDraftId] = useState(draft?.id ?? "");
   const [draftRestored, setDraftRestored] = useState(false);
+  const [switchingClass, setSwitchingClass] = useState(false);
   const userId = session?.user.id ?? "demo";
-  const key = `schoolconnect:draft:${userId}:${session?.activeMembershipId ?? "demo"}:${editing ? `edit:${editing.id}:${editing.revisionNumber}` : `${assignment?.assignmentId ?? "unassigned"}:${type}`}`;
+  const key = teacherDraftKey(userId, session?.activeMembershipId ?? 'demo', type, assignment?.assignmentId, editing);
   useEffect(() => {
     let active = true;
     setDraftRestored(false);
@@ -2112,14 +2123,18 @@ function ComposeScreen({
     published,
   ]);
   useEffect(() => {
-    if (type === "RESULT" && session && assignment)
-      void mobileApi
+    if (type !== "RESULT" || !session || !assignment || editing) return;
+    let active = true;
+    setResultStudents([]);
+    void mobileApi
         .attendanceRoster(session, assignment.classId)
         .then((items) => {
+          if (!active) return;
           setResultStudents(items);
-          setTargetStudentId((current) => current || items[0]?.id || "");
-        });
-  }, [type, session, assignment?.classId]);
+          setTargetStudentId((current) => items.some((student) => student.id === current) ? current : (items[0]?.id ?? ""));
+        }).catch((failure) => { if (active) setPublishError(failure instanceof Error ? failure.message : 'ROSTER_LOAD_FAILED'); });
+    return () => { active = false; };
+  }, [type, session, assignment?.classId, editing]);
   useEffect(() => {
     if (type !== "ANNOUNCEMENT" || !session) return;
     void mobileApi
@@ -2149,6 +2164,15 @@ function ComposeScreen({
       })
       .catch(() => undefined);
   }, [type, session, assignment?.assignmentId]);
+  const switchClass = async (id: string) => {
+    if (!classSelector || id === assignment?.assignmentId || editing || publishing || upload === 'UPLOADING' || !draftRestored) return;
+    setSwitchingClass(true);
+    try {
+      // Persist immediately: the autosave debounce may not have fired yet.
+      await secureOfflineStorage.setItem(userId, key, JSON.stringify({ title, body, dueDate, examName: exam, urgent, audienceType, scheduledFor, targetStudentId, uploadedFileId, uploadMetadata, savedAt: Date.now() }));
+      classSelector.onSelect(id);
+    } finally { setSwitchingClass(false); }
+  };
   const attach = async () => {
     if (!session) {
       setUpload("UPLOADING");
@@ -2209,6 +2233,7 @@ function ComposeScreen({
     }
   };
   const publish = async () => {
+    if (switchingClass || publishing || !draftRestored) return;
     const invalid =
       !title.trim() ||
       !body.trim() ||
@@ -2220,6 +2245,7 @@ function ComposeScreen({
         (upload !== "READY" ||
           !privacy ||
           !targetStudentId ||
+          !resultStudents.some((student) => student.id === targetStudentId) ||
           !uploadedFileId)) ||
       Boolean(
         scheduledFor &&
@@ -2376,6 +2402,10 @@ function ComposeScreen({
             subtitle={assignment?.className ?? "Assigned class"}
             onBack={onBack}
           />
+          {classSelector && !editing ? <>
+            <TeachingClassSelector scope={assignmentsForAction(classSelector.scope, type)} selected={assignment} schoolName={classSelector.schoolName} onSelect={switchClass} disabled={publishing || switchingClass || upload === 'UPLOADING' || !draftRestored} />
+            <Text style={styles.cardMeta}>Switching saves this draft for its current class. The other class opens its own draft; student selections and files are not transferred.</Text>
+          </> : null}
           <View style={styles.scopeCard}>
             <View>
               <Text style={styles.eyebrow}>AUDIENCE</Text>
@@ -2386,14 +2416,14 @@ function ComposeScreen({
                   : (assignment?.subjectName ?? "Guardians")}
               </Text>
             </View>
-            <ChevronDown size={19} color={colors.primary} />
+            <Text style={styles.scopeMeta}>Selected class</Text>
           </View>
           {editing ? (
             <View style={styles.notice}>
               <ShieldCheck size={19} color={colors.info} />
               <Text style={styles.noticeText}>
                 Saving creates revision {editing.revisionNumber + 1}. Audience
-                and existing attachments stay unchanged.
+                and existing attachments stay unchanged. The original class cannot be changed; create a new post for another class.
               </Text>
             </View>
           ) : null}
@@ -2635,7 +2665,7 @@ function ComposeScreen({
               void publish();
             }}
             loading={publishing}
-            disabled={editing?.status === "ARCHIVED"}
+            disabled={switchingClass || !draftRestored || editing?.status === "ARCHIVED"}
           />
         </ScrollView>
       </KeyboardAvoidingView>
@@ -2710,10 +2740,12 @@ function TeacherAttendance({
   onBack,
   assignment,
   session,
+  classSelector,
 }: {
   onBack: () => void;
   assignment?: ApiTeachingAssignment;
   session: MobileSession | null;
+  classSelector: { scope: ApiTeachingAssignment[]; schoolName: string; onSelect: (id: string) => void };
 }) {
   const [roster, setRoster] = useState<
     Array<{ id: string; displayName: string }>
@@ -2731,8 +2763,10 @@ function TeacherAttendance({
   const [correctionReason, setCorrectionReason] = useState("");
   const [queued, setQueued] = useState(false);
   const [loadingRoster, setLoadingRoster] = useState(false);
+  const [loadedContext, setLoadedContext] = useState('');
+  const currentContext = rosterContextKey(assignment?.classId, attendanceDate);
   useEffect(() => {
-    setRoster([]); setError(''); setVersion(0);
+    setRoster([]); setStatuses({}); setError(''); setVersion(0); setLoadedContext(''); setCorrectionReason(''); setSubmitted(false); setQueued(false); setLoadingRoster(false);
     if (!session || !assignment?.canRecordAttendance) { setError('Choose an active attendance assignment.'); return; }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(attendanceDate)) { setError('Use YYYY-MM-DD for the attendance date.'); return; }
     let active = true;
@@ -2755,6 +2789,7 @@ function TeacherAttendance({
           ),
         );
         setVersion(state.version);
+        setLoadedContext(rosterContextKey(assignment.classId, attendanceDate));
       })
       .catch((failure) => {
         if (active) setError(
@@ -2764,7 +2799,7 @@ function TeacherAttendance({
     return () => { active = false; };
   }, [session, assignment?.classId, assignment?.canRecordAttendance, attendanceDate]);
   const submit = async () => {
-    if (!session || !assignment || !roster.length || loadingRoster) return;
+    if (!session || !assignment || !roster.length || loadingRoster || loadedContext !== currentContext || saving) return;
     setSaving(true);
     setError("");
     try {
@@ -2817,6 +2852,7 @@ function TeacherAttendance({
           subtitle={`${assignment?.className ?? "Assigned class"} · ${attendanceDate}`}
           onBack={onBack}
         />
+        <TeachingClassSelector scope={assignmentsForAction(classSelector.scope, 'ATTENDANCE')} selected={assignment} schoolName={classSelector.schoolName} onSelect={classSelector.onSelect} disabled={saving} confirmSelection="Changing class reloads its roster. Unsaved attendance marks and correction reasons will be discarded. Continue?" />
         <Field
           label="Attendance date (YYYY-MM-DD)"
           value={attendanceDate}
@@ -2905,7 +2941,7 @@ function TeacherAttendance({
           }}
           loading={saving}
           disabled={
-            !roster.length ||
+            saving || loadingRoster || loadedContext !== currentContext || !roster.length ||
             (version > 0 && correctionReason.trim().length < 5)
           }
         />
@@ -2918,10 +2954,12 @@ function FollowUps({
   onBack,
   assignment,
   session,
+  classSelector,
 }: {
   onBack: () => void;
   assignment?: ApiTeachingAssignment;
   session: MobileSession | null;
+  classSelector: { scope: ApiTeachingAssignment[]; schoolName: string; onSelect: (id: string) => void };
 }) {
   const [items, setItems] = useState<
     Array<{
@@ -2931,13 +2969,21 @@ function FollowUps({
     }>
   >([]);
   const attendanceDate = new Date().toISOString().slice(0, 10);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
   useEffect(() => {
-    if (session && assignment)
+    let active = true;
+    setItems([]); setError(''); setLoading(false);
+    if (session && assignment?.canRecordAttendance) {
+      setLoading(true);
       void mobileApi
         .attendanceFollowUps(session, assignment.classId, attendanceDate)
-        .then(setItems)
-        .catch(() => setItems([]));
-  }, [session, assignment?.classId]);
+        .then((value) => { if (active) setItems(value); })
+        .catch((failure) => { if (active) setError(failure instanceof Error ? failure.message : 'FOLLOW_UP_LOAD_FAILED'); })
+        .finally(() => { if (active) setLoading(false); });
+    }
+    return () => { active = false; };
+  }, [session, assignment?.classId, assignment?.canRecordAttendance, attendanceDate]);
   return (
     <SafeAreaView style={styles.safe}>
       <ScrollView contentContainerStyle={styles.page}>
@@ -2946,6 +2992,9 @@ function FollowUps({
           subtitle={`${assignment?.className ?? "Assigned class"} · Today`}
           onBack={onBack}
         />
+        <TeachingClassSelector scope={assignmentsForAction(classSelector.scope, 'FOLLOW_UPS')} selected={assignment} schoolName={classSelector.schoolName} onSelect={classSelector.onSelect} />
+        {loading ? <ActivityIndicator color={colors.primary} /> : null}
+        {error ? <Text style={styles.errorText}>{error}</Text> : null}
         <View style={styles.filterRow}>
           <Chip label={`All ${items.length}`} />
           <Chip
@@ -2966,7 +3015,7 @@ function FollowUps({
             }
           />
         ))}
-        {!items.length ? (
+        {!loading && !error && !items.length ? (
           <EmptyState
             icon={Users}
             title="No absence follow-ups"
@@ -3440,6 +3489,7 @@ function BottomNav({
   );
 }
 
+
 function MainApp() {
   const [signedIn, setSignedIn] = useState(false);
   const [role, setRoleState] = useState<Role>("PARENT");
@@ -3449,6 +3499,7 @@ function MainApp() {
   const [offline, setOffline] = useState(false);
   const [session, setSession] = useState<MobileSession | null>(null);
   const [liveChildren, setLiveChildren] = useState<Child[]>([]);
+  const [activeSchoolName, setActiveSchoolName] = useState('');
   const [livePosts, setLivePosts] = useState<TimelinePost[]>([]);
   const [teacherPosts, setTeacherPosts] = useState<ApiTeacherPost[]>([]);
   const [teacherDrafts, setTeacherDrafts] = useState<ApiDraft[]>([]);
@@ -3471,6 +3522,16 @@ function MainApp() {
   const [switchingRole, setSwitchingRole] = useState(false);
   const [roleError, setRoleError] = useState("");
   const [restoring, setRestoring] = useState(!demoMode);
+
+  useEffect(() => {
+    setActiveSchoolName('');
+    if (!session) return;
+    let active = true;
+    void mobileApi.context(session).then((context) => {
+      if (active) setActiveSchoolName(context.school?.displayName ?? 'SchoolConnect');
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [session]);
 
   useEffect(() => {
     if (!session || role !== "PARENT") return;
@@ -3531,13 +3592,12 @@ function MainApp() {
       .then((items) => {
         const mapped = mapApiChildren(items);
         setLiveChildren(mapped);
-        if (mapped[0] && !mapped.some((item) => item.id === childId))
-          setChildId(mapped[0].id);
+        setChildId((current) => mapped.some((item) => item.id === current) ? current : (mapped[0]?.id ?? ''));
       })
       .catch((error) => {
         if (isNetworkError(error)) setOffline(true);
       });
-  }, [session, role, childId]);
+  }, [session, role]);
 
   useEffect(() => {
     if (
@@ -3548,6 +3608,7 @@ function MainApp() {
     )
       return;
     let active = true;
+    setLivePosts([]);
     const refresh = () => {
       void mobileApi
         .timeline(session, childId, (online) => setOffline(!online))
@@ -3577,10 +3638,13 @@ function MainApp() {
       setAttendanceHistory([]);
       return;
     }
+    let active = true;
+    setAttendanceHistory([]);
     void mobileApi
       .attendanceHistory(session, childId)
-      .then(setAttendanceHistory)
-      .catch(() => setAttendanceHistory([]));
+      .then((history) => { if (active) setAttendanceHistory(history); })
+      .catch(() => { if (active) setAttendanceHistory([]); });
+    return () => { active = false; };
   }, [session, role, childId, liveChildren]);
 
   useEffect(() => {
@@ -3716,6 +3780,13 @@ function MainApp() {
         type={route.type}
         draft={draft}
         assignment={assignment}
+        classSelector={{ scope: teachingScope, schoolName: activeSchoolName, onSelect: (id) => {
+          const next = teachingScope.find((item) => item.assignmentId === id);
+          if (!next || !assignmentsForAction(teachingScope, route.type).includes(next)) return;
+          setSelectedAssignmentId(id);
+          const nextDraft = teacherDrafts.find((item) => item.classId === next.classId && item.postType === route.type && item.payload.subjectCode === next.subjectCode);
+          setRoute({ name: 'compose', type: route.type, draftId: nextDraft?.id });
+        } }}
         session={session}
         onPublished={refreshTeacherPosts}
         onBack={() => {
@@ -3768,6 +3839,7 @@ function MainApp() {
     return (
       <TeacherAttendance
         assignment={selectedAssignment}
+        classSelector={{ scope: teachingScope, schoolName: activeSchoolName, onSelect: setSelectedAssignmentId }}
         session={session}
         onBack={() => setRoute(null)}
       />
@@ -3776,6 +3848,7 @@ function MainApp() {
     return (
       <FollowUps
         assignment={selectedAssignment}
+        classSelector={{ scope: teachingScope, schoolName: activeSchoolName, onSelect: setSelectedAssignmentId }}
         session={session}
         onBack={() => setRoute(null)}
       />
@@ -3821,40 +3894,8 @@ function MainApp() {
   return (
     <SafeAreaView style={styles.safe} edges={["top", "left", "right"]}>
       {role === "TEACHER" &&
-      teachingScope.length > 1 &&
       ["home", "posts", "attendance"].includes(tab) ? (
-        <View style={{ paddingHorizontal: 20, paddingTop: 8 }}>
-          <Text style={styles.eyebrow}>SELECT CLASS AND SUBJECT</Text>
-          <ScrollView horizontal contentContainerStyle={styles.childSwitchRow}>
-            {teachingScope.map((item) => (
-              <Pressable
-                key={item.assignmentId}
-                accessibilityRole="button"
-                accessibilityLabel={`${item.className}, ${item.subjectName}`}
-                accessibilityState={{
-                  selected:
-                    item.assignmentId === selectedAssignment?.assignmentId,
-                }}
-                onPress={() => setSelectedAssignmentId(item.assignmentId)}
-                style={[
-                  styles.childPill,
-                  item.assignmentId === selectedAssignment?.assignmentId &&
-                    styles.childPillActive,
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.childName,
-                    item.assignmentId === selectedAssignment?.assignmentId &&
-                      styles.childNameActive,
-                  ]}
-                >
-                  {item.className} · {item.subjectName}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        </View>
+        <TeachingClassSelector scope={teachingScope} selected={selectedAssignment} onSelect={setSelectedAssignmentId} schoolName={activeSchoolName} />
       ) : null}
       <View style={styles.appBody}>
         {tab === "home" ? (
@@ -3920,6 +3961,7 @@ function MainApp() {
         ) : null}
         {tab === "profile" ? (
           <ProfileScreen
+            schoolName={session ? (activeSchoolName || liveChildren.find((child) => child.id === childId)?.school || 'Loading school…') : 'Demo school'}
             role={role}
             setRole={(next) => {
               void setRole(next);
@@ -3974,7 +4016,7 @@ export default function App() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.surface },
-  flex: { flex: 1 },
+  flex: { flex: 1, minWidth: 0 },
   appBody: { flex: 1, backgroundColor: colors.surface },
   loader: {
     flex: 1,
@@ -4299,10 +4341,14 @@ const styles = StyleSheet.create({
   chipSuccess: { backgroundColor: colors.successSoft, color: colors.success },
   chipDanger: { backgroundColor: colors.dangerSoft, color: colors.danger },
   chipInfo: { backgroundColor: colors.infoSoft, color: colors.info },
-  childSwitchRow: { gap: 10, paddingRight: 20 },
+  selectorBackdrop: { flex: 1, backgroundColor: '#22143680', justifyContent: 'center', padding: 20 },
+  selectorPanel: { backgroundColor: colors.surface, borderRadius: 18, padding: 18, gap: 14, maxHeight: '75%' },
+  childSwitchViewport: { flexGrow: 0, flexShrink: 0, height: 72, width: '100%' },
+  childSwitchRow: { gap: 10, paddingRight: 20, alignItems: 'center' },
   childPill: {
-    minWidth: 176,
-    minHeight: 62,
+    width: 200,
+    height: 62,
+    flexShrink: 0,
     padding: 9,
     borderWidth: 1,
     borderColor: colors.border,

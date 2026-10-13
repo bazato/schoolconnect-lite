@@ -119,6 +119,31 @@ class SchoolRepository implements OnModuleDestroy {
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
 
+  async updateClass(schoolId: string, classId: string, input: { classCode?: string; displayName?: string; gradeCode?: string; status?: 'ACTIVE' | 'ARCHIVED' }, actorUserId?: string, correlationId?: string) {
+    if ([input.classCode, input.displayName, input.gradeCode].some((value) => value !== undefined && typeof value !== 'string')) throw new BadRequestException({ code: 'CLASS_VALIDATION_FAILED' });
+    const classCode = input.classCode?.trim().toUpperCase();
+    const displayName = input.displayName?.trim();
+    if ((input.classCode !== undefined && !/^[A-Z0-9_-]{1,40}$/.test(classCode ?? '')) ||
+        (input.displayName !== undefined && (!displayName || displayName.length > 120)) ||
+        (input.gradeCode !== undefined && !/^[A-Z0-9_-]{0,40}$/.test(input.gradeCode.trim().toUpperCase())) ||
+        (input.status !== undefined && !['ACTIVE', 'ARCHIVED'].includes(input.status))) {
+      throw new BadRequestException({ code: 'CLASS_VALIDATION_FAILED' });
+    }
+    try {
+      return await this.mutateWithEvent(domainEventTypes.classUpserted, classId, { schoolId, classId, changedFields: Object.keys(input), actorUserId, correlationId }, async (client) => {
+        const result = await client.query(`UPDATE school_classes SET class_code=COALESCE($3,class_code),display_name=COALESCE($4,display_name),
+          grade_code=CASE WHEN $5::text IS NULL THEN grade_code ELSE NULLIF($5,'') END,status=COALESCE($6,status)
+          WHERE school_id=$1 AND id=$2 RETURNING id,class_code AS "classCode",display_name AS "displayName",grade_code AS "gradeCode",academic_year AS "academicYear",status`,
+          [schoolId, classId, classCode ?? null, displayName ?? null, input.gradeCode?.trim().toUpperCase() ?? null, input.status ?? null]);
+        if (!result.rowCount) throw new NotFoundException({ code: 'CLASS_NOT_FOUND_IN_SCHOOL' });
+        return result.rows[0];
+      });
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505') throw new ConflictException({ code: 'CLASS_CODE_ALREADY_EXISTS' });
+      throw error;
+    }
+  }
+
   async createClass(input: { schoolId: string; classCode: string; displayName: string; academicYear: string; gradeCode?: string }, actorUserId?: string, correlationId?: string) {
     const classCode = input.classCode?.trim().toUpperCase();
     const displayName = input.displayName?.trim();
@@ -263,7 +288,8 @@ class SchoolRepository implements OnModuleDestroy {
   async teacherAuthorized(schoolId: string, membershipId: string, classId: string, capability: string) {
     const column = capability === 'RESULTS' ? 'can_publish_results' : capability === 'ANNOUNCEMENTS' ? 'can_publish_announcements' : 'can_record_attendance';
     const result = await this.pool.query(
-      `SELECT EXISTS(SELECT 1 FROM teacher_assignments WHERE school_id=$1 AND teacher_membership_id=$2 AND class_id=$3 AND status='ACTIVE' AND ${column}=true) AS allowed`,
+      `SELECT EXISTS(SELECT 1 FROM teacher_assignments a JOIN school_classes c ON c.id=a.class_id AND c.school_id=a.school_id
+        WHERE a.school_id=$1 AND a.teacher_membership_id=$2 AND a.class_id=$3 AND a.status='ACTIVE' AND c.status='ACTIVE' AND a.${column}=true) AS allowed`,
       [schoolId, membershipId, classId]);
     return Boolean(result.rows[0]?.allowed);
   }
@@ -452,6 +478,7 @@ class SchoolController {
   @Post('schools') createSchool(@Body() body: { schoolCode: string; displayName: string; timezone: string }, @Headers('x-schoolconnect-user-id') actorUserId?: string, @Headers('x-correlation-id') correlationId?: string) { return this.repository.createSchool(body, actorUserId, correlationId); }
   @Patch('schools/:schoolId') updateSchool(@Param('schoolId') schoolId: string, @Body() body: { displayName?: string; timezone?: string; status?: 'ACTIVE' | 'SUSPENDED' | 'CLOSED' }, @Headers('x-schoolconnect-user-id') actorUserId?: string, @Headers('x-correlation-id') correlationId?: string) { return this.repository.updateSchool(schoolId, body, actorUserId, correlationId); }
   @Get('schools/:schoolId/classes') classes(@Param('schoolId') schoolId: string) { return this.repository.classes(schoolId); }
+  @Patch('schools/:schoolId/classes/:classId') updateClass(@Param('schoolId') schoolId: string, @Param('classId') classId: string, @Body() body: Parameters<SchoolRepository['updateClass']>[2], @Headers('x-schoolconnect-user-id') actorUserId?: string, @Headers('x-correlation-id') correlationId?: string) { return this.repository.updateClass(schoolId, classId, body, actorUserId, correlationId); }
   @Post('schools/:schoolId/classes') createClass(@Param('schoolId') schoolId: string, @Body() body: { classCode: string; displayName: string; academicYear: string; gradeCode?: string }, @Headers('x-schoolconnect-user-id') actorUserId?: string, @Headers('x-correlation-id') correlationId?: string) { return this.repository.createClass({ ...body, schoolId }, actorUserId, correlationId); }
   @Patch('schools/:schoolId/configuration') configuration(@Param('schoolId') schoolId: string, @Body() body: Parameters<SchoolRepository['updateConfiguration']>[1], @Headers('x-schoolconnect-user-id') actorUserId?: string, @Headers('x-correlation-id') correlationId?: string) { return this.repository.updateConfiguration(schoolId, body, actorUserId, correlationId); }
   @Post('schools/:schoolId/academic-years/rollover') rollover(@Param('schoolId') schoolId: string, @Body() body: { fromYear: string; toYear: string }, @Headers('x-schoolconnect-user-id') actorUserId?: string, @Headers('x-correlation-id') correlationId?: string) { return this.repository.rollover(schoolId, body.fromYear, body.toYear, actorUserId, correlationId); }
