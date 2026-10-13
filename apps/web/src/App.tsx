@@ -207,7 +207,7 @@ function Portal({ context, session, onSession, request, onSignOut }: {
         {page === 'Teachers' && <TeachersPage teachers={teachers} classes={classes} formOpen={formOpen} setFormOpen={setFormOpen} request={request} onInvite={invite} onSaved={() => { void reload(); announce('Teacher details and class assignments saved.'); }} />}
         {page === 'Students' && <StudentsPage students={students} classes={classes} request={request} onInvite={invite} onSaved={(message) => { void reload(); announce(message ?? 'Student account and guardian invitation created.'); }} />}
         {page === 'Results' && <ResultsPage students={students} request={request} onMessage={announce} />}
-        {page === 'Fees' && <FeesPage request={request} />}
+        {page === 'Fees' && <FeesPage request={request} schoolName={context.school?.displayName} />}
         <footer className="page-footer"><span>Nexqon School App</span><span>Role-scoped workspace · {context.school?.displayName ?? 'All schools'}</span></footer>
       </section>
     </main>

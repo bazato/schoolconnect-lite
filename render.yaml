@@ -97,3 +97,16 @@ services:
         value: '2'
       - key: FEES_DB_POOL_MAX
         value: '2'
+      # Without the protected key and actual Free-tier confirmation, rules stay active.
+      - key: FEES_QUERY_PROVIDER
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_FREE_TIER_CONFIRMED
+        sync: false
+      - key: FEES_AI_MODEL
+        value: openai/gpt-oss-20b
+      - key: FEES_AI_GLOBAL_REQUESTS_PER_MINUTE
+        value: '3'
+      - key: FEES_AI_DAILY_REQUESTS
+        value: '100'

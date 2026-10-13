@@ -2,6 +2,7 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppModule, ServiceClient } from './app.module';
+import { FeeQueryInterpreter } from './fees-query-interpreter';
 import { requestContextMiddleware } from './request-context';
 import type { INestApplication } from '@nestjs/common';
 
@@ -32,6 +33,23 @@ describe('API gateway authorization and service boundaries', () => {
     expect(serviceClient.request.mock.calls.find((call) => call[1].endsWith('/fee-roster'))?.[1]).toBe('/internal/v1/schools/school-1/fee-roster');
   });
 
+  it('interprets named-school questions once and sends only session scope and validated filters to Fees',async() => {
+    const fallback=serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit) => {
+      if (service==='school' && path.endsWith('/fee-roster')) return Promise.resolve([{id:'authorized-student'}]);
+      if (service==='fees') return Promise.resolve({query:JSON.parse(String(init?.body)).query,currencies:[],records:[],studentCount:0,recordCount:0,truncated:false});
+      return fallback(service,path,init);
+    });
+    const response=await request(app.getHttpServer()).post('/api/v1/admin/fees/search').set('Authorization','Bearer admin-token').send({question:'Could you show pending fees for current month for School One in grade three?',schoolId:'other',studentIds:['other-child'],query:{metric:'COLLECTED'}}).expect(201);
+    expect(response.body).toMatchObject({schoolName:'School One',interpretedBy:'rules',query:{metric:'PENDING',grade:'3'}});
+    const body=JSON.parse(String(serviceClient.request.mock.calls.find((call) => call[0]==='fees')?.[2]?.body));
+    expect(body).toMatchObject({schoolId:'school-1',studentIds:['authorized-student'],query:{metric:'PENDING',grade:'3'}});expect(body.question).toBeUndefined();expect(body.timezone).toBeUndefined();
+  });
+  it.each(['fees for current month for School One','pending this month for Another School','pending fees excluding grade 3','delete pending fees'])('clarifies instead of executing an unclear/unsupported question: %s',async(question) => {
+    const response=await request(app.getHttpServer()).post('/api/v1/admin/fees/search').set('Authorization','Bearer admin-token').send({question}).expect(201);
+    expect(response.body.kind).toBe('CLARIFICATION');expect(serviceClient.request.mock.calls.some((call) => call[0]==='fees')).toBe(false);
+  });
+
   beforeEach(async () => {
     serviceClient.request.mockReset();
     serviceClient.request.mockImplementation((service: string, path: string, init?: RequestInit) => {
@@ -47,7 +65,7 @@ describe('API gateway authorization and service boundaries', () => {
       if (service === 'school' && path === '/internal/v1/reports/platform-summary') return Promise.resolve([{ schoolId: '123e4567-e89b-42d3-a456-426614174000', schoolCode: 'S1', displayName: 'School One', status: 'ACTIVE', activeStudentCount: 12, totalStudentCount: 12 }]);
       if (service === 'identity' && path === '/internal/v1/reports/platform-memberships') return Promise.resolve([{ schoolId: '123e4567-e89b-42d3-a456-426614174000', activeTeacherCount: 2, activeParentCount: 10, activeAdminCount: 1 }]);
       if (service === 'identity' && path.includes('/members?role=SCHOOL_ADMIN')) return Promise.resolve([{ userId: 'admin-user', membershipId: 'admin-membership', displayName: 'School Admin', phoneE164: '+966500000001', role: 'SCHOOL_ADMIN', status: 'ACTIVE' }]);
-      if (service === 'school' && path === '/internal/v1/schools/school-1') return Promise.resolve({ id: 'school-1', active: true });
+      if (service === 'school' && path === '/internal/v1/schools/school-1') return Promise.resolve({ id: 'school-1', active: true, displayName:'School One',schoolCode:'S1',timezone:'UTC' });
       if (service === 'school' && path.endsWith('/classes') && init?.method === 'POST') return Promise.resolve({ id: 'class-created', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027' });
       if (service === 'school' && path.endsWith('/classes')) return Promise.resolve([{ id: 'class-1', classCode: 'G5A', displayName: 'Grade 5A', academicYear: '2026-2027', status: 'ACTIVE' }]);
       if (service === 'school' && path.endsWith('/students')) return Promise.resolve([{ id: 'student-1', admissionNumber: 'A-001', displayName: 'Child One', classId: 'class-1', className: 'Grade 5A', guardianCount: 1, status: 'ACTIVE' }]);
@@ -90,7 +108,8 @@ describe('API gateway authorization and service boundaries', () => {
       return Promise.resolve({});
     });
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
-      .overrideProvider(ServiceClient).useValue(serviceClient).compile();
+      .overrideProvider(ServiceClient).useValue(serviceClient)
+      .overrideProvider(FeeQueryInterpreter).useValue(new FeeQueryInterpreter({provider:'rules',timeoutMs:1000,requestsPerMinute:10,maxConcurrent:1})).compile();
     app = moduleRef.createNestApplication();
     app.use(requestContextMiddleware);
     app.setGlobalPrefix('api/v1');

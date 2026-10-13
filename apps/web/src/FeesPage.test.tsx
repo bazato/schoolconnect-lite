@@ -17,6 +17,17 @@ describe('school fee workspace', () => {
     expect(host.textContent).toContain('Voice input is not supported');
     expect([...host.querySelectorAll('button')].find((button) => button.textContent==='Use microphone')?.disabled).toBe(true);
   });
+  it('displays school scope and clarification suggestions without showing invented totals',async() => {
+    api.mockResolvedValueOnce({kind:'CLARIFICATION',message:'Do you mean pending fees or fees collected?',suggestions:['Pending fees for current month','Collected fees for current month']});
+    await act(async() => root.render(<FeesPage request={request} schoolName="School One" />));
+    expect(host.textContent).toContain('Searching School One only');
+    await act(async() => host.querySelector('form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+    expect(host.textContent).toContain('Do you mean pending fees');expect(host.querySelector('.fees-report')).toBeNull();
+    await click('Collected fees for current month');expect(api).toHaveBeenCalledOnce();expect(host.querySelector<HTMLInputElement>('input[maxlength="300"]')!.value).toBe('Collected fees for current month');
+    api.mockResolvedValueOnce({query:{label:'Collections dated · current month',metric:'COLLECTED'},studentCount:1,recordCount:1,currencies:[{currency:'INR',amount:'40.00'}],records:[],truncated:false});
+    await act(async() => host.querySelector('form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+    expect(api).toHaveBeenCalledTimes(2);expect(host.textContent).toContain('40.00');
+  });
   it('requires transcript confirmation and never automatically submits speech', async() => {
     let instance: Recognition | null=null;
     const capture=(value:Recognition) => { instance=value; };

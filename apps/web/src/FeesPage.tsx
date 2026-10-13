@@ -1,21 +1,23 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import type { FeeImport, FeePreview, FeeReport } from '@schoolconnect/contracts';
+import type { FeeClarification, FeeImport, FeePreview, FeeSearchResult } from '@schoolconnect/contracts';
 import { parseFeesWorkbook } from './fees-workbook';
 import { recognitionConstructor, voiceError, type Recognition } from './fee-voice';
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
 const message = (error: unknown) => error instanceof Error ? error.message.replaceAll('_',' ') : 'Please try again.';
-const examples = ['This month how many fees are pending','From 3rd grade how many fees are due','This month how much fees collected'];
+const examples = ['Show pending fees for the current month','From 3rd grade how many fees are due','How much fees collected this month'];
 
-export function FeesPage({ request }: { request: Request }) {
+export function FeesPage({ request,schoolName }: { request: Request; schoolName?: string }) {
   const [data,setData] = useState<FeeImport | null>(null), [preview,setPreview] = useState<FeePreview | null>(null);
   const [fileName,setFileName] = useState(''), [batchId,setBatchId] = useState('');
   const [busy,setBusy] = useState(false), [searching,setSearching] = useState(false);
   const [error,setError] = useState(''), [searchError,setSearchError] = useState(''), [notice,setNotice] = useState('');
-  const [question,setQuestion] = useState(examples[0]), [report,setReport] = useState<FeeReport | null>(null);
+  const [question,setQuestion] = useState(examples[0]), [report,setReport] = useState<Exclude<FeeSearchResult,FeeClarification> | null>(null);
+  const [clarify,setClarify] = useState<FeeClarification | null>(null);
   const [listening,setListening] = useState(false), [consent,setConsent] = useState(false);
   const recognition = useRef<Recognition | null>(null);
   const supported = Boolean(recognitionConstructor());
+  useEffect(() => { setReport(null);setClarify(null);setSearchError(''); },[schoolName]);
   useEffect(() => () => { const instance=recognition.current; if (instance) { instance.onresult=null; instance.onerror=null; instance.onend=null; instance.abort(); } }, []);
   const review = async (value: FeeImport) => { setPreview(await request<FeePreview>('/admin/fees/import-preview',{ method:'POST',body:JSON.stringify(value) })); };
   const selectFile = async (file?: File) => {
@@ -36,15 +38,15 @@ export function FeesPage({ request }: { request: Request }) {
     finally { setBusy(false); }
   };
   const search = async (event: FormEvent) => {
-    event.preventDefault(); setSearching(true);setSearchError('');setReport(null);
-    try { setReport(await request<FeeReport>('/admin/fees/search',{ method:'POST',body:JSON.stringify({ question }) })); }
+    event.preventDefault(); setSearching(true);setSearchError('');setReport(null);setClarify(null);
+    try { const result=await request<FeeSearchResult>('/admin/fees/search',{ method:'POST',body:JSON.stringify({ question }) });if ('kind' in result) setClarify(result);else setReport(result); }
     catch (failure) { setSearchError(message(failure)); } finally { setSearching(false); }
   };
   const listen = () => {
     if (listening) { recognition.current?.stop(); return; }
     const Constructor=recognitionConstructor(); if (!Constructor || !consent) return;
     const instance=new Constructor(); recognition.current=instance;instance.lang='en-IN';instance.continuous=false;instance.interimResults=false;
-    instance.onresult=(event) => { setQuestion(event.results[0]?.[0]?.transcript ?? '');setReport(null); };
+    instance.onresult=(event) => { setQuestion(event.results[0]?.[0]?.transcript ?? '');setReport(null);setClarify(null); };
     instance.onerror=(event) => { setSearchError(voiceError(event.error));setListening(false); };
     instance.onend=() => { setListening(false);recognition.current=null; };
     setSearchError('');
@@ -69,11 +71,14 @@ export function FeesPage({ request }: { request: Request }) {
     </section>
     <section className="panel fees-panel" aria-labelledby="fee-search-heading">
       <h2 id="fee-search-heading">Ask about your school’s fees</h2><p>Type a question or dictate it in English. Review the transcript, then select Search.</p>
-      <div className="fee-examples">{examples.map((example) => <button key={example} className="button quiet small" onClick={() => { setQuestion(example);setReport(null); }}>{example}</button>)}</div>
-      <form className="fees-search" onSubmit={(event) => { void search(event); }}><label>Fee question<input value={question} maxLength={300} onChange={(event) => { setQuestion(event.target.value);setReport(null); }} required disabled={listening} /></label><div className="fees-actions"><button type="button" className="button secondary" disabled={!supported || !consent || searching} onClick={listen}>{listening ? 'Stop listening' : 'Use microphone'}</button><button className="button primary" disabled={searching || listening}>{searching ? 'Searching…' : 'Search'}</button></div></form>
+      <p className="muted">Searching {schoolName ?? 'your active school'} only. Name this school or say “my school”. If your question is unclear, we’ll ask you to choose pending fees or collections.</p>
+      <p className="muted">Search tries the free parser first. If AI is enabled, your question and school context go to Groq or the configured self-hosted model. Student records and fee amounts are not sent. Avoid including personal details in questions.</p>
+      <div className="fee-examples">{examples.map((example) => <button key={example} disabled={searching || listening} className="button quiet small" onClick={() => { setQuestion(example);setReport(null);setClarify(null); }}>{example}</button>)}</div>
+      <form className="fees-search" onSubmit={(event) => { void search(event); }}><label>Fee question<input value={question} maxLength={300} onChange={(event) => { setQuestion(event.target.value);setReport(null);setClarify(null); }} required disabled={listening || searching} /></label><div className="fees-actions"><button type="button" className="button secondary" disabled={!supported || !consent || searching} onClick={listen}>{listening ? 'Stop listening' : 'Use microphone'}</button><button className="button primary" disabled={searching || listening}>{searching ? 'Searching…' : 'Search'}</button></div></form>
       {supported ? <label className="fee-consent"><input type="checkbox" checked={consent} disabled={listening} onChange={(event) => setConsent(event.target.checked)} />I agree to use my browser’s speech service. It may send audio to its provider; Nexqon stores neither audio nor transcripts.</label> : <p className="muted">Voice input is not supported here. Use a compatible browser over HTTPS (or localhost), or type your question.</p>}
       {listening && <p role="status">Listening… No search runs until you confirm the transcript.</p>}
       {searchError && <div className="alert danger" role="alert">{searchError}</div>}
+      {clarify && <div className="fees-guide" role="status"><p>{clarify.message}</p><div className="fee-examples">{clarify.suggestions.map((suggestion) => <button type="button" key={suggestion} className="button secondary small" onClick={() => {setQuestion(suggestion);setClarify(null);setReport(null);}}>{suggestion}</button>)}</div><p className="muted">Select or edit a suggestion, then Search. No report was run for the unclear question.</p></div>}
       {report && <div className="fees-report"><h3>{report.query.label}</h3><p>{report.studentCount} students · {report.recordCount} {report.query.metric==='PENDING' ? 'unpaid fee records' : 'collection receipts'}</p><div className="fees-totals">{report.currencies.map((total) => <div key={total.currency}><span>{total.currency}</span><strong>{total.amount}</strong></div>)}{!report.currencies.length && <p>No matching fee records.</p>}</div><p className="muted">Pending: remaining balance now, filtered by fee due date. Collected: receipts filtered by collection date. “This month” uses your school’s timezone. Grade filters use current active class enrolments and grade codes (3, G3, GRADE_3 or GRADE-3). Currencies are never added together.</p><div className="table-scroll"><table><thead><tr><th>Admission / student</th><th>Fee / receipt</th><th>{report.query.metric==='PENDING' ? 'Due date' : 'Collection date'}</th><th>Amount</th></tr></thead><tbody>{report.records.map((row,index) => <tr key={index}><td>{row.admissionNumber}<small className="fee-student-name">{row.studentName}</small></td><td>{row.feeReference}{row.collectionReference && <small className="fee-student-name">{row.collectionReference}</small>}</td><td>{row.date}</td><td>{row.currency} {row.amount}</td></tr>)}</tbody></table></div>{report.truncated && <p>Showing the first 200 records; the totals above include every matching record.</p>}</div>}
     </section>
   </div>;

@@ -8,7 +8,8 @@ import type { Request } from 'express';
 import { parseStudentCsv } from './csv';
 import { parseResultImportRows } from './results-import';
 import { currentRequestContext } from './request-context';
-import { parseFeeImport, parseFeeQuery, type FeeStudent } from '@schoolconnect/contracts';
+import { parseFeeImport, type FeeSchoolContext, type FeeStudent } from '@schoolconnect/contracts';
+import { FeeQueryInterpreter } from './fees-query-interpreter';
 
 type Role = 'PLATFORM_OWNER' | 'SCHOOL_ADMIN' | 'TEACHER' | 'PARENT';
 type Principal = { userId: string; displayName: string; membershipId: string; schoolId: string | null; role: Role; sessionId: string };
@@ -308,7 +309,7 @@ class MobileBffController {
 
 @Controller('admin')
 class AdminController {
-  constructor(@Inject(ServiceClient) private readonly clients: ServiceClient) {}
+  constructor(@Inject(ServiceClient) private readonly clients: ServiceClient, @Inject(FeeQueryInterpreter) private readonly feeInterpreter: FeeQueryInterpreter) {}
 
   private schoolId(principal: Principal) {
     if (!principal.schoolId) throw new ForbiddenException({ code: 'SCHOOL_CONTEXT_REQUIRED' });
@@ -337,11 +338,13 @@ class AdminController {
   @Post('fees/search')
   async searchFees(@Body() body: { question?: string }, @CurrentPrincipal() principal: Principal) {
     const schoolId = this.schoolId(principal);
-    const school = await this.clients.request<{ timezone: string }>('school',`/internal/v1/schools/${schoolId}`);
-    let query: ReturnType<typeof parseFeeQuery>;
-    try { query = parseFeeQuery(body?.question,school.timezone); } catch (error) { throw new BadRequestException(error instanceof Error ? error.message : 'Invalid fee question.'); }
+    const school = await this.clients.request<FeeSchoolContext>('school',`/internal/v1/schools/${schoolId}`);
+    const interpretation = await this.feeInterpreter.interpret(body?.question,school,principal.userId);
+    if ('kind' in interpretation) return interpretation;
+    const query = interpretation.query;
     const students = query.grade ? await this.clients.request<FeeStudent[]>('school',`/internal/v1/schools/${schoolId}/fee-roster`,{ method:'POST',body:JSON.stringify({ grade:query.grade }) }) : null;
-    return this.clients.request('fees','/internal/v1/fees/report',{ method:'POST',body:JSON.stringify({ schoolId,question:body.question,timezone:school.timezone,studentIds:students?.map((student) => student.id) ?? null }) });
+    const report = await this.clients.request<Record<string,unknown>>('fees','/internal/v1/fees/report',{ method:'POST',body:JSON.stringify({ schoolId,query,studentIds:students?.map((student) => student.id) ?? null }) });
+    return { ...report,schoolName:school.displayName,interpretedBy:interpretation.interpretedBy };
   }
 
   @Get('schools')
@@ -1041,6 +1044,6 @@ class FilesController {
 
 @Module({
   controllers: [HealthController, AuthController, MeController, MobileBffController, AdminController, ContentController, AttendanceController, NotificationsController, FilesController],
-  providers: [ServiceClient, resourceAuthorizationProvider, { provide: APP_GUARD, useClass: SessionGuard }, { provide: APP_GUARD, useClass: RoutePolicyGuard }, { provide: APP_GUARD, useClass: RateLimitGuard }],
+  providers: [ServiceClient, { provide: FeeQueryInterpreter, useFactory: () => new FeeQueryInterpreter() }, resourceAuthorizationProvider, { provide: APP_GUARD, useClass: SessionGuard }, { provide: APP_GUARD, useClass: RoutePolicyGuard }, { provide: APP_GUARD, useClass: RateLimitGuard }],
 })
 export class AppModule {}

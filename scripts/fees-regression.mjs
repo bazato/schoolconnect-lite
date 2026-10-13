@@ -35,7 +35,10 @@ const updated={fees:[],collections:[{...data.collections[0],amount:'50.00'}]},up
 await call('/admin/fees/import-commit',admin.accessToken,{...updated,batchId:randomUUID(),revision:updatePreview.revision});
 await call('/admin/fees/import-commit',admin.accessToken,{...data,batchId:randomUUID(),revision:preview.revision},409);
 assert.equal((await call('/admin/fees/search',admin.accessToken,{question:'collected this month'})).currencies[0].amount,'50.00');
-await call('/admin/fees/search',admin.accessToken,{question:'delete fees for all students'},400);
+assert.equal((await call('/admin/fees/search',admin.accessToken,{question:'delete fees for all students'})).kind,'CLARIFICATION');
+assert.equal((await call('/admin/fees/search',admin.accessToken,{question:'fees for the current month'})).kind,'CLARIFICATION');
+const natural=await call('/admin/fees/search',admin.accessToken,{question:`Can you show the pending fees for current month for ${school.school.displayName}?`});assert.equal(natural.currencies[0].amount,'150.00');assert.equal(natural.schoolName,school.school.displayName);
+assert.equal((await call('/admin/fees/search',admin.accessToken,{question:'pending fees this month for Different School'})).kind,'CLARIFICATION');
 // Count + authoritative report totals stay consistent under concurrent read load.
 const start=Date.now();const reads=await Promise.all(Array.from({length:100},() => call('/admin/fees/search',admin.accessToken,{question:'pending this month'})));
 assert.ok(reads.every((report) => report.studentCount===2 && report.currencies[0].amount==='150.00'));

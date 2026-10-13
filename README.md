@@ -13,6 +13,7 @@ One Expo/React Native application for Platform Owner, School Admin, Teacher and 
 - Independently runnable Identity, School, Content, Attendance, Files, Notifications, Audit, Authorization, Read Model and Fees services
 - Nine service-owned PostgreSQL databases with no cross-database foreign keys; Authorization is stateless
 - School-administrator fee Excel import with admission-number validation, atomic add/update, receipt idempotency, preview conflict protection, and read-only voice/typed monthly and grade reports. [Fees workflow, APIs and limitations](docs/fees-import-and-voice-reports.md).
+- Broader English fee questions with clarification-first planning, a rules-first Groq Free adapter and optional self-hosted Ollama. Groq requires a protected server key and explicit confirmation that the account remains on Free; missing configuration retains the free parser. No model-generated SQL is executed.
 - Immutable content revisions, recipient snapshots, attendance revisions, separate guardian responses, leave requests, idempotency and transactional outboxes
 - Database-backed development flow for OTP, school scope, publication/editing, timeline, attendance, acknowledgement, file metadata, notifications and audit
 - Configurable Identity-owned authorization provider with signed, expiring, session-bound access tokens
@@ -79,5 +80,7 @@ pnpm audit --prod
 ```
 
 ## Sources and decisions
+
+The [business overview and operating requirements](docs/nexqon-business-document.md) describe the roles, workflows, scope, trial limitations, pilot acceptance checks and decisions needed before a production launch.
 
 Untouched project sources are retained in `reference/`. `scripts/inspect-fig.mjs` decodes the original `fig-kiwi` file. Architecture and database ownership are documented in `docs/architecture.md`; unresolved school/provider decisions remain in `docs/open-decisions.md`.

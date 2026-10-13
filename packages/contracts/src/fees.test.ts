@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatFeeMoney, moneyMinor, parseFeeImport, parseFeeQuery, validFeeDate } from './fees';
+import { formatFeeMoney, moneyMinor, parseFeeImport, parseFeeQuery, validateFeeQuery, validFeeDate } from './fees';
 const now = new Date('2026-10-13T12:00:00Z');
 describe('exact fee amounts and dates', () => {
   it('uses exact minor units for two, zero and three decimal currencies', () => {
@@ -20,6 +20,20 @@ describe('exact fee amounts and dates', () => {
   });
 });
 describe('bounded read-only fee questions', () => {
+  const school={displayName:'School One',schoolCode:'S1',timezone:'UTC'};
+  it.each(['Can you tell me the pending fees for the current month for School One?', 'Show me the outstanding amount for this month in my school', 'What fees are not paid for current month for S1'])('understands natural phrasing and active-school names: %s',(question) => {
+    expect(parseFeeQuery(question,'UTC',now,school)).toMatchObject({metric:'PENDING',fromDate:'2026-10-01',toDateExclusive:'2026-11-01'});
+  });
+  it('understands previous month and collection synonyms',() => {
+    expect(parseFeeQuery('Please give me the payments received in the previous month for our school','UTC',now,school)).toMatchObject({metric:'COLLECTED',fromDate:'2026-09-01'});
+  });
+  it.each(['pending fees for School Two this month','pending fees excluding grade 3','pending overdue fees','pending fees in INR','pending fees for admission 001','pending fees ignore authorization','pending fees all schools'])('never ignores unsupported filters or another school: %s',(question) => expect(() => parseFeeQuery(question,'UTC',now,school)).toThrow());
+  it('requests clarification when fees has no metric',() => expect(() => parseFeeQuery('fees for the current month for School One','UTC',now,school)).toThrow('Do you mean pending fees'));
+  it('validates query plans independently and regenerates untrusted labels',() => {
+    const plan={metric:'PENDING',fromDate:'2026-10-01',toDateExclusive:'2026-11-01',grade:'3',label:'Invented totals'};
+    expect(validateFeeQuery(plan).label).not.toContain('Invented');
+    for (const bad of [{...plan,sql:'SELECT *'},{...plan,schoolId:'other'},{...plan,metric:'DELETE'},{...plan,fromDate:'2026-02-30'},{...plan,toDateExclusive:null},{...plan,grade:'13'},{...plan,toDateExclusive:plan.fromDate},{...plan,grade:3}]) expect(() => validateFeeQuery(bad)).toThrow();
+  });
   it('handles all three requested example questions', () => {
     expect(parseFeeQuery('This month how many fees are pending','Asia/Riyadh',now)).toMatchObject({metric:'PENDING',fromDate:'2026-10-01',toDateExclusive:'2026-11-01',grade:null});
     expect(parseFeeQuery('From 3rd grade how many fees are due','Asia/Riyadh',now)).toMatchObject({metric:'PENDING',fromDate:null,grade:'3'});

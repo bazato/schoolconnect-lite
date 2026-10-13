@@ -6,7 +6,7 @@ import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { startOutboxPublisher } from '@schoolconnect/eventing';
-import { parseFeeQuery, type FeeQuery } from '@schoolconnect/contracts';
+import { validateFeeQuery, type FeeQuery } from '@schoolconnect/contracts';
 import { FeesRepository, type ImportContext } from './repository';
 
 @Controller('internal/v1')
@@ -20,11 +20,12 @@ class FeesController {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.batchId) || !Number.isInteger(body.revision) || body.revision < 0) throw new BadRequestException({ code: 'FEE_BATCH_AND_REVISION_REQUIRED' });
     return this.repository.commit(body);
   }
-  @Post('fees/report') report(@Body() body: { schoolId: string; question: string; timezone: string; studentIds: string[] | null }, @Headers('x-schoolconnect-school-id') schoolId?: string) {
+  @Post('fees/report') report(@Body() body: { schoolId: string; query: unknown; studentIds: string[] | null }, @Headers('x-schoolconnect-school-id') schoolId?: string) {
     this.scope(body,schoolId);
     let query: FeeQuery;
-    try { query = parseFeeQuery(body.question,body.timezone); } catch (error) { throw new BadRequestException(error instanceof Error ? error.message : 'Invalid fee question.'); }
+    try { query = validateFeeQuery(body.query); } catch (error) { throw new BadRequestException(error instanceof Error ? error.message : 'Invalid fee filters.'); }
     if (query.grade && !Array.isArray(body.studentIds) || !query.grade && body.studentIds !== null) throw new BadRequestException({ code: 'FEE_GRADE_SCOPE_REQUIRED' });
+    if (body.studentIds && (body.studentIds.length > 20000 || body.studentIds.some((id) => typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id)))) throw new BadRequestException({ code:'INVALID_FEE_STUDENT_SCOPE' });
     return this.repository.report(body.schoolId,query,body.studentIds);
   }
 }
