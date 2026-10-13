@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { testSignIn } from './test-sign-in.mjs';
 const base=process.env.TEST_API_URL ?? 'http://127.0.0.1:3010/api/v1';
 const call=async(path,token,body,expected=body ? 201 : 200) => {
   const response=await fetch(`${base}${path}`,{method:body ? 'POST':'GET',headers:{'content-type':'application/json',...(token ? {authorization:`Bearer ${token}`} : {})},...(body ? {body:JSON.stringify(body)} : {})});
   const result=await response.json();assert.equal(response.status,expected,`${path}: ${JSON.stringify(result)}`);return result;
 };
 const login=async(phoneE164,invitationCode) => {
-  let challenge;try {challenge=await call('/auth/otp/request',null,{phoneE164,invitationCode});} catch(error) {if(!String(error).includes('INVITATION_OR_PHONE_INVALID')) throw error;challenge=await call('/auth/otp/request',null,{phoneE164});}
-  return call('/auth/otp/verify',null,{challengeId:challenge.challengeId,code:'123456',deviceId:`fees-${randomUUID()}`});
+  return testSignIn(base,phoneE164,invitationCode,`fees-${randomUUID()}`);
 };
 const suffix=String(Date.now()).slice(-8);
 const owner=await login('+919876543200','OWNER-INVITE');

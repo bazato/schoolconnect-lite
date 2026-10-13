@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { apiBaseUrl, apiRequest, readSession, requestOtp, saveSession, verifyOtp, type AppContext, type Membership, type Role, type Session } from './api';
+import { apiBaseUrl, apiRequest, readSession, requestOtp, saveSession, verifyOtp, setupPasscode, loginPasscode, type AppContext, type Membership, type Role, type Session } from './api';
 import { ClassEditor, StudentEditor, TeacherEditor } from './AdminEditors';
 import { portalMemberships } from './portal-roles';
 import { downloadResultsTemplate, parseResultsWorkbook, type ResultRow } from './results-workbook';
@@ -60,19 +60,27 @@ export function App() {
   return <Portal key={context.principal.membershipId} context={context} session={session} onSession={updateSession} request={request} onSignOut={signOut} />;
 }
 
-function SignIn({ onSignedIn }: { onSignedIn: (session: Session) => void }) {
+export function SignIn({ onSignedIn }: { onSignedIn: (session: Session) => void }) {
   const [phone, setPhone] = useState('');
   const [invitation, setInvitation] = useState('');
   const [challengeId, setChallengeId] = useState('');
   const [otp, setOtp] = useState('');
   const [developmentCode, setDevelopmentCode] = useState('');
+  const [mode, setMode] = useState<'login' | 'activate' | 'reset'>('login');
+  const [passcode, setPasscode] = useState('');
+  const [confirmation, setConfirmation] = useState('');
+  const [setupToken, setSetupToken] = useState('');
+  const changeMode = (value: 'login' | 'activate' | 'reset') => {
+    setMode(value); setChallengeId(''); setSetupToken(''); setOtp(''); setDevelopmentCode(''); setPasscode(''); setConfirmation(''); setInvitation(''); setError('');
+  };
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
   const sendCode = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError('');
     try {
-      const result = await requestOtp(phone, invitation);
+      if (mode === 'login') { onSignedIn(await loginPasscode(phone, passcode)); return; }
+      const result = await requestOtp(phone, invitation, mode === 'reset' ? 'RESET' : 'ACTIVATE');
       setChallengeId(result.challengeId); setDevelopmentCode(result.developmentCode ?? '');
       if (result.developmentCode) setOtp(result.developmentCode);
     } catch (failure) { setError(displayError(failure)); }
@@ -80,7 +88,13 @@ function SignIn({ onSignedIn }: { onSignedIn: (session: Session) => void }) {
   };
   const submitOtp = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError('');
-    try { onSignedIn(await verifyOtp(challengeId, otp.trim())); }
+    try {
+      if (!setupToken) { const verified = await verifyOtp(challengeId, otp.trim()); setSetupToken(verified.setupToken); setOtp(''); }
+      else {
+        if (passcode !== confirmation) throw new Error('PASSCODES_DO_NOT_MATCH');
+        onSignedIn(await setupPasscode(setupToken, passcode));
+      }
+    }
     catch (failure) { setError(displayError(failure)); }
     finally { setBusy(false); }
   };
@@ -95,17 +109,23 @@ function SignIn({ onSignedIn }: { onSignedIn: (session: Session) => void }) {
       <div className="login-form-wrap">
         <div className="mobile-brand brand-lockup"><BrandMark /><span>Nexqon<span className="brand-lite"> School App</span></span></div>
         <span className="eyebrow">WELCOME BACK</span>
-        <h2>{challengeId ? 'Verify your number' : 'Sign in to your workspace'}</h2>
-        <p className="muted">{challengeId ? `Enter the one-time code sent to ${phone}.` : 'Use the mobile number registered by your platform owner or school administrator.'}</p>
+        <h2>{setupToken ? 'Set your 4-digit passcode' : challengeId ? 'Verify your number' : mode === 'login' ? 'Sign in to your workspace' : mode === 'reset' ? 'Reset your passcode' : 'Activate your account'}</h2>
+        <p className="muted">{setupToken ? 'Use this same passcode for future web and mobile logins.' : challengeId ? `Enter the one-time code for ${phone}.` : mode === 'login' ? 'Use your registered mobile number and 4-digit passcode.' : mode === 'reset' ? 'Verify your mobile number to choose a new passcode. Existing sessions will be signed out.' : 'Invitation and OTP are needed only for first-time activation. Already activated? Leave the invitation empty to set up your passcode.'}</p>
         {!challengeId ? <form onSubmit={(event) => { void sendCode(event); }} className="stack-form">
           <label>Mobile number<input autoComplete="tel" inputMode="tel" placeholder="+966 5X XXX XXXX" value={phone} onChange={(event) => setPhone(event.target.value)} required /></label>
-          <label>Invitation code <span className="optional">(first sign-in only)</span><input autoComplete="one-time-code" placeholder="Provided by your school" value={invitation} onChange={(event) => setInvitation(event.target.value.trim())} /></label>
-          <button className="button primary full" disabled={busy}>{busy ? 'Sending code…' : 'Send sign-in code'} <span>→</span></button>
+          {mode === 'activate' && <label>Invitation code <span className="optional">(first sign-in only)</span><input autoComplete="off" placeholder="Provided by your school" value={invitation} onChange={(event) => setInvitation(event.target.value.trim())} /></label>}
+          {mode === 'login' && <label>4-digit passcode<input type="password" autoComplete="current-password" inputMode="numeric" maxLength={4} pattern="[0-9]{4}" value={passcode} onChange={(event) => setPasscode(event.target.value.replace(/\D/g, '').slice(0,4))} required /></label>}
+          <button className="button primary full" disabled={busy || (mode === 'login' && passcode.length !== 4)}>{busy ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Send OTP'} <span>→</span></button>
+          <button type="button" className="text-button" disabled={busy} onClick={() => changeMode(mode === 'login' ? 'activate' : 'login')}>{mode === 'login' ? 'First login / set up passcode' : 'Back to passcode sign-in'}</button>
+          {mode === 'login' && <button type="button" className="text-button" disabled={busy} onClick={() => changeMode('reset')}>Forgot passcode?</button>}
         </form> : <form onSubmit={(event) => { void submitOtp(event); }} className="stack-form">
-          {developmentCode && <div className="demo-code"><span>Demo sign-in code</span><strong>{developmentCode}</strong><span>Displayed because this environment uses mocked OTP.</span></div>}
-          <label>One-time code<input autoComplete="one-time-code" inputMode="numeric" maxLength={6} placeholder="6-digit code" value={otp} onChange={(event) => setOtp(event.target.value)} required /></label>
-          <button className="button primary full" disabled={busy}>{busy ? 'Verifying…' : 'Continue'} <span>→</span></button>
-          <button type="button" className="text-button" onClick={() => { setChallengeId(''); setOtp(''); setDevelopmentCode(''); }}>Use a different number</button>
+          {!setupToken && developmentCode && <div className="demo-code"><span>Demo verification code</span><strong>{developmentCode}</strong><span>Displayed because this environment uses mocked OTP, not SMS.</span></div>}
+          {!setupToken ? <label>One-time code<input autoComplete="one-time-code" inputMode="numeric" maxLength={6} pattern="[0-9]{6}" placeholder="6-digit code" value={otp} onChange={(event) => setOtp(event.target.value.replace(/\D/g, '').slice(0,6))} required /></label> : <>
+            <label>New 4-digit passcode<input type="password" autoComplete="new-password" inputMode="numeric" maxLength={4} pattern="[0-9]{4}" value={passcode} onChange={(event) => setPasscode(event.target.value.replace(/\D/g, '').slice(0,4))} required /></label>
+            <label>Confirm passcode<input type="password" autoComplete="new-password" inputMode="numeric" maxLength={4} pattern="[0-9]{4}" value={confirmation} onChange={(event) => setConfirmation(event.target.value.replace(/\D/g, '').slice(0,4))} required /></label>
+          </>}
+          <button className="button primary full" disabled={busy || (setupToken ? passcode.length !== 4 || confirmation.length !== 4 : otp.length !== 6)}>{busy ? 'Please wait…' : setupToken ? 'Save passcode and sign in' : 'Verify OTP'} <span>→</span></button>
+          <button type="button" className="text-button" disabled={busy} onClick={() => changeMode('login')}>Back to sign-in</button>
         </form>}
         {error && <div className="alert danger">{error}</div>}
         <div className="login-note"><span>⌑</span><p>School and role permissions are checked by the Nexqon School App services each time you use the portal.</p></div>

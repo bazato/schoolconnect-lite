@@ -36,6 +36,8 @@ The prepared Oracle Always Free trial layout and its account/security prerequisi
 
 Development Platform Owner login: `+919876543200` with invitation `OWNER-INVITE`. Development OTP is `123456`.
 
+Authentication now uses first-time OTP verification followed by a user-chosen four-digit account passcode on both web and mobile. Future logins require only the mobile number and passcode; OTP is also used for recovery. Existing activated OTP-only accounts choose "First login / set up passcode" once and leave the invitation blank. See [the passcode authentication addendum](docs/passcode-authentication.md), including coordinated deployment and older-APK compatibility requirements. Mock OTP is for synthetic trial data only.
+
 Identity owns token issuance and session validity. `AUTHORIZATION_PROVIDER` selects the token adapter; the current `local-jwt` adapter reads its signing secret, issuer, audience and access-token lifetime from environment configuration. The gateway asks the separate Authorization service for route and resource decisions; School provides live teacher/guardian relationship facts. Route and resource-role policies are configured through `AUTHORIZATION_ROUTE_RULES_JSON` and `AUTHORIZATION_RESOURCE_ROLES_JSON`. Some gateway controller role checks remain as defense in depth, so expanding role access still requires code review. Production startup fails if `AUTH_JWT_SECRET` is missing or shorter than 32 bytes. Development without a configured secret uses an ephemeral process secret, so restarting Identity invalidates existing local access tokens.
 
 ## Run locally
@@ -82,5 +84,7 @@ pnpm audit --prod
 ## Sources and decisions
 
 The [business overview and operating requirements](docs/nexqon-business-document.md) describe the roles, workflows, scope, trial limitations, pilot acceptance checks and decisions needed before a production launch.
+
+The [detailed technical reference](docs/nexqon-technical-document.md) covers service ownership, public APIs, authorization, Kafka/outbox delivery, nine sequence diagrams and the 53-table database column reference. Verified PDF editions are in `output/pdf/`. Regenerate them with the bundled Python runtime using `scripts/build-project-documents.py` and render/review the output before distributing a new edition.
 
 Untouched project sources are retained in `reference/`. `scripts/inspect-fig.mjs` decodes the original `fig-kiwi` file. Architecture and database ownership are documented in `docs/architecture.md`; unresolved school/provider decisions remain in `docs/open-decisions.md`.

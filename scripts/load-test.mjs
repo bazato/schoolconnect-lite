@@ -1,16 +1,10 @@
 import assert from 'node:assert/strict';
+import { testSignIn } from './test-sign-in.mjs';
 
 const base = process.env.TEST_API_URL ?? 'http://127.0.0.1:3000/api/v1';
 const users = Number(process.env.LOAD_USERS ?? 100);
 const requestsPerUser = Number(process.env.LOAD_REQUESTS_PER_USER ?? 5);
-const post = async (path, body) => {
-  const response = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  const payload = await response.json();
-  assert.ok(response.ok, `${path}: ${response.status} ${JSON.stringify(payload)}`);
-  return payload;
-};
-const challenge = await post('/auth/otp/request', { phoneE164: '+919876543210' });
-const session = await post('/auth/otp/verify', { challengeId: challenge.challengeId, code: challenge.developmentCode ?? '123456', deviceId: 'load-test-device' });
+const session = await testSignIn(base,'+919876543210','PARENT-INVITE','load-test-device');
 const authorized = async (path) => {
   const started = performance.now();
   const response = await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${session.accessToken}` } });

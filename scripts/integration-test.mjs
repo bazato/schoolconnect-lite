@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { testSignIn } from './test-sign-in.mjs';
 
 const base = process.env.TEST_API_URL ?? 'http://127.0.0.1:3000/api/v1';
 const call = async (path, { token, expected = 200, ...init } = {}) => {
@@ -10,26 +11,24 @@ const call = async (path, { token, expected = 200, ...init } = {}) => {
 };
 
 async function challenge(phoneE164, invitationCode) {
-  let response = await call('/auth/otp/request', { method: 'POST', body: JSON.stringify({ phoneE164, invitationCode }), expected: [200, 201, 400] });
-  if (response.status === 400) response = await call('/auth/otp/request', { method: 'POST', body: JSON.stringify({ phoneE164 }), expected: [200, 201] });
+  const response = await call('/auth/otp/request', { method: 'POST', body: JSON.stringify({ phoneE164, invitationCode, purpose:'RESET' }), expected: [200, 201] });
   return response.body;
 }
 
 async function login(phoneE164, invitationCode, deviceId = `integration-${randomUUID()}`) {
-  const requested = await challenge(phoneE164, invitationCode);
-  const verified = await call('/auth/otp/verify', { method: 'POST', body: JSON.stringify({ challengeId: requested.challengeId, code: requested.developmentCode ?? '123456', deviceId }), expected: [200, 201] });
-  return { ...verified.body, deviceId };
+  return testSignIn(base,phoneE164,invitationCode,deviceId);
 }
 
 console.log('1/8 atomic OTP consumption');
-const ownerChallenge = await challenge('+919876543200', 'OWNER-INVITE');
+await login('+919876543200', 'OWNER-INVITE');
+const ownerChallenge = await challenge('+919876543200');
 const ownerDevice = `integration-owner-${randomUUID()}`;
 const duplicateVerify = await Promise.all([0, 1].map(async () => {
   const response = await fetch(`${base}/auth/otp/verify`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ challengeId: ownerChallenge.challengeId, code: ownerChallenge.developmentCode ?? '123456', deviceId: ownerDevice }) });
   return { status: response.status, body: await response.json() };
 }));
 assert.deepEqual(duplicateVerify.map((item) => item.status).sort(), [201, 400]);
-let owner = duplicateVerify.find((item) => item.status === 201).body;
+let owner = (await call('/auth/passcode/setup',{method:'POST',body:JSON.stringify({setupToken:duplicateVerify.find((item) => item.status === 201).body.setupToken,passcode:process.env.TEST_LOGIN_PASSCODE ?? '8642',deviceId:ownerDevice}),expected:[200,201]})).body;
 
 console.log('2/8 rotating refresh and reuse detection');
 const firstRefresh = await call('/auth/refresh', { method: 'POST', body: JSON.stringify({ refreshToken: owner.refreshToken, deviceId: ownerDevice }), expected: [200, 201] });

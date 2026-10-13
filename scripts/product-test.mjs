@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { testSignIn } from './test-sign-in.mjs';
 
 const base = process.env.TEST_API_URL ?? 'http://127.0.0.1:3000/api/v1';
 const call = async (path, { token, expected = 200, ...init } = {}) => {
@@ -19,10 +20,7 @@ const eventually = async (check, timeoutMs = 10_000) => {
   throw new Error('EVENT_PROJECTION_TIMEOUT');
 };
 const login = async (phoneE164, invitationCode) => {
-  let challenge;
-  try { challenge = await send('/auth/otp/request', undefined, { phoneE164, invitationCode }); }
-  catch (error) { if (!invitationCode || !(error instanceof Error) || !error.message.includes('INVITATION_OR_PHONE_INVALID')) throw error; challenge = await send('/auth/otp/request', undefined, { phoneE164 }); }
-  return send('/auth/otp/verify', undefined, { challengeId: challenge.challengeId, code: challenge.developmentCode ?? '123456', deviceId: `product-${randomUUID()}` });
+  return testSignIn(base,phoneE164,invitationCode,`product-${randomUUID()}`);
 };
 
 const suffix = String(Date.now()).slice(-8);

@@ -174,18 +174,27 @@ async function request<T>(path: string, init?: RequestInit, session?: MobileSess
   return payload;
 }
 
-export async function requestOtp(phoneE164: string, invitationCode: string) {
+export async function requestOtp(phoneE164: string, invitationCode: string, purpose: 'ACTIVATE' | 'RESET' = 'ACTIVATE') {
   const normalizedPhone = phoneE164.replace(/\s/g, '');
   const send = (code: string) => request<{ challengeId: string; expiresInSeconds: number; resendAfterSeconds: number; developmentCode?: string }>('/auth/otp/request', {
-    method: 'POST', body: JSON.stringify({ phoneE164: normalizedPhone, invitationCode: code }),
+    method: 'POST', body: JSON.stringify({ phoneE164: normalizedPhone, invitationCode: purpose === 'RESET' ? undefined : code, purpose }),
   });
   return withReturningMemberFallback(invitationCode, send);
 }
 
 export function verifyOtp(challengeId: string, code: string) {
-  return request<MobileSession>('/auth/otp/verify', {
+  return request<{ setupToken: string; expiresInSeconds: number; nextStep: 'SET_PASSCODE' }>('/auth/otp/verify', {
     method: 'POST', body: JSON.stringify({ challengeId, code, deviceId: DEVICE_ID }),
-  }).then((session) => ({ ...session, activeMembershipId: session.memberships[0]?.id }));
+  });
+}
+
+export function setupPasscode(setupToken: string, passcode: string) {
+  return request<MobileSession>('/auth/passcode/setup', { method: 'POST', body: JSON.stringify({ setupToken, passcode, deviceId: DEVICE_ID }) })
+    .then((session) => ({ ...session, activeMembershipId: session.memberships[0]?.id }));
+}
+export function loginPasscode(phoneE164: string, passcode: string) {
+  return request<MobileSession>('/auth/passcode/login', { method: 'POST', body: JSON.stringify({ phoneE164: phoneE164.replace(/\s/g, ''), passcode, deviceId: DEVICE_ID }) })
+    .then((session) => ({ ...session, activeMembershipId: session.memberships[0]?.id }));
 }
 
 export async function saveSession(session: MobileSession) {

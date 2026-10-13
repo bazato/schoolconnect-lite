@@ -122,6 +122,13 @@ describe('API gateway authorization and service boundaries', () => {
     expect(response.body.services).toHaveLength(10);
   });
 
+  it.each(['passcode/login','passcode/setup'])('forwards public credential flow to Identity only: %s', async (path) => {
+    const body={phoneE164:'+919876543210',passcode:'0123',deviceId:'web',setupToken:'restricted-grant'};
+    await request(app.getHttpServer()).post(`/api/v1/auth/${path}`).send(body).expect(201);
+    expect(serviceClient.request).toHaveBeenCalledWith('identity',`/internal/v1/${path}`,{method:'POST',body:JSON.stringify(body)});
+    expect(serviceClient.request.mock.calls.some((call) => call[0]==='authorization' || call[1].includes('/sessions/context'))).toBe(false);
+  });
+
   it('keeps class edits within the administrator school and rejects parents', async () => {
     const classId = '123e4567-e89b-42d3-a456-426614174000';
     await request(app.getHttpServer()).patch(`/api/v1/admin/classes/${classId}`).set('Authorization', 'Bearer admin-token').send({ displayName: 'Renamed class' }).expect(200);

@@ -1,12 +1,12 @@
 # Nexqon School App Business Overview and Operating Requirements
 
-Version 1.0 | 13 October 2026 | For the application owner and participating schools
+Version 1.1 | 13 October 2026 | For the application owner and participating schools
 
 ## 1 Executive overview
 
 Nexqon School App gives schools a shared channel for homework, results, announcements and attendance, while giving parents a child-specific view of those updates. One role-aware mobile application serves teachers and parents. A separate web administration portal lets the platform owner onboard schools and lets school administrators manage their own school, users, classes, students, result uploads and fee information.
 
-The current application is suitable for a controlled trial using synthetic data. Core workflows are implemented and connected to PostgreSQL services, with Kafka distributing business events. It is not yet a production-ready financial or student-data system: phone OTP is mocked, real device push and production attachment scanning are not configured, and operational controls require further validation. The fee assistant can use Groq Free after protected server configuration; deployment of its adapter alone does not activate the external provider.
+The current application is suitable for a controlled trial using synthetic data. Core workflows are implemented and connected to PostgreSQL services, with Kafka distributing business events. It is not yet a production-ready financial or student-data system: phone OTP is mocked, real device push and production attachment scanning are not configured, and operational controls require further validation. The Groq fee interpreter has been configured on the server and its live question-planning path was checked on 13 October 2026. That check returned an empty report, so it does not establish financial accuracy against a populated school ledger.
 
 This document explains the product, operating workflows, access boundaries, business rules, trial acceptance criteria and remaining decisions. It does not approve prices, promise service levels or replace a school's privacy and accounting policies.
 
@@ -109,7 +109,7 @@ The model does not write SQL or calculate financial totals. The gateway validate
 
 Groq requires a protected API key and explicit confirmation that the account is on Free. The default model is `openai/gpt-oss-20b`, hosted by Groq rather than called through the OpenAI API. Conservative trial limits are three AI requests per minute, 100 per UTC day and one simultaneous AI request per gateway process. These application counters reset on process restart and are not a billing guarantee. Do not upgrade the provider account to a paid plan for this trial. Missing configuration retains the free parser.
 
-This is grounded natural-language reporting, not a general RAG search engine, unlimited analytics or a promise to understand every possible question. Student-level filters, sections, multiple-grade comparisons, currencies, historical balances, refunds and forecasts are not currently supported. Provider integration tests use simulated responses; a live Groq acceptance check is required after protected configuration.
+This is grounded natural-language reporting, not a general RAG search engine, unlimited analytics or a promise to understand every possible question. Student-level filters, sections, multiple-grade comparisons, currencies, historical balances, refunds and forecasts are not currently supported. Automated provider tests use simulated responses. A separate live check on 13 October 2026 accepted an unfamiliar outstanding-balance question, requested clarification for an ambiguous question and rejected another-school wording. No financial records were changed. The accepted query returned no matching records; schools still need populated-ledger acceptance tests, speech testing and quota monitoring.
 
 ## 8 System ownership and information flow
 
@@ -145,7 +145,7 @@ The product does not currently process online payments, bank reconciliation, ref
 | Core school workflows | Implemented with service-backed access and automated regression coverage | Supervised school acceptance tests with approved policies and datasets |
 | OTP authentication | Development code and invitation/session structure implemented | Real SMS delivery, abuse controls and verified account migration |
 | Fee imports and reports | Implemented with exact amounts, atomic updates and concurrency checks | Confirm definitions, real template samples and operational finance review |
-| Groq interpretation | Adapter, validation and simulated provider tests implemented | Protected Free-plan configuration and live accuracy, latency and quota checks |
+| Groq interpretation | Protected configuration and live planning checks completed; simulated provider tests also exist | Populated-ledger accuracy, browser speech, latency and quota checks; confirm provider account remains Free |
 | Event delivery | Transactional outboxes, Kafka and independent consumers implemented | Deployment-specific lag, failure, replay and alerting checks |
 | Attachments | Private storage abstraction and preview states implemented | Verified production bucket, scanning, expiry and lifecycle configuration |
 | Device notifications | In-app inbox and deep-link workflows implemented | Real FCM and APNs setup and delivery testing |
@@ -172,7 +172,7 @@ The application owner and schools should confirm result privacy and approval rul
 
 A school subscription or a time-limited pilot could be considered as a commercial model, but pricing, contracts, invoicing, subscriptions and billing enforcement are not implemented. Any proposed commercial launch should include hosting, messaging, storage, support and compliance costs rather than treating a free infrastructure trial as a sustainable cost model.
 
-The immediate deployment can make broader fee parsing and the Groq-ready adapter available. Production launch should follow verified authentication, private file handling, event monitoring, backups and school acceptance tests. Until then, participating users should treat the installation as a trial and use synthetic fee and student data.
+The current trial includes broader fee parsing and the configured Groq adapter. Production launch should follow verified authentication, private file handling, event monitoring, backups and school acceptance tests. Until then, participating users should treat the installation as a trial and use synthetic fee and student data.
 
 ## 13 Reference information
 

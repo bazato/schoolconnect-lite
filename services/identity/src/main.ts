@@ -6,11 +6,12 @@ import 'reflect-metadata';
 import { BadRequestException, Body, ConflictException, Controller, Get, Headers, HttpException, HttpStatus, Inject, Injectable, Module, NotFoundException, OnModuleDestroy, Param, Patch, Post, Query, UnauthorizedException } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { Pool } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 import { domainEventTypes } from '@schoolconnect/contracts';
 import { AccessTokenValidationError, AuthorizationProvider, createAuthorizationProvider } from './authorization';
 import { parentInvitationStatus } from './provisioning';
 import { startOutboxPublisher } from '@schoolconnect/eventing';
+import { hashPasscode, matchesPasscode, validPasscode } from './passcode';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 type MembershipRole = 'PLATFORM_OWNER' | 'SCHOOL_ADMIN' | 'TEACHER' | 'PARENT';
@@ -27,7 +28,7 @@ const otpCode = () => {
 };
 
 @Injectable()
-class IdentityRepository implements OnModuleDestroy {
+export class IdentityRepository implements OnModuleDestroy {
   private readonly pool = new Pool({
     connectionString: process.env.IDENTITY_DATABASE_URL ?? 'postgresql://schoolconnect:schoolconnect@localhost:5432/schoolconnect_identity',
     max: positiveInteger('IDENTITY_DB_POOL_MAX', 10, 100),
@@ -60,11 +61,17 @@ class IdentityRepository implements OnModuleDestroy {
     }
   }
 
-  async requestOtp(phoneE164: string, invitationCode?: string) {
+  async requestOtp(phoneE164: string, invitationCode?: string, purpose: 'ACTIVATE' | 'RESET' = 'ACTIVATE') {
+    if (typeof phoneE164 !== 'string' || (invitationCode !== undefined && typeof invitationCode !== 'string')) throw new BadRequestException({ code: 'PHONE_INVALID' });
+    if (!['ACTIVATE', 'RESET'].includes(purpose)) throw new BadRequestException({ code: 'OTP_PURPOSE_INVALID' });
+    if (purpose === 'RESET') invitationCode = undefined;
     const normalizedPhone = phoneE164.replace(/\s/g, '');
     if (!/^\+[1-9]\d{7,14}$/.test(normalizedPhone)) throw new BadRequestException({ code: 'PHONE_INVALID' });
     await this.enforceRateLimit('OTP_REQUEST_PHONE', normalizedPhone, positiveInteger('OTP_REQUEST_LIMIT', 5, 100), positiveInteger('OTP_REQUEST_WINDOW_SECONDS', 900, 86_400));
     const phoneHash = hash(normalizedPhone);
+    const credential = await this.pool.query<{ passcode_hash: string | null }>('SELECT passcode_hash FROM users WHERE phone_e164=$1 AND status=\'ACTIVE\'', [normalizedPhone]);
+    if (purpose === 'ACTIVATE' && credential.rows[0]?.passcode_hash) throw new BadRequestException({ code: 'PASSCODE_ALREADY_SET_USE_SIGN_IN' });
+    if (purpose === 'RESET' && !credential.rows[0]?.passcode_hash) throw new BadRequestException({ code: 'ACCOUNT_NOT_ACTIVATED' });
     const account = invitationCode?.trim()
       ? await this.pool.query<{ membership_id: string; invitation_id: string | null }>(
         `SELECT m.id AS membership_id, i.id AS invitation_id
@@ -83,14 +90,15 @@ class IdentityRepository implements OnModuleDestroy {
     if (!account.rowCount) throw new BadRequestException({ code: invitationCode ? 'INVITATION_OR_PHONE_INVALID' : 'ACCOUNT_NOT_ACTIVATED' });
     const code = otpCode();
     const result = await this.pool.query<{ id: string }>(
-      `INSERT INTO otp_challenges (membership_id, invitation_id, phone_hash, code_hash, expires_at, max_attempts)
-       VALUES ($1,$2,$3,$4,now()+($5 * interval '1 second'),$6) RETURNING id`,
-      [account.rows[0]!.membership_id, account.rows[0]!.invitation_id, phoneHash, hash(code), positiveInteger('OTP_TTL_SECONDS', 300, 900), positiveInteger('OTP_MAX_ATTEMPTS', 5, 10)]);
+      `INSERT INTO otp_challenges (membership_id, invitation_id, phone_hash, code_hash, expires_at, max_attempts, purpose)
+       VALUES ($1,$2,$3,$4,now()+($5 * interval '1 second'),$6,$7) RETURNING id`,
+      [account.rows[0]!.membership_id, account.rows[0]!.invitation_id, phoneHash, hash(code), positiveInteger('OTP_TTL_SECONDS', 300, 900), positiveInteger('OTP_MAX_ATTEMPTS', 5, 10), purpose]);
     return { challengeId: result.rows[0]!.id, developmentCode: code };
   }
 
   async verifyOtp(challengeId: string, code: string, deviceId: string) {
-    if (!deviceId || deviceId.length > 200) throw new BadRequestException({ code: 'DEVICE_ID_INVALID' });
+    if (typeof challengeId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(challengeId) || typeof code !== 'string' || !/^\d{6}$/.test(code)) throw new BadRequestException({ code: 'OTP_INVALID_OR_EXPIRED' });
+    if (typeof deviceId !== 'string' || !deviceId || deviceId.length > 200) throw new BadRequestException({ code: 'DEVICE_ID_INVALID' });
     await this.enforceRateLimit('OTP_VERIFY_CHALLENGE', challengeId, positiveInteger('OTP_MAX_ATTEMPTS', 5, 10), positiveInteger('OTP_TTL_SECONDS', 300, 900));
     const client = await this.pool.connect();
     try {
@@ -106,17 +114,86 @@ class IdentityRepository implements OnModuleDestroy {
         throw new BadRequestException({ code: 'OTP_INVALID_OR_EXPIRED' });
       }
       await client.query('UPDATE otp_challenges SET consumed_at=now() WHERE id=$1 AND consumed_at IS NULL', [challengeId]);
+      const setupToken = randomBytes(32).toString('base64url');
+      await client.query('UPDATE otp_challenges SET setup_token_hash=$2, setup_expires_at=now()+interval \'5 minutes\' WHERE id=$1', [challengeId, hash(setupToken)]);
+      await client.query('COMMIT');
+      return { setupToken, expiresInSeconds: 300, nextStep: 'SET_PASSCODE' as const };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }
+
+  async setupPasscode(setupToken: string, passcode: string, deviceId: string) {
+    if (!validPasscode(passcode)) throw new BadRequestException({ code: 'PASSCODE_MUST_BE_FOUR_DIGITS' });
+    if (typeof setupToken !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(setupToken) || typeof deviceId !== 'string' || !deviceId || deviceId.length > 200) throw new BadRequestException({ code: 'PASSCODE_SETUP_INVALID' });
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const grant = await client.query<{ id: string; phone_hash: string; membership_id: string; invitation_id: string | null; purpose: string; created_at: Date }>(
+        `SELECT id,phone_hash,membership_id,invitation_id,purpose,created_at FROM otp_challenges
+         WHERE setup_token_hash=$1 AND setup_expires_at>now() AND consumed_at IS NOT NULL FOR UPDATE`, [hash(setupToken)]);
+      const item = grant.rows[0];
+      if (!item) throw new BadRequestException({ code: 'PASSCODE_SETUP_INVALID_OR_EXPIRED' });
+      const user = await client.query<{ id: string; passcode_hash: string | null; grant_current: boolean }>(`SELECT id,passcode_hash,(passcode_set_at IS NULL OR passcode_set_at < (SELECT created_at FROM otp_challenges WHERE id=$2)) AS grant_current FROM users WHERE encode(digest(phone_e164,'sha256'),'hex')=$1 AND status='ACTIVE' FOR UPDATE`, [item.phone_hash,item.id]);
+      if (!user.rows[0] || (user.rows[0].passcode_hash && item.purpose !== 'RESET')) throw new BadRequestException({ code: 'PASSCODE_ALREADY_SET_USE_SIGN_IN' });
+      if (item.purpose === 'RESET' && (!user.rows[0].passcode_hash || !user.rows[0].grant_current)) throw new BadRequestException({ code: 'PASSCODE_SETUP_INVALID_OR_EXPIRED' });
       const account = await client.query<{ user_id: string; display_name: string; membership_id: string; school_id: string | null; role: MembershipRole }>(
         `SELECT u.id AS user_id, COALESCE(m.display_name_override,u.display_name) AS display_name, m.id AS membership_id, m.school_id, m.role
          FROM users u JOIN memberships m ON m.user_id=u.id
          WHERE encode(digest(u.phone_e164,'sha256'),'hex')=$1 AND u.status='ACTIVE' AND m.status='ACTIVE'
          ORDER BY (m.id=$2) DESC, m.role`, [item.phone_hash, item.membership_id]);
       if (!account.rowCount) throw new NotFoundException({ code: 'INVITED_ACCOUNT_NOT_FOUND' });
+      if (!account.rows.some((row) => row.membership_id === item.membership_id)) throw new BadRequestException({ code: 'INVITED_ACCOUNT_NOT_FOUND' });
       const primary = account.rows[0]!;
       if (item.invitation_id) {
-        const accepted = await client.query(`UPDATE invitations SET accepted_by_user_id=$1, accepted_at=now() WHERE id=$2 AND accepted_at IS NULL AND revoked_at IS NULL`, [primary.user_id, item.invitation_id]);
+        const accepted = await client.query(`UPDATE invitations SET accepted_by_user_id=$1, accepted_at=now() WHERE id=$2 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>now()`, [primary.user_id, item.invitation_id]);
         if (!accepted.rowCount) throw new BadRequestException({ code: 'INVITATION_ALREADY_USED_OR_REVOKED' });
       }
+      const stored = await hashPasscode(passcode);
+      await client.query('UPDATE users SET passcode_hash=$2,passcode_set_at=clock_timestamp(),passcode_failed_attempts=0,passcode_locked_until=NULL,updated_at=now() WHERE id=$1', [primary.user_id, stored]);
+      await client.query('UPDATE otp_challenges SET setup_token_hash=NULL,setup_expires_at=NULL WHERE id=$1', [item.id]);
+      // Earlier grants are invalidated by passcode_set_at above, without cross-grant locks.
+      await client.query('UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE user_id=$1', [primary.user_id]);
+      const session = await this.createSession(client, account.rows, deviceId);
+      await client.query('COMMIT');
+      return session;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }
+
+  async loginPasscode(phoneE164: string, passcode: string, deviceId: string) {
+    const phone = typeof phoneE164 === 'string' ? phoneE164.replace(/\s/g, '') : '';
+    if (!/^\+[1-9]\d{7,14}$/.test(phone) || !validPasscode(passcode) || typeof deviceId !== 'string' || !deviceId || deviceId.length>200) throw new BadRequestException({ code: 'LOGIN_FIELDS_INVALID' });
+    await this.enforceRateLimit('PASSCODE_LOGIN_PHONE', phone, positiveInteger('PASSCODE_LOGIN_LIMIT', 30, 100), 900);
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query<{ id: string; passcode_hash: string | null; passcode_failed_attempts: number; passcode_locked_until: Date | null }>(`SELECT id,passcode_hash,passcode_failed_attempts,passcode_locked_until FROM users WHERE phone_e164=$1 AND status='ACTIVE' FOR UPDATE`, [phone]);
+      const user = result.rows[0];
+      if (user?.passcode_locked_until && user.passcode_locked_until > new Date()) throw new HttpException({ code: 'PASSCODE_LOCKED_TRY_LATER' }, 429);
+      if (!user?.passcode_hash || !await matchesPasscode(passcode, user.passcode_hash)) {
+        if (user) {
+          const attempts = (user.passcode_locked_until ? 0 : user.passcode_failed_attempts) + 1;
+          await client.query(`UPDATE users SET passcode_failed_attempts=$2::integer,passcode_locked_until=CASE WHEN $2::integer >= $3::integer THEN now()+($4::integer * interval '1 second') ELSE NULL END WHERE id=$1`, [user.id,attempts,positiveInteger('PASSCODE_MAX_ATTEMPTS',5,10),positiveInteger('PASSCODE_LOCK_SECONDS',900,86400)]);
+        }
+        await client.query('COMMIT');
+        throw new UnauthorizedException({ code: 'PHONE_OR_PASSCODE_INVALID' });
+      }
+      const account = await client.query<{ user_id: string; display_name: string; membership_id: string; school_id: string | null; role: MembershipRole }>(`SELECT u.id AS user_id,COALESCE(m.display_name_override,u.display_name) AS display_name,m.id AS membership_id,m.school_id,m.role FROM users u JOIN memberships m ON m.user_id=u.id WHERE u.id=$1 AND m.status='ACTIVE' ORDER BY m.created_at,m.id`, [user.id]);
+      if (!account.rowCount) throw new UnauthorizedException({ code: 'PHONE_OR_PASSCODE_INVALID' });
+      await client.query('UPDATE users SET passcode_failed_attempts=0,passcode_locked_until=NULL WHERE id=$1', [user.id]);
+      const session = await this.createSession(client, account.rows, deviceId);
+      await client.query('COMMIT');
+      return session;
+    } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error; }
+    finally { client.release(); }
+  }
+
+  private async createSession(client: PoolClient, account: Array<{ user_id: string; display_name: string; membership_id: string; school_id: string | null; role: MembershipRole }>, deviceId: string) {
+      const primary = account[0]!;
       const refreshToken = randomBytes(32).toString('base64url');
       const tokenFamilyId = randomUUID();
       const refreshDays = positiveInteger('AUTH_REFRESH_TOKEN_TTL_DAYS', 30, 365);
@@ -129,14 +206,9 @@ class IdentityRepository implements OnModuleDestroy {
         `INSERT INTO auth_refresh_tokens (session_id, token_family_id, token_hash, expires_at)
          VALUES ($1,$2,$3,now()+($4 * interval '1 day'))`, [session.rows[0]!.id, tokenFamilyId, hash(refreshToken), refreshDays]);
       const issued = this.authorization.issueAccessToken({ userId: primary.user_id, membershipId: primary.membership_id, sessionId: session.rows[0]!.id });
-      await client.query('COMMIT');
       return { accessToken: issued.accessToken, refreshToken, expiresInSeconds: issued.expiresInSeconds,
         user: { id: primary.user_id, displayName: primary.display_name },
-        memberships: account.rows.map((row) => ({ id: row.membership_id, schoolId: row.school_id, role: row.role })) };
-    } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined);
-      throw error;
-    } finally { client.release(); }
+        memberships: account.map((row) => ({ id: row.membership_id, schoolId: row.school_id, role: row.role })) };
   }
 
   async context(accessToken: string) {
@@ -466,9 +538,9 @@ class IdentityController {
   @Get('health') async health() { return { status: 'ok', service: 'identity', database: await this.repository.health() }; }
 
   @Post('otp/request')
-  async request(@Body() body: { phoneE164?: string; invitationCode?: string }) {
+  async request(@Body() body: { phoneE164?: string; invitationCode?: string; purpose?: 'ACTIVATE' | 'RESET' }) {
     if (!body.phoneE164) throw new BadRequestException({ code: 'PHONE_REQUIRED' });
-    const result = await this.repository.requestOtp(body.phoneE164, body.invitationCode);
+    const result = await this.repository.requestOtp(body.phoneE164, body.invitationCode, body.purpose);
     return {
       challengeId: result.challengeId,
       expiresInSeconds: positiveInteger('OTP_TTL_SECONDS', 300, 900),
@@ -481,6 +553,18 @@ class IdentityController {
   verify(@Body() body: { challengeId?: string; code?: string; deviceId?: string }) {
     if (!body.challengeId || !body.code) throw new BadRequestException({ code: 'CHALLENGE_AND_CODE_REQUIRED' });
     return this.repository.verifyOtp(body.challengeId, body.code, body.deviceId ?? 'development-device');
+  }
+
+  @Post('passcode/setup')
+  setupPasscode(@Body() body: { setupToken?: string; passcode?: string; deviceId?: string }) {
+    if (!body.setupToken || !body.passcode || !body.deviceId) throw new BadRequestException({ code: 'PASSCODE_SETUP_FIELDS_REQUIRED' });
+    return this.repository.setupPasscode(body.setupToken, body.passcode, body.deviceId);
+  }
+
+  @Post('passcode/login')
+  loginPasscode(@Body() body: { phoneE164?: string; passcode?: string; deviceId?: string }) {
+    if (!body.phoneE164 || !body.passcode || !body.deviceId) throw new BadRequestException({ code: 'LOGIN_FIELDS_REQUIRED' });
+    return this.repository.loginPasscode(body.phoneE164, body.passcode, body.deviceId);
   }
 
   @Post('sessions/context')
@@ -551,4 +635,4 @@ async function bootstrap() {
   await app.listen(Number(process.env.IDENTITY_PORT ?? 3101), process.env.SERVICE_BIND_HOST ?? '127.0.0.1');
   await startOutboxPublisher('identity', app.get(IdentityRepository));
 }
-void bootstrap();
+if (process.env.IDENTITY_SKIP_BOOTSTRAP !== 'true') void bootstrap();

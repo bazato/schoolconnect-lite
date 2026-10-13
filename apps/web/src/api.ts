@@ -72,10 +72,10 @@ export async function apiRequest<T>(path: string, session: Session | null, onSes
   return payload as T;
 }
 
-export async function requestOtp(phoneE164: string, invitationCode: string) {
+export async function requestOtp(phoneE164: string, invitationCode: string, purpose: 'ACTIVATE' | 'RESET' = 'ACTIVATE') {
   const request = async (withInvitation: boolean) => apiRequest<{ challengeId: string; expiresInSeconds: number; resendAfterSeconds: number; developmentCode?: string }>(
     '/auth/otp/request', null, () => undefined, { method: 'POST', body: JSON.stringify({ phoneE164: phoneE164.replace(/\s/g, ''),
-      ...(withInvitation && invitationCode ? { invitationCode } : {}) }) });
+      purpose, ...(withInvitation && invitationCode && purpose === 'ACTIVATE' ? { invitationCode } : {}) }) });
   try { return await request(true); }
   catch (error) {
     if (invitationCode && error instanceof Error && /INVITATION_OR_PHONE_INVALID/.test(error.message)) return request(false);
@@ -83,9 +83,21 @@ export async function requestOtp(phoneE164: string, invitationCode: string) {
   }
 }
 
-export async function verifyOtp(challengeId: string, code: string): Promise<Session> {
-  const verified = await apiRequest<Omit<Session, 'deviceId' | 'activeMembershipId'>>('/auth/otp/verify', null, () => undefined,
+export function verifyOtp(challengeId: string, code: string) {
+  return apiRequest<{ setupToken: string; expiresInSeconds: number; nextStep: 'SET_PASSCODE' }>('/auth/otp/verify', null, () => undefined,
     { method: 'POST', body: JSON.stringify({ challengeId, code, deviceId: DEVICE_ID }) });
+}
+export async function setupPasscode(setupToken: string, passcode: string) {
+  const verified = await apiRequest<Omit<Session, 'deviceId' | 'activeMembershipId'>>('/auth/passcode/setup', null, () => undefined,
+    { method: 'POST', body: JSON.stringify({ setupToken, passcode, deviceId: DEVICE_ID }) });
+  return completeSignIn(verified);
+}
+export async function loginPasscode(phoneE164: string, passcode: string) {
+  const verified = await apiRequest<Omit<Session, 'deviceId' | 'activeMembershipId'>>('/auth/passcode/login', null, () => undefined,
+    { method: 'POST', body: JSON.stringify({ phoneE164: phoneE164.replace(/\s/g, ''), passcode, deviceId: DEVICE_ID }) });
+  return completeSignIn(verified);
+}
+async function completeSignIn(verified: Omit<Session, 'deviceId' | 'activeMembershipId'>): Promise<Session> {
   const session: Session = { ...verified, deviceId: DEVICE_ID, activeMembershipId: verified.memberships[0]?.id ?? '' };
   const adminMembership = portalMemberships(verified.memberships)[0];
   if (!adminMembership) {

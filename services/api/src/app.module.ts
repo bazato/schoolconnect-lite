@@ -33,7 +33,7 @@ class RateLimitGuard implements CanActivate {
     const now = Date.now();
     const windowMs = configuredNumber('API_RATE_LIMIT_WINDOW_SECONDS', 60, 3600) * 1000;
     const path = request.path ?? request.url;
-    const isAuthentication = path.includes('/auth/otp/');
+    const isAuthentication = path.includes('/auth/');
     const limit = isAuthentication
       ? configuredNumber('API_AUTH_RATE_LIMIT', 120, 1000)
       : configuredNumber('API_USER_RATE_LIMIT', 600, 10000);
@@ -216,7 +216,7 @@ class HealthController {
 @Controller('auth')
 class AuthController {
   constructor(@Inject(ServiceClient) private readonly clients: ServiceClient) {}
-  @Public() @Post('otp/request') request(@Body() body: { phoneE164: string; invitationCode?: string }) {
+  @Public() @Post('otp/request') request(@Body() body: { phoneE164: string; invitationCode?: string; purpose?: 'ACTIVATE' | 'RESET' }) {
     return this.clients.request('identity', '/internal/v1/otp/request', { method: 'POST', body: JSON.stringify(body) });
   }
   @Public() @Post('otp/verify') verify(@Body() body: { challengeId: string; code: string; deviceId?: string }) {
@@ -225,6 +225,12 @@ class AuthController {
   @Public() @Post('refresh') refresh(@Body() body: { refreshToken?: string; deviceId?: string }) {
     if (!body.refreshToken || !body.deviceId) throw new BadRequestException({ code: 'REFRESH_TOKEN_AND_DEVICE_REQUIRED' });
     return this.clients.request('identity', '/internal/v1/sessions/refresh', { method: 'POST', body: JSON.stringify(body) });
+  }
+  @Public() @Post('passcode/setup') setupPasscode(@Body() body: { setupToken?: string; passcode?: string; deviceId?: string }) {
+    return this.clients.request('identity', '/internal/v1/passcode/setup', { method: 'POST', body: JSON.stringify(body) });
+  }
+  @Public() @Post('passcode/login') loginPasscode(@Body() body: { phoneE164?: string; passcode?: string; deviceId?: string }) {
+    return this.clients.request('identity', '/internal/v1/passcode/login', { method: 'POST', body: JSON.stringify(body) });
   }
   @Post('switch-role')
   async switchRole(@Body() body: { membershipId?: string }, @CurrentPrincipal() principal: Principal) {

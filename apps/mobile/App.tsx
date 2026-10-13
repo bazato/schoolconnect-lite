@@ -63,6 +63,8 @@ import {
   requestOtp,
   saveSession,
   verifyOtp,
+  setupPasscode,
+  loginPasscode,
   type ApiDraft,
   type ApiSchool,
   type ApiSchoolClass,
@@ -163,6 +165,9 @@ function Field({
   multiline,
   required,
   error,
+  secure,
+  numeric,
+  maxLength,
 }: {
   label: string;
   value: string;
@@ -171,6 +176,9 @@ function Field({
   multiline?: boolean;
   required?: boolean;
   error?: string;
+  secure?: boolean;
+  numeric?: boolean;
+  maxLength?: number;
 }) {
   return (
     <View style={styles.fieldWrap}>
@@ -185,6 +193,9 @@ function Field({
         placeholder={placeholder}
         placeholderTextColor="#A7A3AE"
         multiline={multiline}
+        secureTextEntry={secure}
+        keyboardType={numeric ? 'number-pad' : 'default'}
+        maxLength={maxLength}
         style={[
           styles.input,
           multiline && styles.textarea,
@@ -285,29 +296,46 @@ function LoginScreen({
 }: {
   onSignedIn: (role: Role, session?: MobileSession) => void;
 }) {
-  const [phase, setPhase] = useState<"phone" | "otp">("phone");
-  const [phone, setPhone] = useState("+91 98765 43210");
-  const [invitation, setInvitation] = useState(demoMode ? "PARENT-INVITE" : "");
-  const [otp, setOtp] = useState("123456");
+  const [phase, setPhase] = useState<"phone" | "otp" | "setup">("phone");
+  const [mode, setMode] = useState<'login' | 'activate' | 'reset'>('login');
+  const [phone, setPhone] = useState(demoMode ? "+91 98765 43210" : "");
+  const [invitation, setInvitation] = useState("");
+  const [otp, setOtp] = useState("");
+  const [developmentCode, setDevelopmentCode] = useState("");
+  const [passcode, setPasscode] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [setupToken, setSetupToken] = useState("");
   const [challengeId, setChallengeId] = useState("");
   const [loading, setLoading] = useState(false);
   const [serverError, setServerError] = useState("");
+  const changeMode = (value: 'login' | 'activate' | 'reset') => {
+    setMode(value); setPhase('phone'); setPasscode(''); setConfirmation(''); setOtp(''); setInvitation(''); setDevelopmentCode(''); setChallengeId(''); setSetupToken(''); setServerError('');
+  };
   const submit = async () => {
     setLoading(true);
     setServerError("");
     try {
       if (phase === "phone") {
-        if (demoMode) await new Promise((resolve) => setTimeout(resolve, 450));
+        if (mode === 'login') {
+          if (demoMode) { onSignedIn('PARENT'); return; }
+          const session = await loginPasscode(phone, passcode);
+          await saveSession(session); onSignedIn(session.memberships[0]?.role ?? 'PARENT', session); return;
+        }
+        if (demoMode) { setDevelopmentCode('123456'); setOtp('123456'); }
         else {
-          const challenge = await requestOtp(phone, invitation);
+          const challenge = await requestOtp(phone, invitation, mode === 'reset' ? 'RESET' : 'ACTIVATE');
           setChallengeId(challenge.challengeId);
+          setDevelopmentCode(challenge.developmentCode ?? ''); setOtp(challenge.developmentCode ?? '');
         }
         setPhase("otp");
-      } else if (demoMode) {
-        await new Promise((resolve) => setTimeout(resolve, 450));
-        onSignedIn("PARENT");
+      } else if (phase === 'otp') {
+        if (demoMode) { if (otp !== '123456') throw new Error('OTP_INVALID_OR_EXPIRED'); }
+        else { const verified = await verifyOtp(challengeId, otp); setSetupToken(verified.setupToken); }
+        setOtp(''); setPhase('setup');
       } else {
-        const session = await verifyOtp(challengeId, otp);
+        if (passcode !== confirmation) throw new Error('PASSCODES_DO_NOT_MATCH');
+        if (demoMode) { onSignedIn('PARENT'); return; }
+        const session = await setupPasscode(setupToken, passcode);
         await saveSession(session);
         onSignedIn(session.memberships[0]?.role ?? "PARENT", session);
       }
@@ -324,9 +352,10 @@ function LoginScreen({
   return (
     <SafeAreaView style={styles.safe}>
       <KeyboardAvoidingView
-        style={styles.login}
+        style={{ flex: 1 }}
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
+        <ScrollView contentContainerStyle={styles.login} keyboardShouldPersistTaps="handled">
         <View style={styles.loginHero}>
           <View style={styles.loginLogo}>
             <Image source={nexqonIcon} style={styles.loginLogoImage} accessibilityLabel="Nexqon School App logo" />
@@ -338,14 +367,10 @@ function LoginScreen({
         </View>
         <View style={styles.loginCard}>
           <Text style={styles.sectionTitle}>
-            {phase === "phone"
-              ? "Sign in with mobile"
-              : "Enter your OTP code here"}
+            {phase === 'setup' ? 'Set your 4-digit passcode' : phase === 'otp' ? 'Verify your mobile number' : mode === 'login' ? 'Sign in with passcode' : mode === 'reset' ? 'Reset your passcode' : 'Activate your account'}
           </Text>
           <Text style={styles.helper}>
-            {phase === "phone"
-              ? "Use the guardian's mobile number. Every child linked to that parent account will appear in the child switcher. The invitation is needed only for first-time activation."
-              : `We sent a six-digit code to ${phone}.`}
+            {phase === 'setup' ? 'Use this same passcode for future web and mobile logins.' : phase === 'otp' ? `Enter the six-digit verification code for ${phone}.` : mode === 'login' ? 'Enter your registered mobile number and 4-digit passcode.' : mode === 'reset' ? 'Verify your number to set a new passcode. Existing sessions will be signed out.' : 'The invitation is needed only for first-time activation. Already activated? Leave it empty to set up your passcode.'}
           </Text>
           {phase === "phone" ? (
             <>
@@ -356,38 +381,48 @@ function LoginScreen({
                 placeholder="+91"
                 required
               />
-              <Field
+              {mode === 'activate' && <Field
                 label="Invitation code"
                 value={invitation}
                 onChangeText={setInvitation}
                 placeholder="First sign-in only"
-              />
+              />}
+              {mode === 'login' && <Field label="4-digit passcode" value={passcode} onChangeText={(value) => setPasscode(value.replace(/\D/g,'').slice(0,4))} placeholder="4-digit passcode" secure numeric maxLength={4} required />}
             </>
-          ) : (
+          ) : phase === 'otp' ? (
+            <>
+            {developmentCode ? <Text style={styles.helper}>Mock OTP: {developmentCode} (trial only, not SMS)</Text> : null}
             <Field
               label="Verification code"
               value={otp}
-              onChangeText={setOtp}
+              onChangeText={(value) => setOtp(value.replace(/\D/g,'').slice(0,6))}
               placeholder="6-digit code"
               required
+              numeric maxLength={6}
             />
+            </>
+          ) : (
+            <>
+              <Field label="New 4-digit passcode" value={passcode} onChangeText={(value) => setPasscode(value.replace(/\D/g,'').slice(0,4))} placeholder="4-digit passcode" secure numeric maxLength={4} required />
+              <Field label="Confirm passcode" value={confirmation} onChangeText={(value) => setConfirmation(value.replace(/\D/g,'').slice(0,4))} placeholder="Repeat passcode" secure numeric maxLength={4} required />
+            </>
           )}
           {serverError ? (
             <Text style={styles.errorText}>{serverError}</Text>
           ) : null}
           <PrimaryButton
-            label={phase === "phone" ? "Send OTP" : "Verify and continue"}
+            label={phase === 'setup' ? 'Save passcode and sign in' : phase === 'otp' ? 'Verify OTP' : mode === 'login' ? 'Sign in' : 'Send OTP'}
             onPress={() => {
               void submit();
             }}
             loading={loading}
-            disabled={phase === "phone" ? phone.length < 8 : otp.length !== 6}
+            disabled={phase === 'phone' ? phone.length < 8 || (mode === 'login' && passcode.length !== 4) : phase === 'otp' ? otp.length !== 6 : passcode.length !== 4 || confirmation.length !== 4}
           />
-          {phase === "otp" ? (
-            <Pressable onPress={() => setPhase("phone")}>
-              <Text style={styles.link}>Change mobile number</Text>
-            </Pressable>
-          ) : null}
+          <Pressable disabled={loading} onPress={() => changeMode(mode === 'login' && phase === 'phone' ? 'activate' : 'login')}>
+            <Text style={styles.link}>{mode === 'login' && phase === 'phone' ? 'First login / set up passcode' : 'Back to passcode sign-in'}</Text>
+          </Pressable>
+          {phase === 'phone' && mode === 'login' && <Pressable disabled={loading} onPress={() => changeMode('reset')}><Text style={styles.link}>Forgot passcode?</Text></Pressable>}
+          {demoMode && <Text style={styles.helper}>Offline UI demo: authentication is simulated, not connected to Identity.</Text>}
           <View style={styles.securityNote}>
             <ShieldCheck size={18} color={colors.primary} />
             <Text style={styles.securityText}>
@@ -395,6 +430,7 @@ function LoginScreen({
             </Text>
           </View>
         </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -4065,7 +4101,7 @@ const styles = StyleSheet.create({
   },
   iconPlaceholder: { width: 44 },
   login: {
-    flex: 1,
+    flexGrow: 1,
     padding: 20,
     justifyContent: "center",
     backgroundColor: colors.background,
