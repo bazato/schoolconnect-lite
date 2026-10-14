@@ -31,10 +31,12 @@ services:
     dockerCommand: node scripts/start-render-demo.mjs
     healthCheckPath: /api/v1/health/ready
     envVars:
+      # Neon connection managed in Render's Environment settings.
+      # Preserve the Render database above for rollback.
       - key: DATABASE_URL
-        fromDatabase:
-          name: schoolconnect-demo-postgres
-          property: connectionString
+        sync: false
+      - key: RENDER_ROLLBACK_DATABASE_URL
+        sync: false
       - key: RENDER_DEMO_MODE
         value: 'true'
       - key: NODE_ENV
