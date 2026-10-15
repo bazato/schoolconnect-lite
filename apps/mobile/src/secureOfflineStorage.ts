@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { AESEncryptionKey, AESSealedData, aesDecryptAsync, aesEncryptAsync } from 'expo-crypto';
+import { toByteArray } from 'base64-js';
 import { assertSecureStoreKey, offlineSecretSecureKey } from './secureStoreKeys';
 
 const keyPromises = new Map<string, Promise<AESEncryptionKey>>();
@@ -33,7 +34,9 @@ export const secureOfflineStorage = {
       await this.setItem(userId, key, stored);
       return stored;
     }
-    const sealed = AESSealedData.fromCombined(stored.slice(3));
+    // SDK 57's Android bridge accepts bytes here, even though the JS type also
+    // advertises base64 strings. Retain the existing v1 format and encryption key.
+    const sealed = AESSealedData.fromCombined(toByteArray(stored.slice(3)));
     return new TextDecoder().decode(await aesDecryptAsync(sealed, await userKey(userId)));
   },
   async setItem(userId: string, key: string, value: string) {

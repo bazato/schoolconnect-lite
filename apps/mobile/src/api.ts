@@ -294,6 +294,7 @@ export const mobileApi = {
   notificationInbox: (session: MobileSession) => request<ApiNotification[]>('/notifications', undefined, session),
   markNotificationRead: (session: MobileSession, id: string) => request<{ id: string; readAt: string }>(`/notifications/${id}/read`, { method: 'POST' }, session),
   createFileUpload: (session: MobileSession, payload: { ownerId: string; fileName: string; mediaType: string; byteSize: number; checksumSha256: string }) => request<{ fileId: string; uploadSessionId: string; upload: { url: string; requiredHeaders: Record<string, string> } }>('/files/uploads', { method: 'POST', body: JSON.stringify({ ...payload, ownerType: 'POST' }) }, session),
+  fileCapabilities: (session: MobileSession) => request<{ attachmentsEnabled: boolean; maxByteSize: number; mediaTypes: string[] }>('/files/capabilities', undefined, session),
   completeFileUpload: (session: MobileSession, uploadSessionId: string) => request<{ fileId: string; status: string }>(`/files/uploads/${uploadSessionId}/complete`, { method: 'POST' }, session),
   fileAccess: (session: MobileSession, fileId: string, studentId?: string) => request<{ url: string; expiresInSeconds: number }>(`/files/${fileId}/access`, { method: 'POST', body: JSON.stringify({ studentId }) }, session),
   schools: (session: MobileSession) => request<ApiSchool[]>('/admin/schools', undefined, session),

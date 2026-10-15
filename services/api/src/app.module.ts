@@ -1053,6 +1053,9 @@ class NotificationsController {
 class FilesController {
   constructor(@Inject(ServiceClient) private readonly clients: ServiceClient,
     @Inject('RESOURCE_AUTHORIZATION') private readonly authorization: ResourceAuthorization) {}
+  @Get('capabilities') capabilities() {
+    return this.clients.request('files', '/internal/v1/files/capabilities');
+  }
   @Post('uploads')
   async createUpload(@Body() body: { ownerType?: 'POST' | 'LEAVE_REQUEST'; ownerId?: string; fileName?: string; mediaType?: string; byteSize?: number; checksumSha256?: string }, @CurrentPrincipal() principal: Principal) {
     if (!principal.schoolId || principal.role !== 'TEACHER') throw new ForbiddenException({ code: 'TEACHER_FILE_UPLOAD_REQUIRED' });

@@ -124,6 +124,18 @@ describe('API gateway authorization and service boundaries', () => {
     expect(response.body.services).toHaveLength(10);
   });
 
+  it('returns only file availability/policy via the protected service boundary', async () => {
+    const original = serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service: string, path: string, init?: RequestInit) => {
+      if (service === 'files' && path === '/internal/v1/files/capabilities') return Promise.resolve({ attachmentsEnabled: false, maxByteSize: 20971520, mediaTypes: ['application/pdf'] });
+      return original(service, path, init);
+    });
+    await request(app.getHttpServer()).get('/api/v1/files/capabilities').expect(401);
+    const response = await request(app.getHttpServer()).get('/api/v1/files/capabilities').set('Authorization', 'Bearer teacher-token').expect(200);
+    expect(response.body).toEqual({ attachmentsEnabled: false, maxByteSize: 20971520, mediaTypes: ['application/pdf'] });
+    expect(serviceClient.request.mock.calls.some(call => call[1] === '/internal/v1/files/capabilities')).toBe(true);
+  });
+
   it.each(['passcode/login','passcode/setup'])('forwards public credential flow to Identity only: %s', async (path) => {
     const body={phoneE164:'+919876543210',passcode:'0123',deviceId:'web',setupToken:'restricted-grant'};
     await request(app.getHttpServer()).post(`/api/v1/auth/${path}`).send(body).expect(201);

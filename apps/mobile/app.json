@@ -2,7 +2,7 @@
   "expo": {
     "name": "Nexqon School App",
     "slug": "schoolconnect-lite",
-    "version": "0.1.2",
+    "version": "0.1.4",
     "icon": "./assets/nexqon-icon.png",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
@@ -14,7 +14,7 @@
     },
     "android": {
       "package": "com.schoolconnect.lite",
-      "versionCode": 3,
+      "versionCode": 5,
       "adaptiveIcon": {
         "foregroundImage": "./assets/nexqon-icon.png",
         "backgroundColor": "#5D08C9"
@@ -22,6 +22,7 @@
     },
     "web": { "bundler": "metro", "favicon": "./assets/nexqon-icon.png" },
     "plugins": [
+      "./plugins/with-release-signing.cjs",
       "expo-secure-store",
       "expo-notifications",
       ["expo-splash-screen", {

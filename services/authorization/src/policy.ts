@@ -33,6 +33,7 @@ export const defaultRouteRules: RouteRule[] = [
   { methods: ['GET'], pattern: '^/api/v1/attendance/students/[^/]+$', roles: ['PARENT'] },
   { methods: ['GET','POST'], pattern: '^/api/v1/notifications(?:/[^/]+/read)?$', roles: allRoles },
   { methods: ['POST'], pattern: '^/api/v1/files/uploads(?:/[^/]+/complete)?$', roles: ['TEACHER'] },
+  { methods: ['GET'], pattern: '^/api/v1/files/capabilities$', roles: ['TEACHER','PARENT'] },
   { methods: ['POST'], pattern: '^/api/v1/files/[^/]+/access$', roles: ['TEACHER','PARENT'] },
 ];
 

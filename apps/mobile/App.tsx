@@ -16,7 +16,8 @@ import {
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import * as DocumentPicker from "expo-document-picker";
-import * as Crypto from "expo-crypto";
+import { uploadPickedAttachment, attachmentErrorMessage, attachmentsDisabledMessage, type FileCapabilities } from './src/attachmentUpload';
+import { AttachmentAvailability } from './src/AttachmentAvailability';
 import {
   ArrowLeft,
   Bell,
@@ -236,7 +237,7 @@ function Header({
           </View>
         )}
         <View style={styles.headerText}>
-          <Text style={styles.headerTitle}>{title}</Text>
+          <Text style={styles.headerTitle} numberOfLines={2} ellipsizeMode="tail" textBreakStrategy="simple">{title}</Text>
           {subtitle ? (
             <Text style={styles.headerSubtitle}>{subtitle}</Text>
           ) : null}
@@ -2020,6 +2021,20 @@ function ComposeScreen({
   const [uploadMetadata, setUploadMetadata] = useState<
     { name: string; byteSize: number } | undefined
   >(draft?.payload.uploadMetadata);
+  const [fileCapabilities, setFileCapabilities] = useState<FileCapabilities | null>(null);
+  const [capabilitiesFailed, setCapabilitiesFailed] = useState(false);
+  const [capabilitiesReload, setCapabilitiesReload] = useState(0);
+  useEffect(() => {
+    if (!session || editing) return;
+    let active = true;
+    setFileCapabilities(null);
+    setCapabilitiesFailed(false);
+    void mobileApi.fileCapabilities(session).then((capabilities) => {
+      if (active) setFileCapabilities(capabilities);
+    }).catch(() => { if (active) setCapabilitiesFailed(true); });
+    return () => { active = false; };
+  }, [session?.accessToken, session?.activeMembershipId, editing?.id, capabilitiesReload]);
+  const attachmentBlocked = Boolean(session) && !editing && (type === 'RESULT' || Boolean(uploadedFileId)) && fileCapabilities?.attachmentsEnabled !== true;
   const draftSave = useRef<Promise<{ id: string }> | null>(null);
   const [serverDraftId, setServerDraftId] = useState(draft?.id ?? "");
   const [draftRestored, setDraftRestored] = useState(false);
@@ -2028,6 +2043,7 @@ function ComposeScreen({
   const key = teacherDraftKey(userId, session?.activeMembershipId ?? 'demo', type, assignment?.assignmentId, editing);
   useEffect(() => {
     let active = true;
+    let restored = true;
     setDraftRestored(false);
     void secureOfflineStorage
       .getItem(userId, key)
@@ -2051,13 +2067,12 @@ function ComposeScreen({
           setUpload("READY");
         }
       })
-      .catch((failure) =>
-        setPublishError(
-          failure instanceof Error ? failure.message : "DRAFT_LOAD_FAILED",
-        ),
-      )
+      .catch(() => {
+        restored = false;
+        if (active) setPublishError('Your saved draft could not be restored. It has not been deleted or overwritten. Please reopen this screen after restarting the app.');
+      })
       .finally(() => {
-        if (active) setDraftRestored(true);
+        if (active) setDraftRestored(restored);
       });
     return () => {
       active = false;
@@ -2220,6 +2235,7 @@ function ComposeScreen({
     setUpload("UPLOADING");
     setPublishError("");
     try {
+      if (!fileCapabilities?.attachmentsEnabled) throw new Error('FILE_ATTACHMENTS_DISABLED');
       const picked = await DocumentPicker.getDocumentAsync({
         type: ["application/pdf", "image/jpeg", "image/png"],
         copyToCacheDirectory: true,
@@ -2230,48 +2246,19 @@ function ComposeScreen({
         return;
       }
       const asset = picked.assets[0]!;
-      const blob = await fetch(asset.uri).then((response) => response.blob());
-      const bytes = await blob.arrayBuffer();
-      const digest = await Crypto.digest(
-        Crypto.CryptoDigestAlgorithm.SHA256,
-        bytes,
-      );
-      const checksumSha256 = Array.from(new Uint8Array(digest))
-        .map((byte) => byte.toString(16).padStart(2, "0"))
-        .join("");
-      const created = await mobileApi.createFileUpload(session, {
-        ownerId: Crypto.randomUUID(),
-        fileName: asset.name,
-        mediaType: asset.mimeType ?? blob.type,
-        byteSize: asset.size ?? blob.size,
-        checksumSha256,
-      });
-      const uploaded = await fetch(created.upload.url, {
-        method: "PUT",
-        headers: created.upload.requiredHeaders,
-        body: blob,
-      });
-      if (!uploaded.ok) throw new Error(`UPLOAD_HTTP_${uploaded.status}`);
-      const completed = await mobileApi.completeFileUpload(
-        session,
-        created.uploadSessionId,
-      );
-      if (completed.status !== "READY") throw new Error("FILE_NOT_READY");
-      setUploadedFileId(created.fileId);
-      setUploadMetadata({
-        name: asset.name,
-        byteSize: asset.size ?? blob.size,
-      });
+      const completed = await uploadPickedAttachment(session, asset, fileCapabilities);
+      setUploadedFileId(completed.fileId);
+      setUploadMetadata(completed.metadata);
       setUpload("READY");
     } catch (failure) {
       setUpload("FAILED");
-      setPublishError(
-        failure instanceof Error ? failure.message : "FILE_UPLOAD_FAILED",
-      );
+      if (failure instanceof Error && failure.message === 'FILE_ATTACHMENTS_DISABLED') setFileCapabilities((current) => current && ({ ...current, attachmentsEnabled: false }));
+      setPublishError(attachmentErrorMessage(failure));
     }
   };
   const publish = async () => {
     if (switchingClass || publishing || !draftRestored) return;
+    if (attachmentBlocked) { setPublishError(fileCapabilities?.attachmentsEnabled === false ? attachmentsDisabledMessage : 'Upload availability must be confirmed before publishing this attachment. Please check again.'); return; }
     const invalid =
       !title.trim() ||
       !body.trim() ||
@@ -2445,7 +2432,7 @@ function ComposeScreen({
             <Text style={styles.cardMeta}>Switching saves this draft for its current class. The other class opens its own draft; student selections and files are not transferred.</Text>
           </> : null}
           <View style={styles.scopeCard}>
-            <View>
+            <View style={styles.flex}>
               <Text style={styles.eyebrow}>AUDIENCE</Text>
               <Text style={styles.cardTitle}>
                 {assignment?.className ?? "Assigned class"} ·{" "}
@@ -2491,7 +2478,7 @@ function ComposeScreen({
                       <Check size={15} color="#fff" />
                     ) : null}
                   </View>
-                  <Text style={styles.cardTitle}>{student.displayName}</Text>
+                  <Text style={[styles.cardTitle, styles.flex]} numberOfLines={2} ellipsizeMode="tail" textBreakStrategy="simple">{student.displayName}</Text>
                 </Pressable>
               ))}
             </>
@@ -2545,13 +2532,13 @@ function ComposeScreen({
               <Text style={styles.label}>
                 {type === "RESULT" ? "Private result file *" : "Attachment"}
               </Text>
-              <UploadTile
+              {session && fileCapabilities?.attachmentsEnabled !== true ? <AttachmentAvailability state={capabilitiesFailed ? 'error' : fileCapabilities ? 'disabled' : 'checking'} onRetry={() => setCapabilitiesReload(value => value + 1)} /> : <UploadTile
                 state={upload}
                 metadata={uploadMetadata}
                 onAttach={() => {
                   void attach();
                 }}
-              />
+              />}
               {upload !== "EMPTY" && upload !== "UPLOADING" ? <PrimaryButton label="Remove attachment" secondary onPress={() => { setUploadedFileId(""); setUploadMetadata(undefined); setUpload("EMPTY"); }} /> : null}
             </>
           ) : null}
@@ -2703,7 +2690,7 @@ function ComposeScreen({
               void publish();
             }}
             loading={publishing}
-            disabled={switchingClass || !draftRestored || editing?.status === "ARCHIVED"}
+            disabled={attachmentBlocked || switchingClass || !draftRestored || editing?.status === "ARCHIVED"}
           />
         </ScrollView>
       </KeyboardAvoidingView>
@@ -4071,8 +4058,9 @@ const styles = StyleSheet.create({
   },
   header: { paddingTop: 12, paddingBottom: 8 },
   headerRow: { flexDirection: "row", alignItems: "center", minHeight: 52 },
-  headerText: { flex: 1, marginHorizontal: 12 },
+  headerText: { flex: 1, minWidth: 0, marginHorizontal: 12 },
   headerTitle: {
+    flexShrink: 1,
     fontFamily: "Poppins_600SemiBold",
     fontSize: 22,
     color: colors.ink,

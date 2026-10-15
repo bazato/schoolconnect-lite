@@ -10,6 +10,7 @@ import { Pool } from 'pg';
 import { domainEventTypes, validateManagedRuntime } from '@schoolconnect/contracts';
 import { PgOutbox, eventingStatus, eventingHealth, bindEventingShutdown, registerApplicationShutdown, startOutboxPublisher } from '@schoolconnect/eventing';
 import { createMalwareScanner, createPrivateObjectStorage, MalwareScanner, PrivateObjectStorage } from './storage';
+import { fileCapabilities, fileUploadPolicy } from './file-policy';
 
 @Injectable()
 class FileRepository implements OnModuleDestroy {
@@ -18,7 +19,7 @@ class FileRepository implements OnModuleDestroy {
   constructor(private readonly storage: PrivateObjectStorage, private readonly scanner: MalwareScanner) {}
   async createUpload(input: { schoolId: string; ownerType: 'POST' | 'LEAVE_REQUEST'; ownerId: string; actorUserId: string; fileName: string; mediaType: string; byteSize: number; checksumSha256: string }) {
     if (process.env.FILE_STORAGE_PROVIDER === 'disabled') throw new ServiceUnavailableException({ code: 'FILE_ATTACHMENTS_DISABLED' });
-    if (!['application/pdf', 'image/jpeg', 'image/png'].includes(input.mediaType) || input.byteSize <= 0 || input.byteSize > 20 * 1024 * 1024 || !/^[a-f0-9]{64}$/i.test(input.checksumSha256)) {
+    if (!fileUploadPolicy.mediaTypes.includes(input.mediaType) || input.byteSize <= 0 || input.byteSize > fileUploadPolicy.maxByteSize || !/^[a-f0-9]{64}$/i.test(input.checksumSha256)) {
       throw new BadRequestException({ code: 'FILE_POLICY_REJECTED' });
     }
     const fileId = randomUUID(); const uploadSessionId = randomUUID();
@@ -82,6 +83,7 @@ class FileRepository implements OnModuleDestroy {
 @Controller('internal/v1')
 class FileController {
   constructor(@Inject(FileRepository) private readonly repository: FileRepository) {}
+  @Get('files/capabilities') capabilities() { return fileCapabilities(); }
   @Get('health') async health() { return { status:eventingHealth('publisher:files'), service: 'files', database: await this.repository.health(), capabilities: { attachmentsEnabled: process.env.FILE_STORAGE_PROVIDER !== 'disabled' } }; }
   @Get('events/status') eventsStatus() { return this.repository.eventingDiagnostics(); }
   @Post('uploads') upload(@Body() body: Parameters<FileRepository['createUpload']>[0]) { return this.repository.createUpload(body); }

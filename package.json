@@ -29,6 +29,7 @@
     "test:r2": "node scripts/r2-smoke-test.mjs --run",
     "test:render-demo": "node --test scripts/render-demo-db.test.mjs",
     "test:runtime": "pnpm --filter @schoolconnect/contracts build && node --test scripts/managed-runtime.test.mjs scripts/render-demo-db.test.mjs scripts/render-cutover.test.mjs",
+    "test:android-signing": "node --test scripts/android-signing.test.cjs",
     "start:managed": "node scripts/managed-runtime.mjs",
     "runtime:check": "node scripts/managed-runtime.mjs --check",
     "db:managed:plan": "node scripts/migrate-managed.mjs --plan",

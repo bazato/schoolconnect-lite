@@ -1,5 +1,7 @@
 # Android preview APK
 
+The instructions below describe the historical debug-signed 0.1.2 preview. From 0.1.3 onward, release builds require the permanent signing configuration in [android-release-signing.md](android-release-signing.md); there is no debug-key fallback for release.
+
 The installable test APK is built from `apps/mobile` with Expo SDK 57 and Android Studio's SDK. Its application ID is `com.schoolconnect.lite` and it supports Android 7.0 (API 24) or newer. The bundle embeds `EXPO_PUBLIC_API_URL` at build time, so changing `apps/mobile/.env` requires a new APK.
 
 For the disposable Render trial, set `apps/mobile/.env` to:

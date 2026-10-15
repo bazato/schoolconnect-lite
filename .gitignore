@@ -19,3 +19,8 @@ reference/kaksha.figctx/
 .fees-template-work/
 /tmp/pdfs/
 scripts/__pycache__/
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.credentials.clixml

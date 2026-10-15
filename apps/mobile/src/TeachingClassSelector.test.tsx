@@ -6,7 +6,7 @@ import type { ApiTeachingAssignment } from './api';
 
 vi.mock('react-native', () => ({
   View: ({ children }: any) => <div>{children}</div>,
-  Text: ({ children }: any) => <span>{children}</span>,
+  Text: ({ children, numberOfLines, style }: any) => <span data-lines={numberOfLines} data-tracking={style?.letterSpacing}>{children}</span>,
   ScrollView: ({ children }: any) => <div>{children}</div>,
   Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState }: any) => <button aria-label={accessibilityLabel} aria-expanded={accessibilityState?.expanded} disabled={disabled} onClick={onPress}>{typeof children === 'function' ? children({ pressed: false }) : children}</button>,
   Modal: ({ children, visible }: any) => visible ? <div role="dialog">{children}</div> : null,
@@ -37,6 +37,12 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
 describe('mobile teaching class selector', () => {
+  it('renders multipart school names normally with bounded wrapping instead of spaced-out eyebrow text', async () => {
+    const name = 'Al Yasmin International School';
+    await act(async () => root.render(<TeachingClassSelector scope={scope} selected={scope[0]} schoolName={name} onSelect={vi.fn()} />));
+    const label = [...container.querySelectorAll('span')].find(item => item.textContent === name)!;
+    expect(label.getAttribute('data-lines')).toBe('2'); expect(label.getAttribute('data-tracking')).toBe('0');
+  });
   it('switches to the second assignment and closes the selector', async () => {
     const onSelect = vi.fn();
     await act(async () => root.render(<TeachingClassSelector scope={scope} selected={scope[0]} schoolName="Actual School" onSelect={onSelect} />));

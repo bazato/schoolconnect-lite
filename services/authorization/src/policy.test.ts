@@ -4,6 +4,14 @@ import { PolicyEngine, RoutePolicy, type Principal } from './policy';
 const teacher: Principal = { userId: 'u1', membershipId: 'm1', schoolId: 's1', role: 'TEACHER' };
 const parent: Principal = { userId: 'u2', membershipId: 'm2', schoolId: 's1', role: 'PARENT' };
 
+it('configures file availability centrally and never grants uploads to parents', () => {
+  const policy = new RoutePolicy();
+  for (const role of ['TEACHER', 'PARENT'] as const) expect(policy.decide('GET', '/api/v1/files/capabilities', role).allowed).toBe(true);
+  for (const role of ['PLATFORM_OWNER', 'SCHOOL_ADMIN'] as const) expect(policy.decide('GET', '/api/v1/files/capabilities', role).allowed).toBe(false);
+  expect(policy.decide('POST', '/api/v1/files/uploads', 'PARENT').allowed).toBe(false);
+  expect(policy.decide('POST', '/api/v1/files/capabilities', 'TEACHER').allowed).toBe(false);
+});
+
 describe('resource policy', () => {
   it.each([null, {}, { allowed:'true' }, { allowed:1 }, { allowed:false }])('never approves malformed School relationship facts: %j', async (fact) => {
     const policy = new PolicyEngine(vi.fn().mockResolvedValue(fact));

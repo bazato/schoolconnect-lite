@@ -23,7 +23,7 @@ export function TeachingClassSelector({ scope, selected, onSelect, schoolName, d
     finally { setChoosing(false); }
   };
   return <View style={{ paddingHorizontal: 20, paddingVertical: 8, gap: 6 }}>
-    <Text style={styles.eyebrow} numberOfLines={1}>{schoolName || 'Your school'}</Text>
+    <Text style={styles.schoolName} numberOfLines={2} ellipsizeMode="tail" textBreakStrategy="simple">{schoolName || 'Your school'}</Text>
     <Pressable accessibilityRole="button" accessibilityLabel="Select teaching class and subject" accessibilityState={{ expanded: open, disabled }} disabled={disabled} onPress={() => { setPendingId(''); setSelectionError(''); setOpen(true); }} style={styles.scopeCard}>
       <View style={styles.flex}><Text style={styles.scopeTitle} numberOfLines={1}>{selected?.className ?? 'No assigned classes'}</Text><Text style={styles.scopeMeta} numberOfLines={1}>{selected?.subjectName ?? 'Ask your school administrator for an assignment'} · {scope.length} assignment{scope.length === 1 ? '' : 's'}</Text></View><ChevronDown size={20} color={colors.primary} />
     </Pressable>
@@ -51,7 +51,7 @@ const styles = StyleSheet.create({
   flex: { flex: 1, minWidth: 0 },
   inline: { flexDirection: 'row', alignItems: 'center', gap: 7, flexWrap: 'wrap' },
   sectionTitle: { fontFamily: 'Poppins_600SemiBold', fontSize: 17, color: colors.ink, marginTop: 4 },
-  eyebrow: { fontFamily: 'Poppins_600SemiBold', fontSize: 10, letterSpacing: 1.2, color: colors.primary },
+  schoolName: { fontFamily: 'Poppins_500Medium', fontSize: 13, lineHeight: 20, letterSpacing: 0, color: colors.primary, flexShrink: 1, minWidth: 0 },
   scopeCard: { minHeight: 83, borderRadius: radius.card, padding: 16, backgroundColor: colors.primarySoft, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderWidth: 1, borderColor: 'transparent' },
   scopeTitle: { fontFamily: 'Poppins_600SemiBold', fontSize: 17, color: colors.ink },
   scopeMeta: { fontFamily: 'Poppins_400Regular', fontSize: 12, color: colors.muted, marginTop: 2 },
