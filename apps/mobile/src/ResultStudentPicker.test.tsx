@@ -20,15 +20,28 @@ describe('result student identity', () => {
     const view = await render([{ id: 'one', displayName: 'Alex Morgan Williams', admissionNumber: 'A-001' }]);
     try {
       expect(view.container.querySelectorAll('[role="radio"]')).toHaveLength(1);
-      expect(view.container.textContent).toContain('Alex Morgan Williams'); expect(view.container.textContent).toContain('Admission no. A-001');
+      expect(view.container.textContent).toBe('Alex Morgan Williams');
+      expect(view.container.querySelector('button')!.getAttribute('aria-label')).toBe('Alex Morgan Williams');
+      expect(view.container.innerHTML).not.toContain('A-001');
+      expect(view.container.textContent).not.toContain('Admission');
       await act(async () => view.container.querySelector('button')!.click()); expect(view.onSelect).not.toHaveBeenCalled();
     } finally { await view.close(); }
   });
-  it('keeps distinct IDs/admissions separate rather than combining names or siblings', async () => {
+  it('keeps distinct student records separate while displaying names only', async () => {
     const view = await render([{ id: 'one', displayName: 'Alex', admissionNumber: 'A-001' }, { id: 'two', displayName: 'Morgan', admissionNumber: 'B-002' }]);
     try {
       const rows = view.container.querySelectorAll('button'); expect(rows).toHaveLength(2);
-      expect(rows[0]!.textContent).toContain('A-001'); expect(rows[1]!.textContent).toContain('B-002');
+      expect(rows[0]!.textContent).toBe('Alex'); expect(rows[1]!.textContent).toBe('Morgan');
+      expect(view.container.innerHTML).not.toContain('A-001'); expect(view.container.innerHTML).not.toContain('B-002');
+      await act(async () => rows[1]!.click()); expect(view.onSelect).toHaveBeenCalledExactlyOnceWith('two');
+    } finally { await view.close(); }
+  });
+  it('selects the correct ID even when two students share the same displayed name', async () => {
+    const view = await render([{ id: 'one', displayName: 'Alex Morgan', admissionNumber: 'A-001' }, { id: 'two', displayName: 'Alex Morgan', admissionNumber: 'B-002' }]);
+    try {
+      const rows = view.container.querySelectorAll('button'); expect(rows).toHaveLength(2);
+      expect(rows[0]!.textContent).toBe('Alex Morgan'); expect(rows[1]!.textContent).toBe('Alex Morgan');
+      expect(rows[0]!.getAttribute('aria-checked')).toBe('true'); expect(rows[1]!.getAttribute('aria-checked')).toBe('false');
       await act(async () => rows[1]!.click()); expect(view.onSelect).toHaveBeenCalledExactlyOnceWith('two');
     } finally { await view.close(); }
   });
