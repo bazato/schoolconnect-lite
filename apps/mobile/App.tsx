@@ -18,6 +18,7 @@ import { StatusBar } from "expo-status-bar";
 import * as DocumentPicker from "expo-document-picker";
 import { uploadPickedAttachment, attachmentErrorMessage, attachmentsDisabledMessage, type FileCapabilities } from './src/attachmentUpload';
 import { AttachmentAvailability } from './src/AttachmentAvailability';
+import { ResultStudentPicker } from './src/ResultStudentPicker';
 import {
   ArrowLeft,
   Bell,
@@ -71,6 +72,7 @@ import {
   type ApiSchoolClass,
   type ApiTeacherPost,
   type ApiTeachingAssignment,
+  type ApiRosterStudent,
 } from "./src/api";
 import { secureOfflineStorage } from "./src/secureOfflineStorage";
 import {
@@ -2009,9 +2011,7 @@ function ComposeScreen({
   const [error, setError] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState("");
-  const [resultStudents, setResultStudents] = useState<
-    Array<{ id: string; displayName: string }>
-  >([]);
+  const [resultStudents, setResultStudents] = useState<ApiRosterStudent[]>([]);
   const [targetStudentId, setTargetStudentId] = useState(
     draft?.payload.targetStudentId ?? "",
   );
@@ -2455,32 +2455,9 @@ function ComposeScreen({
           {type === "RESULT" && !editing ? (
             <>
               <Text style={styles.label}>Student *</Text>
-              {resultStudents.map((student) => (
-                <Pressable
-                  key={student.id}
-                  onPress={() => {
-                    setTargetStudentId(student.id);
-                    setUploadedFileId("");
-                    setUpload("EMPTY");
-                  }}
-                  style={[
-                    styles.checkRow,
-                    targetStudentId === student.id && styles.checkRowActive,
-                  ]}
-                >
-                  <View
-                    style={[
-                      styles.checkbox,
-                      targetStudentId === student.id && styles.checkboxActive,
-                    ]}
-                  >
-                    {targetStudentId === student.id ? (
-                      <Check size={15} color="#fff" />
-                    ) : null}
-                  </View>
-                  <Text style={[styles.cardTitle, styles.flex]} numberOfLines={2} ellipsizeMode="tail" textBreakStrategy="simple">{student.displayName}</Text>
-                </Pressable>
-              ))}
+              <ResultStudentPicker students={resultStudents} selectedId={targetStudentId} disabled={publishing || switchingClass || upload === 'UPLOADING' || !draftRestored} onSelect={(id) => {
+                setTargetStudentId(id); setUploadedFileId(''); setUploadMetadata(undefined); setUpload('EMPTY'); setPrivacy(false);
+              }} />
             </>
           ) : null}
           {type === "RESULT" ? (
