@@ -75,7 +75,7 @@ try {
             & $gradle app:assembleRelease --no-daemon --max-workers=2 --console=plain '-PreactNativeArchitectures=arm64-v8a,armeabi-v7a' '-Pkotlin.compiler.execution.strategy=in-process'
             if ($LASTEXITCODE -ne 0) { throw 'Android release build failed.' }
             $apk = Join-Path $buildPath 'apps\mobile\android\app\build\outputs\apk\release\app-release.apk'
-            $certificate = & $keytool -J-Duser.language=en -printcert -file (Join-Path $signingPath 'nexqon-release-public.pem')
+            $certificate = & $keytool '-J-Duser.language=en' -printcert -file (Join-Path $signingPath 'nexqon-release-public.pem')
             if ($LASTEXITCODE -ne 0) { throw 'Cannot read permanent public certificate.' }
             $fingerprintMatch = [regex]::Match(($certificate -join "`n"), 'SHA256:\s*([A-Fa-f0-9:]+)')
             if (!$fingerprintMatch.Success) { throw 'Permanent public certificate fingerprint missing.' }
