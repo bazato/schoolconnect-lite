@@ -8,7 +8,7 @@ import { NestFactory } from '@nestjs/core';
 import { createHash, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { domainEventTypes } from '@schoolconnect/contracts';
-import { startOutboxPublisher } from '@schoolconnect/eventing';
+import { PgOutbox, eventingStatus, eventingHealth, bindEventingShutdown, registerApplicationShutdown, startOutboxPublisher } from '@schoolconnect/eventing';
 import { validateAttendanceSubmission, type AttendanceStatus } from './validation';
 
 type AttendanceBatchRequest = {
@@ -286,17 +286,10 @@ class AttendanceRepository implements OnModuleDestroy {
     return result.rows;
   }
 
-  async claimOutbox(limit: number) {
-    const result = await this.pool.query(
-      `UPDATE outbox_events SET attempt_count=attempt_count+1,available_at=now()+interval '30 seconds'
-       WHERE id IN (SELECT id FROM outbox_events WHERE processed_at IS NULL AND available_at<=now() ORDER BY occurred_at FOR UPDATE SKIP LOCKED LIMIT $1)
-       RETURNING id,event_type AS "eventType",aggregate_id AS "aggregateId",payload,occurred_at AS "occurredAt"`, [Math.min(Math.max(limit, 1), 100)]);
-    return result.rows;
-  }
-  async completeOutbox(eventId: string, success: boolean) {
-    await this.pool.query(success ? `UPDATE outbox_events SET processed_at=now() WHERE id=$1` : `UPDATE outbox_events SET available_at=now()+interval '1 minute' WHERE id=$1 AND processed_at IS NULL`, [eventId]);
-    return { completed: success };
-  }
+  async claimOutbox(limit: number) { return new PgOutbox(this.pool).claim(limit); }
+  async renewOutbox(id: string, token: string) { return new PgOutbox(this.pool).renew(id,token); }
+  async completeOutbox(id: string, success: boolean, token?: string, errorCode?: string) { return new PgOutbox(this.pool).complete(id,success,token,errorCode); }
+  async eventingDiagnostics() { return { runtime:eventingStatus('publisher:attendance'),outbox:await new PgOutbox(this.pool).status() }; }
 
   async onModuleDestroy() { await this.pool.end(); }
 }
@@ -304,7 +297,8 @@ class AttendanceRepository implements OnModuleDestroy {
 @Controller('internal/v1')
 class AttendanceController {
   constructor(@Inject(AttendanceRepository) private readonly repository: AttendanceRepository) {}
-  @Get('health') async health() { return { status: 'ok', service: 'attendance', database: await this.repository.health() }; }
+  @Get('health') async health() { return { status:eventingHealth('publisher:attendance'), service: 'attendance', database: await this.repository.health() }; }
+  @Get('events/status') eventsStatus() { return this.repository.eventingDiagnostics(); }
   @Post('attendance/batches') batch(@Body() body: AttendanceBatchRequest) { return this.repository.submit(body); }
   @Get('attendance/events/:eventId') event(@Param('eventId') eventId: string, @Query('schoolId') schoolId: string) { return this.repository.event(schoolId, eventId); }
   @Get('students/:studentId/attendance') history(@Param('studentId') studentId: string, @Query('schoolId') schoolId: string, @Query('guardianUserId') guardianUserId?: string) { return this.repository.history(schoolId, studentId, guardianUserId); }
@@ -318,10 +312,10 @@ class AttendanceController {
   @Post('leave-requests/:leaveRequestId/review') reviewLeave(@Param('leaveRequestId') leaveRequestId: string, @Body() body: { schoolId: string; actorMembershipId: string; decision: 'APPROVED' | 'REJECTED'; reviewNote?: string; correlationId?: string }) { return this.repository.reviewLeave(body.schoolId, leaveRequestId, body.actorMembershipId, body.decision, body.reviewNote, body.correlationId); }
   @Get('attendance/summary') summary(@Query('schoolId') schoolId: string, @Query('fromDate') fromDate: string, @Query('toDate') toDate: string) { return this.repository.summary(schoolId, fromDate, toDate); }
   @Get('outbox') outbox(@Query('limit') limit = '25') { return this.repository.claimOutbox(Number(limit)); }
-  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean }) { return this.repository.completeOutbox(eventId, body.success !== false); }
+  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean; claimToken?: string }) { return this.repository.completeOutbox(eventId, body.success === true,body.claimToken); }
 }
 
 @Module({ controllers: [AttendanceController], providers: [AttendanceRepository] })
 class AttendanceModule {}
-async function bootstrap() { const app = await NestFactory.create(AttendanceModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.ATTENDANCE_PORT ?? 3104), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); await startOutboxPublisher('attendance', app.get(AttendanceRepository)); }
+async function bootstrap() { const app = await NestFactory.create(AttendanceModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.ATTENDANCE_PORT ?? 3104), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); const repository=app.get(AttendanceRepository); bindEventingShutdown(repository,await startOutboxPublisher('attendance',repository)); registerApplicationShutdown(app); }
 void bootstrap();

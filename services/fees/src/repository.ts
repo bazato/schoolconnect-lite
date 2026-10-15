@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
 import { domainEventTypes, formatFeeMoney, parseFeeImport, type FeeImport, type FeeQuery, type FeeReport, type FeeStudent } from '@schoolconnect/contracts';
 import { invoiceKey, planFeeImport, type Collection, type Invoice } from './ledger';
+import { PgOutbox, eventingStatus, eventingHealth } from '@schoolconnect/eventing';
 
 export type ImportContext = { schoolId: string; actorUserId: string; actorMembershipId: string; correlationId: string; students: FeeStudent[]; data: FeeImport };
 type Database = Pick<PoolClient, 'query'>;
@@ -10,7 +11,7 @@ type Database = Pick<PoolClient, 'query'>;
 @Injectable()
 export class FeesRepository implements OnModuleDestroy {
   private readonly pool = new Pool({ connectionString: process.env.FEES_DATABASE_URL ?? 'postgresql://schoolconnect:schoolconnect@localhost:5432/schoolconnect_fees', max: Number(process.env.FEES_DB_POOL_MAX ?? 4), connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS ?? 3000), statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS ?? 5000) });
-  async health() { await this.pool.query('SELECT 1'); return { status: 'ok', service: 'fees' }; }
+  async health() { await this.pool.query('SELECT 1'); return { status:eventingHealth('publisher:fees'), service: 'fees' }; }
   private async plan(db: Database, context: ImportContext) {
     const data = parseFeeImport(context.data);
     const students = context.students;
@@ -72,9 +73,10 @@ export class FeesRepository implements OnModuleDestroy {
       return { query,studentCount:counts.rows[0].students,recordCount:counts.rows[0].records,currencies:totals.rows.map((row) => ({ currency:row.currency,amountMinor:row.amount,amount:formatFeeMoney(row.amount,row.currency) })),records:details.rows.map((row) => ({ ...row,amount:formatFeeMoney(row.amount,row.currency) })),truncated:counts.rows[0].records>200 };
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
-  async claimOutbox(limit: number) {
-    const result = await this.pool.query(`UPDATE outbox_events SET attempt_count=attempt_count+1,available_at=now()+interval '30 seconds' WHERE id IN (SELECT id FROM outbox_events WHERE processed_at IS NULL AND available_at<=now() ORDER BY occurred_at FOR UPDATE SKIP LOCKED LIMIT $1) RETURNING id,event_type AS "eventType",aggregate_id AS "aggregateId",payload,occurred_at AS "occurredAt"`, [Math.min(Math.max(limit,1),100)]); return result.rows;
-  }
-  async completeOutbox(id: string, success: boolean) { await this.pool.query(success ? 'UPDATE outbox_events SET processed_at=now() WHERE id=$1' : "UPDATE outbox_events SET available_at=now()+interval '1 minute' WHERE id=$1 AND processed_at IS NULL", [id]); }
+  async claimOutbox(limit: number) { return new PgOutbox(this.pool).claim(limit); }
+  async renewOutbox(id: string, token: string) { return new PgOutbox(this.pool).renew(id,token); }
+  async completeOutbox(id: string, success: boolean, token?: string, errorCode?: string) { return new PgOutbox(this.pool).complete(id,success,token,errorCode); }
+  async eventingDiagnostics() { return { runtime:eventingStatus('publisher:fees'),outbox:await new PgOutbox(this.pool).status() }; }
+
   async onModuleDestroy() { await this.pool.end(); }
 }

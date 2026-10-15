@@ -10,6 +10,7 @@ import { parseResultImportRows } from './results-import';
 import { currentRequestContext } from './request-context';
 import { parseFeeImport, type FeeSchoolContext, type FeeStudent } from '@schoolconnect/contracts';
 import { FeeQueryInterpreter } from './fees-query-interpreter';
+import { invalidScopeInput, validSessionPrincipal } from './security-boundary';
 
 type Role = 'PLATFORM_OWNER' | 'SCHOOL_ADMIN' | 'TEACHER' | 'PARENT';
 type Principal = { userId: string; displayName: string; membershipId: string; schoolId: string | null; role: Role; sessionId: string };
@@ -92,6 +93,7 @@ export class ServiceClient {
         if (response.status === 403) throw new ForbiddenException(message);
         if (response.status === 404) throw new NotFoundException(message);
         if (response.status === 409) throw new ConflictException(message);
+        if (response.status === 503) throw new HttpException(message ?? { code: 'DOWNSTREAM_UNAVAILABLE' }, 503);
         if (response.status === 429) throw new HttpException(message ?? { code: 'RATE_LIMITED' }, 429);
         throw new BadGatewayException({ code: 'DOWNSTREAM_REJECTED', service, status: response.status, details: message });
       }
@@ -104,6 +106,16 @@ export class ServiceClient {
 }
 
 @Injectable()
+class ScopeInputGuard implements CanActivate {
+  canActivate(context: ExecutionContext) {
+    const request = context.switchToHttp().getRequest<ScopedRequest>();
+    const invalid = invalidScopeInput(request.params, request.query, request.body);
+    if (invalid) throw new BadRequestException({ code: 'INVALID_SCOPE_IDENTIFIER', field: invalid });
+    return true;
+  }
+}
+
+@Injectable()
 class SessionGuard implements CanActivate {
   constructor(@Inject(Reflector) private readonly reflector: Reflector, @Inject(ServiceClient) private readonly clients: ServiceClient) {}
   async canActivate(context: ExecutionContext) {
@@ -111,15 +123,17 @@ class SessionGuard implements CanActivate {
     const request = context.switchToHttp().getRequest<ScopedRequest>();
     const authorization = request.headers.authorization;
     if (!authorization?.startsWith('Bearer ')) throw new UnauthorizedException({ code: 'AUTHENTICATION_REQUIRED' });
-    request.principal = await this.clients.request<Principal>('identity', '/internal/v1/sessions/context', {
+    const principal = await this.clients.request<Principal>('identity', '/internal/v1/sessions/context', {
       method: 'POST', body: JSON.stringify({ accessToken: authorization.slice(7) }),
     });
+    if (!validSessionPrincipal(principal)) throw new UnauthorizedException({ code: 'INVALID_SESSION_CONTEXT' });
+    request.principal = principal;
     const trace = currentRequestContext();
     if (trace) Object.assign(trace, { schoolId: request.principal.schoolId ?? undefined,
       userId: request.principal.userId, membershipId: request.principal.membershipId, role: request.principal.role });
     if (request.principal.schoolId) {
       const school = await this.clients.request<{ active: boolean }>('school', `/internal/v1/schools/${request.principal.schoolId}`);
-      if (!school.active) throw new ForbiddenException({ code: 'SCHOOL_INACTIVE' });
+      if (school?.active !== true) throw new ForbiddenException({ code: 'SCHOOL_INACTIVE' });
     }
     return true;
   }
@@ -135,7 +149,7 @@ class RoutePolicyGuard implements CanActivate {
     const decision = await this.clients.request<{ allowed: boolean; reason: string }>('authorization', '/internal/v1/decisions/route', {
       method: 'POST', body: JSON.stringify({ method: request.method, path: request.path, principal: request.principal }),
     });
-    if (!decision.allowed) throw new ForbiddenException({ code: 'ROUTE_ACCESS_DENIED', reason: decision.reason });
+    if (decision?.allowed !== true) throw new ForbiddenException({ code: 'ROUTE_ACCESS_DENIED', reason: decision?.reason });
     return true;
   }
 }
@@ -157,7 +171,7 @@ class SchoolResourceAuthorization implements ResourceAuthorization {
     }
     const result = await this.clients.request<{ allowed: boolean }>('school',
       `/internal/v1/authorization/teacher?schoolId=${encodeURIComponent(principal.schoolId)}&membershipId=${encodeURIComponent(principal.membershipId)}&classId=${encodeURIComponent(classId)}&capability=${capability}`);
-    if (!result.allowed) throw new ForbiddenException({ code: 'TEACHER_ASSIGNMENT_ACCESS_DENIED' });
+    if (result?.allowed !== true) throw new ForbiddenException({ code: 'TEACHER_ASSIGNMENT_ACCESS_DENIED' });
   }
 
   async guardian(principal: Principal, studentId: string) {
@@ -166,7 +180,7 @@ class SchoolResourceAuthorization implements ResourceAuthorization {
     }
     const result = await this.clients.request<{ allowed: boolean }>('school',
       `/internal/v1/authorization/guardian?schoolId=${encodeURIComponent(principal.schoolId)}&guardianUserId=${encodeURIComponent(principal.userId)}&studentId=${encodeURIComponent(studentId)}`);
-    if (!result.allowed) throw new ForbiddenException({ code: 'GUARDIAN_CHILD_ACCESS_DENIED' });
+    if (result?.allowed !== true) throw new ForbiddenException({ code: 'GUARDIAN_CHILD_ACCESS_DENIED' });
   }
 }
 
@@ -176,7 +190,7 @@ class PolicyServiceAuthorization implements ResourceAuthorization {
     const decision = await this.clients.request<{ allowed: boolean; reason: string }>('authorization', '/internal/v1/decisions', {
       method: 'POST', body: JSON.stringify({ action, principal, ...context }),
     });
-    if (!decision.allowed) throw new ForbiddenException({ code: 'RESOURCE_ACCESS_DENIED', reason: decision.reason });
+    if (decision?.allowed !== true) throw new ForbiddenException({ code: 'RESOURCE_ACCESS_DENIED', reason: decision?.reason });
   }
   teacher(principal: Principal, classId: string, capability: TeachingCapability) { return this.decide('TEACHER_CLASS', principal, { classId, capability }); }
   guardian(principal: Principal, studentId: string) { return this.decide('GUARDIAN_CHILD', principal, { studentId }); }
@@ -200,7 +214,7 @@ class HealthController {
   async health() {
     const services = await Promise.all((['identity', 'school', 'content', 'attendance', 'files', 'notifications', 'audit', 'authorization', 'read', 'fees'] as ServiceName[])
       .map(async (service) => {
-        try { await this.clients.request(service, '/internal/v1/health'); return { service, status: 'ok' }; }
+        try { const health=await this.clients.request<{status?:string}>(service, '/internal/v1/health'); return { service, status:health?.status==='degraded' ? 'unavailable' : 'ok' }; }
         catch { return { service, status: 'unavailable' }; }
       }));
     return { status: services.every((item) => item.status === 'ok') ? 'ok' : 'degraded', architecture: 'microservices', services };
@@ -316,6 +330,23 @@ class MobileBffController {
 @Controller('admin')
 class AdminController {
   constructor(@Inject(ServiceClient) private readonly clients: ServiceClient, @Inject(FeeQueryInterpreter) private readonly feeInterpreter: FeeQueryInterpreter) {}
+
+  @Get('operations/events')
+  async eventOperations() {
+    const services: ServiceName[]=['identity','school','content','attendance','files','notifications','audit','read','fees'];
+    return Promise.all(services.map(async (service) => {
+      try { return { service,diagnostics:await this.clients.request(service,'/internal/v1/events/status') }; }
+      catch { return { service,status:'unavailable' }; }
+    }));
+  }
+  @Post('operations/events/:service/:id/retry')
+  retryEvent(@Param('service') service: string,@Param('id',ParseUUIDPipe) id: string,@CurrentPrincipal() principal: Principal) {
+    // Role is decided centrally; a service whitelist prevents arbitrary routing.
+    if (!['notifications','audit','read'].includes(service)) throw new BadRequestException({code:'EVENT_REPLAY_SERVICE_INVALID'});
+    return this.clients.request(service as ServiceName,`/internal/v1/events/failures/${id}/retry`,{
+      method:'POST',body:JSON.stringify({actorUserId:principal.userId}),
+    });
+  }
 
   private schoolId(principal: Principal) {
     if (!principal.schoolId) throw new ForbiddenException({ code: 'SCHOOL_CONTEXT_REQUIRED' });
@@ -1039,8 +1070,8 @@ class FilesController {
     const context = await this.clients.request<{ postId: string; authorMembershipId: string; classId: string; studentId?: string; privacyClassification: string }>('content', `/internal/v1/files/${fileId}/context?schoolId=${principal.schoolId}`);
     let authorized = false;
     if (principal.role === 'PARENT' && body.studentId && (!context.studentId || context.studentId === body.studentId)) {
-      await this.clients.request('content', `/internal/v1/posts/${context.postId}?schoolId=${principal.schoolId}&guardianUserId=${principal.userId}&studentId=${body.studentId}`);
       await this.authorization.guardian(principal, body.studentId);
+      await this.clients.request('content', `/internal/v1/posts/${context.postId}?schoolId=${principal.schoolId}&guardianUserId=${principal.userId}&studentId=${body.studentId}`);
       authorized = true;
     } else if (principal.role === 'TEACHER') authorized = context.authorMembershipId === principal.membershipId;
     if (!authorized) throw new ForbiddenException({ code: 'FILE_ACCESS_DENIED' });
@@ -1050,6 +1081,6 @@ class FilesController {
 
 @Module({
   controllers: [HealthController, AuthController, MeController, MobileBffController, AdminController, ContentController, AttendanceController, NotificationsController, FilesController],
-  providers: [ServiceClient, { provide: FeeQueryInterpreter, useFactory: () => new FeeQueryInterpreter() }, resourceAuthorizationProvider, { provide: APP_GUARD, useClass: SessionGuard }, { provide: APP_GUARD, useClass: RoutePolicyGuard }, { provide: APP_GUARD, useClass: RateLimitGuard }],
+  providers: [ServiceClient, { provide: FeeQueryInterpreter, useFactory: () => new FeeQueryInterpreter() }, resourceAuthorizationProvider, { provide: APP_GUARD, useClass: ScopeInputGuard }, { provide: APP_GUARD, useClass: SessionGuard }, { provide: APP_GUARD, useClass: RoutePolicyGuard }, { provide: APP_GUARD, useClass: RateLimitGuard }],
 })
 export class AppModule {}

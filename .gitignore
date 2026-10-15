@@ -3,6 +3,9 @@ node_modules/
 dist/
 coverage/
 .env
+.env.*
+!.env.example
+!.env.production-trial.example
 *.log
 .railway/
 dist-native/

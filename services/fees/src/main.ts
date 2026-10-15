@@ -5,7 +5,7 @@ config({ path: resolve(__dirname, '../../../.env') });
 import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers, Inject, Module, Post } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { startOutboxPublisher } from '@schoolconnect/eventing';
+import { bindEventingShutdown, registerApplicationShutdown, startOutboxPublisher } from '@schoolconnect/eventing';
 import { validateFeeQuery, type FeeQuery } from '@schoolconnect/contracts';
 import { FeesRepository, type ImportContext } from './repository';
 
@@ -14,6 +14,7 @@ class FeesController {
   constructor(@Inject(FeesRepository) private readonly repository: FeesRepository) {}
   private scope(body: { schoolId: string }, header?: string) { if (!header || body.schoolId !== header || !/^[0-9a-f-]{36}$/i.test(header)) throw new ForbiddenException({ code: 'FEE_SCHOOL_SCOPE_REQUIRED' }); }
   @Get('health') health() { return this.repository.health(); }
+  @Get('events/status') eventsStatus() { return this.repository.eventingDiagnostics(); }
   @Post('fees/import-preview') preview(@Body() body: ImportContext, @Headers('x-schoolconnect-school-id') schoolId?: string) { this.scope(body,schoolId); return this.repository.preview(body); }
   @Post('fees/import-commit') commit(@Body() body: ImportContext & { batchId: string; revision: number }, @Headers('x-schoolconnect-school-id') schoolId?: string) {
     this.scope(body,schoolId);
@@ -37,8 +38,8 @@ async function bootstrap() {
   if (process.env.NODE_ENV === 'production' && (!token || token.length < 32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED');
   if (token) app.use((request: { headers: Record<string,string | string[] | undefined> }, response: { status: (code: number) => { json: (body: unknown) => void } }, next: () => void) => request.headers['x-internal-service-token'] === token ? next() : response.status(401).json({ code:'INTERNAL_AUTHENTICATION_REQUIRED' }));
   await app.listen(Number(process.env.FEES_PORT ?? 3110),process.env.SERVICE_BIND_HOST ?? '127.0.0.1');
-  const close = await startOutboxPublisher('fees',app.get(FeesRepository));
-  app.enableShutdownHooks();
-  process.once('SIGTERM', () => { void close(); });
+  const repository=app.get(FeesRepository);
+  bindEventingShutdown(repository,await startOutboxPublisher('fees',repository));
+  registerApplicationShutdown(app);
 }
 void bootstrap();

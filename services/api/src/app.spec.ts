@@ -1,6 +1,6 @@
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppModule, ServiceClient } from './app.module';
 import { FeeQueryInterpreter } from './fees-query-interpreter';
 import { requestContextMiddleware } from './request-context';
@@ -14,6 +14,7 @@ const schoolAdmin = { userId: 'admin-1', displayName: 'School Admin', membership
 describe('API gateway authorization and service boundaries', () => {
   let app: INestApplication;
   const serviceClient = { request: vi.fn() };
+  afterEach(async () => { await app?.close(); });
 
   it('denies fee uploads and reports to parent, teacher and platform-only roles', async () => {
     for (const token of ['parent-token','teacher-token','owner-token']) for (const path of ['import-preview','import-commit','search']) await request(app.getHttpServer()).post(`/api/v1/admin/fees/${path}`).set('Authorization',`Bearer ${token}`).send({}).expect(403);
@@ -87,6 +88,7 @@ describe('API gateway authorization and service boundaries', () => {
       if (service === 'authorization' && path === '/internal/v1/decisions/route') {
         const input = JSON.parse(String(init?.body)) as { path: string; principal: { role: string } };
         if (!input.path.startsWith('/api/v1/admin/')) return Promise.resolve({ allowed: true, reason: 'TEST_POLICY' });
+        if (input.path.startsWith('/api/v1/admin/operations/events')) return Promise.resolve({allowed:input.principal.role==='PLATFORM_OWNER'});
         const platformOwnerRoute = /^\/api\/v1\/admin\/(schools|platform-owners|reports\/platform-summary)(?:\/|$)/.test(input.path);
         const auditRoute = input.path === '/api/v1/admin/reports/audit';
         const allowedRole = platformOwnerRoute ? 'PLATFORM_OWNER' : auditRoute ? undefined : 'SCHOOL_ADMIN';
@@ -163,6 +165,27 @@ describe('API gateway authorization and service boundaries', () => {
   it('requires authentication for protected routes', async () => {
     await request(app.getHttpServer()).get('/api/v1/me/context').expect(401);
   });
+  it('denies event diagnostics and replay to school admins, teachers and parents',async () => {
+    for (const token of ['admin-token','teacher-token','parent-token']) {
+      await request(app.getHttpServer()).get('/api/v1/admin/operations/events').set('Authorization',`Bearer ${token}`).expect(403);
+      await request(app.getHttpServer()).post('/api/v1/admin/operations/events/read/123e4567-e89b-42d3-a456-426614174000/retry').set('Authorization',`Bearer ${token}`).send({}).expect(403);
+    }
+    expect(serviceClient.request.mock.calls.some((call) => call[1].startsWith('/internal/v1/events/'))).toBe(false);
+  });
+  it('aggregates owner event diagnostics, reporting an unreachable service without hiding the rest',async () => {
+    const fallback=serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit) => path==='/internal/v1/events/status'
+      ? service==='audit' ? Promise.reject(new Error('down')) : Promise.resolve({failures:[]}) : fallback(service,path,init));
+    const result=await request(app.getHttpServer()).get('/api/v1/admin/operations/events').set('Authorization','Bearer owner-token').expect(200);
+    expect(result.body).toHaveLength(9);expect(result.body).toContainEqual({service:'audit',status:'unavailable'});
+  });
+  it('binds replay actor to the owner session and restricts destination services',async () => {
+    const id='123e4567-e89b-42d3-a456-426614174000';
+    await request(app.getHttpServer()).post(`/api/v1/admin/operations/events/read/${id}/retry`).set('Authorization','Bearer owner-token').send({actorUserId:'attacker',rawValue:'fake'}).expect(201);
+    const call=serviceClient.request.mock.calls.find((call) => call[1]===`/internal/v1/events/failures/${id}/retry`);
+    expect(call?.[0]).toBe('read');expect(JSON.parse(String(call?.[2]?.body))).toEqual({actorUserId:'owner-1'});
+    await request(app.getHttpServer()).post(`/api/v1/admin/operations/events/identity/${id}/retry`).set('Authorization','Bearer owner-token').send({}).expect(400);
+  });
 
   it('reports ready only when all backend services are healthy', async () => {
     await request(app.getHttpServer()).get('/api/v1/health/ready').expect(200);
@@ -172,6 +195,12 @@ describe('API gateway authorization and service boundaries', () => {
     serviceClient.request.mockImplementation((service: string) => service === 'school' ? Promise.reject(new Error('unavailable')) : Promise.resolve({ status: 'ok' }));
     const response = await request(app.getHttpServer()).get('/api/v1/health/ready').expect(503);
     expect(response.body.status).toBe('degraded');
+  });
+  it('does not report readiness when a running service reports degraded Kafka transport',async () => {
+    const original=serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit) => service==='read' && path==='/internal/v1/health'
+      ? Promise.resolve({status:'degraded'}) : original(service,path,init));
+    await request(app.getHttpServer()).get('/api/v1/health/ready').expect(503);
   });
 
   it('binds role switching to the authenticated server session', async () => {

@@ -2,6 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { applyNotificationEvent } from './event-consumer';
 
 describe('notification event consumer', () => {
+  it('waits for all recipient writes before propagating a partial fanout failure',async () => {
+    let finish!: () => void;let completed=false;
+    const enqueue=vi.fn().mockRejectedValueOnce(new Error('write failed')).mockImplementationOnce(() => new Promise<void>((resolve) => {finish=() => {completed=true;resolve();};}));
+    let settled=false;
+    const result=applyNotificationEvent({source:'content',event:{id:'e1',eventType:'content.post-published.v1',aggregateId:'p1',occurredAt:'2026-10-14T00:00:00Z',payload:{schoolId:'s1',notification:{title:'Notice',body:'Details'},recipients:[{guardianUserId:'g1',studentId:'st1'},{guardianUserId:'g2',studentId:'st2'}]}}},enqueue)
+      .then(() => {settled=true;},(error) => {settled=true;return error;});
+    await Promise.resolve();expect(settled).toBe(false);finish();expect(await result).toBeInstanceOf(Error);expect(completed).toBe(true);
+  });
   it('uses event snapshots without reading other services', async () => {
     const enqueue = vi.fn().mockResolvedValue({ id: 'n1' });
     await applyNotificationEvent({ source: 'content', event: { id: 'e1', eventType: 'content.post-published.v1', aggregateId: 'p1', occurredAt: '2026-10-06T00:00:00Z',

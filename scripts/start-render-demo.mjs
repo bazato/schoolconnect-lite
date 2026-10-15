@@ -1,6 +1,12 @@
 // A disposable free-tier trial: one process hosts the existing service modules.
 // Production continues to use one process/container per service.
 import { prepareRenderDemoDatabase } from './render-demo-db.mjs';
+import { managedCutoverEnvironment } from './render-cutover.mjs';
+
+if (process.env.SC_RUNTIME_MODE === 'managed') {
+  const { startManagedRuntime } = await import('./managed-runtime.mjs');
+  await startManagedRuntime(managedCutoverEnvironment(process.env));
+} else {
 
 if (process.env.RENDER_DEMO_MODE !== 'true') throw new Error('RENDER_DEMO_MODE_REQUIRED');
 if (process.env.NODE_ENV !== 'development') throw new Error('RENDER_DEMO_REQUIRES_DEVELOPMENT_MODE');
@@ -16,4 +22,5 @@ await prepareRenderDemoDatabase(process.env.DATABASE_URL, true);
 
 for (const service of ['identity', 'school', 'content', 'attendance', 'files', 'notifications', 'audit', 'authorization', 'read-model', 'fees', 'api']) {
   await import(`../services/${service}/dist/main.js`);
+}
 }

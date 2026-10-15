@@ -19,6 +19,12 @@ async function legacyLookup<T>(base: string, path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function finishFanout(writes: Promise<unknown>[]) {
+  const results=await Promise.allSettled(writes);
+  const failed=results.find((result) => result.status==='rejected');
+  if (failed?.status==='rejected') throw failed.reason;
+}
+
 export async function applyNotificationEvent(envelope: EventEnvelope, enqueue: (input: NotificationInput, correlationId?: string) => Promise<unknown>): Promise<void> {
   const { event } = envelope;
   const payload = event.payload;
@@ -28,9 +34,9 @@ export async function applyNotificationEvent(envelope: EventEnvelope, enqueue: (
   const write = (input: Omit<NotificationInput, 'sourceEventId' | 'schoolId'>) => enqueue({ ...input, sourceEventId: event.id, schoolId }, correlationId);
   if (event.eventType === domainEventTypes.postPublished || event.eventType === domainEventTypes.postUpdated) {
     let snapshot = payload.notification as { title?: unknown; body?: unknown } | undefined;
-    if (!snapshot) snapshot = await legacyLookup<{ title: string; body: string }>(process.env.CONTENT_SERVICE_URL ?? 'http://127.0.0.1:3103', `/internal/v1/posts/${event.aggregateId}?schoolId=${schoolId}`);
+    if (!snapshot) snapshot = await legacyLookup<{ title: string; body: string }>(process.env.CONTENT_SERVICE_URL ?? 'http://127.0.0.1:3103', `/internal/v1/posts/${encodeURIComponent(event.aggregateId)}?schoolId=${encodeURIComponent(schoolId)}`);
     if (typeof snapshot.title !== 'string' || typeof snapshot.body !== 'string') throw new Error('POST_NOTIFICATION_SNAPSHOT_INVALID');
-    await Promise.all(recipients(payload).map(({ guardianUserId, studentId }) => studentId ? write({ recipientUserId: guardianUserId, studentId,
+    await finishFanout(recipients(payload).map(({ guardianUserId, studentId }) => studentId ? write({ recipientUserId: guardianUserId, studentId,
       notificationType: event.eventType === domainEventTypes.postUpdated ? 'POST_UPDATED' : 'POST_PUBLISHED', resourceType: 'POST', resourceId: event.aggregateId,
       title: snapshot.title as string, body: (snapshot.body as string).slice(0, 500), deepLink: `schoolconnect://posts/${event.aggregateId}?studentId=${studentId}` }) : Promise.resolve()));
   }
@@ -38,9 +44,9 @@ export async function applyNotificationEvent(envelope: EventEnvelope, enqueue: (
     const studentId = String(payload.studentId ?? '');
     if (!studentId) throw new Error('ATTENDANCE_EVENT_STUDENT_REQUIRED');
     let guardians = event.eventType === domainEventTypes.leaveReviewed ? [{ guardianUserId: String(payload.guardianUserId ?? '') }]
-      : payload.guardians === undefined ? await legacyLookup<Array<{ guardianUserId: string }>>(process.env.SCHOOL_SERVICE_URL ?? 'http://127.0.0.1:3102', `/internal/v1/schools/${schoolId}/students/${studentId}/guardians`) : recipients(payload);
+      : payload.guardians === undefined ? await legacyLookup<Array<{ guardianUserId: string }>>(process.env.SCHOOL_SERVICE_URL ?? 'http://127.0.0.1:3102', `/internal/v1/schools/${encodeURIComponent(schoolId)}/students/${encodeURIComponent(studentId)}/guardians`) : recipients(payload);
     guardians = guardians.filter((guardian) => guardian.guardianUserId);
-    await Promise.all(guardians.map((guardian) => write({ recipientUserId: guardian.guardianUserId, studentId,
+    await finishFanout(guardians.map((guardian) => write({ recipientUserId: guardian.guardianUserId, studentId,
       notificationType: event.eventType === domainEventTypes.studentAbsent ? 'ATTENDANCE_ABSENT' : event.eventType === domainEventTypes.leaveReviewed ? 'LEAVE_REVIEWED' : 'ATTENDANCE_CORRECTED',
       resourceType: 'ATTENDANCE_EVENT', resourceId: String(payload.attendanceEventId ?? event.aggregateId),
       title: event.eventType === domainEventTypes.studentAbsent ? 'Student marked absent' : event.eventType === domainEventTypes.leaveReviewed ? `Leave request ${String(payload.status).toLowerCase()}` : 'Attendance corrected',

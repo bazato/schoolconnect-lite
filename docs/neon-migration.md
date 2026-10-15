@@ -1,5 +1,7 @@
 # Render to Neon migration — 2026-10-14
 
+**Endpoint update, 2026-10-15:** the original production branch remains `br-dry-bird-b9go12pj`, but its current endpoint is `ep-solitary-silence-b9zotp6a.c-7.eu-central-1.aws.neon.tech`. Follow the [deployment/recovery record](deployment-2026-10-15.md), not historical local connection records pointing to the former hostname. Render's protected connection was updated and verified.
+
 Source: Render `schoolconnect-demo-postgres` (`dpg-db18u4jncjis73bnljh0-a`), PostgreSQL 17.11, Frankfurt.
 Destination: Neon project `Nexqon` (`empty-silence-25013431`), organization `org-fragrant-wave-17164401`, production branch `br-dry-bird-b9go12pj`, PostgreSQL 17.11, Frankfurt.
 Application: Render `schoolconnect-demo-api` (`srv-db18uebncjis73bnmrj0`).

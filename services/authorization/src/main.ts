@@ -6,6 +6,7 @@ import 'reflect-metadata';
 import { Body, Controller, Get, Inject, Injectable, Module, Post } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { PolicyEngine, RoutePolicy, type Principal, type ResourceDecision } from './policy';
+import { registerApplicationShutdown } from '@schoolconnect/eventing';
 
 @Injectable()
 class AuthorizationPolicy {
@@ -35,5 +36,6 @@ async function bootstrap() {
   if (process.env.NODE_ENV === 'production' && (!token || token.length < 32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED');
   if (token) app.use((request: { headers: Record<string, string | string[] | undefined> }, response: { status: (code: number) => { json: (body: unknown) => void } }, next: () => void) => request.headers['x-internal-service-token'] === token ? next() : response.status(401).json({ code: 'INTERNAL_AUTHENTICATION_REQUIRED' }));
   await app.listen(Number(process.env.AUTHORIZATION_PORT ?? 3108), process.env.SERVICE_BIND_HOST ?? '127.0.0.1');
+  registerApplicationShutdown(app);
 }
 void bootstrap();

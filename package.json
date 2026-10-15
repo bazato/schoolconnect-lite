@@ -23,7 +23,16 @@
     "test:fees": "node scripts/fees-regression.mjs",
     "dev:test-stack": "node scripts/start-local-test-stack.mjs",
     "test:load": "node scripts/load-test.mjs",
+    "test:release:concurrency": "node scripts/release-concurrency-test.mjs",
+    "test:release:kafka": "node scripts/release-kafka-test.mjs",
+    "test:r2:check": "node scripts/r2-smoke-test.mjs --check",
+    "test:r2": "node scripts/r2-smoke-test.mjs --run",
     "test:render-demo": "node --test scripts/render-demo-db.test.mjs",
+    "test:runtime": "pnpm --filter @schoolconnect/contracts build && node --test scripts/managed-runtime.test.mjs scripts/render-demo-db.test.mjs scripts/render-cutover.test.mjs",
+    "start:managed": "node scripts/managed-runtime.mjs",
+    "runtime:check": "node scripts/managed-runtime.mjs --check",
+    "db:managed:plan": "node scripts/migrate-managed.mjs --plan",
+    "db:managed:apply": "node scripts/migrate-managed.mjs --apply",
     "build": "pnpm -r build"
   },
   "devDependencies": {

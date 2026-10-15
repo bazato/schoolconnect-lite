@@ -3,13 +3,13 @@ import { config } from 'dotenv';
 import { resolve } from 'node:path';
 config({ path: resolve(__dirname, '../../../.env') });
 import 'reflect-metadata';
-import { BadRequestException, Body, Controller, Get, Headers, Inject, Injectable, Module, NotFoundException, OnModuleDestroy, Param, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Headers, Inject, Injectable, Module, NotFoundException, OnModuleDestroy, Param, Post, Query, ServiceUnavailableException } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
-import { domainEventTypes } from '@schoolconnect/contracts';
-import { startOutboxPublisher } from '@schoolconnect/eventing';
-import { createMalwareScanner, MalwareScanner, PrivateObjectStorage, S3PrivateObjectStorage } from './storage';
+import { domainEventTypes, validateManagedRuntime } from '@schoolconnect/contracts';
+import { PgOutbox, eventingStatus, eventingHealth, bindEventingShutdown, registerApplicationShutdown, startOutboxPublisher } from '@schoolconnect/eventing';
+import { createMalwareScanner, createPrivateObjectStorage, MalwareScanner, PrivateObjectStorage } from './storage';
 
 @Injectable()
 class FileRepository implements OnModuleDestroy {
@@ -17,6 +17,7 @@ class FileRepository implements OnModuleDestroy {
   async health() { const result = await this.pool.query<{ now: Date }>('SELECT now() AS now'); return result.rows[0]; }
   constructor(private readonly storage: PrivateObjectStorage, private readonly scanner: MalwareScanner) {}
   async createUpload(input: { schoolId: string; ownerType: 'POST' | 'LEAVE_REQUEST'; ownerId: string; actorUserId: string; fileName: string; mediaType: string; byteSize: number; checksumSha256: string }) {
+    if (process.env.FILE_STORAGE_PROVIDER === 'disabled') throw new ServiceUnavailableException({ code: 'FILE_ATTACHMENTS_DISABLED' });
     if (!['application/pdf', 'image/jpeg', 'image/png'].includes(input.mediaType) || input.byteSize <= 0 || input.byteSize > 20 * 1024 * 1024 || !/^[a-f0-9]{64}$/i.test(input.checksumSha256)) {
       throw new BadRequestException({ code: 'FILE_POLICY_REJECTED' });
     }
@@ -36,6 +37,7 @@ class FileRepository implements OnModuleDestroy {
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
   async completeUpload(uploadSessionId: string, actorUserId: string, schoolId: string, correlationId?: string) {
+    if (process.env.FILE_STORAGE_PROVIDER === 'disabled') throw new ServiceUnavailableException({ code: 'FILE_ATTACHMENTS_DISABLED' });
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -59,6 +61,7 @@ class FileRepository implements OnModuleDestroy {
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
   async access(fileId: string, input: { schoolId: string; actorUserId: string; studentId?: string; authorized: boolean; reason?: string }) {
+    if (process.env.FILE_STORAGE_PROVIDER === 'disabled') throw new ServiceUnavailableException({ code: 'FILE_ATTACHMENTS_DISABLED' });
     const file = await this.pool.query<{ private_object_key: string | null; processing_status: string }>(`SELECT private_object_key, processing_status FROM file_objects WHERE id=$1 AND school_id=$2`, [fileId, input.schoolId]);
     if (!file.rowCount) throw new NotFoundException({ code: 'FILE_NOT_FOUND' });
     const allowed = input.authorized && file.rows[0]!.processing_status === 'READY';
@@ -68,33 +71,29 @@ class FileRepository implements OnModuleDestroy {
     if (!allowed) throw new BadRequestException({ code: 'FILE_NOT_READY_OR_UNAUTHORIZED' });
     return { mode: 'S3_PRESIGNED_GET', url: await this.storage.createDownloadUrl(file.rows[0]!.private_object_key!), expiresInSeconds: Number(process.env.FILE_URL_TTL_SECONDS ?? 60), cacheControl: 'private, no-store' };
   }
-  async claimOutbox(limit: number) {
-    const result = await this.pool.query(`UPDATE outbox_events SET attempt_count=attempt_count+1,available_at=now()+interval '30 seconds'
-      WHERE id IN (SELECT id FROM outbox_events WHERE processed_at IS NULL AND available_at<=now() ORDER BY occurred_at FOR UPDATE SKIP LOCKED LIMIT $1)
-      RETURNING id,event_type AS "eventType",aggregate_id AS "aggregateId",payload,occurred_at AS "occurredAt"`, [Math.min(Math.max(limit, 1), 100)]);
-    return result.rows;
-  }
-  async completeOutbox(eventId: string, success: boolean) {
-    await this.pool.query(success ? `UPDATE outbox_events SET processed_at=now() WHERE id=$1` : `UPDATE outbox_events SET available_at=now()+interval '1 minute' WHERE id=$1 AND processed_at IS NULL`, [eventId]);
-    return { completed: success };
-  }
+  async claimOutbox(limit: number) { return new PgOutbox(this.pool).claim(limit); }
+  async renewOutbox(id: string, token: string) { return new PgOutbox(this.pool).renew(id,token); }
+  async completeOutbox(id: string, success: boolean, token?: string, errorCode?: string) { return new PgOutbox(this.pool).complete(id,success,token,errorCode); }
+  async eventingDiagnostics() { return { runtime:eventingStatus('publisher:files'),outbox:await new PgOutbox(this.pool).status() }; }
+
   async onModuleDestroy() { await this.pool.end(); }
 }
 
 @Controller('internal/v1')
 class FileController {
   constructor(@Inject(FileRepository) private readonly repository: FileRepository) {}
-  @Get('health') async health() { return { status: 'ok', service: 'files', database: await this.repository.health() }; }
+  @Get('health') async health() { return { status:eventingHealth('publisher:files'), service: 'files', database: await this.repository.health(), capabilities: { attachmentsEnabled: process.env.FILE_STORAGE_PROVIDER !== 'disabled' } }; }
+  @Get('events/status') eventsStatus() { return this.repository.eventingDiagnostics(); }
   @Post('uploads') upload(@Body() body: Parameters<FileRepository['createUpload']>[0]) { return this.repository.createUpload(body); }
   @Post('uploads/:uploadSessionId/complete') complete(@Param('uploadSessionId') id: string, @Body() body: { actorUserId: string; schoolId: string }, @Headers('x-correlation-id') correlationId?: string) { return this.repository.completeUpload(id, body.actorUserId, body.schoolId, correlationId); }
   @Post('files/:fileId/access') access(@Param('fileId') fileId: string, @Body() body: Parameters<FileRepository['access']>[1]) { return this.repository.access(fileId, body); }
   @Get('outbox') outbox(@Query('limit') limit = '25') { return this.repository.claimOutbox(Number(limit)); }
-  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean }) { return this.repository.completeOutbox(eventId, body.success !== false); }
+  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean; claimToken?: string }) { return this.repository.completeOutbox(eventId, body.success === true,body.claimToken); }
 }
 @Module({ controllers: [FileController], providers: [
-  { provide: 'PRIVATE_OBJECT_STORAGE', useFactory: () => new S3PrivateObjectStorage() },
+  { provide: 'PRIVATE_OBJECT_STORAGE', useFactory: () => createPrivateObjectStorage() },
   { provide: 'MALWARE_SCANNER', useFactory: () => createMalwareScanner() },
   { provide: FileRepository, useFactory: (storage: PrivateObjectStorage, scanner: MalwareScanner) => new FileRepository(storage, scanner), inject: ['PRIVATE_OBJECT_STORAGE', 'MALWARE_SCANNER'] },
 ] }) class FileModule {}
-async function bootstrap() { const app = await NestFactory.create(FileModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.FILE_PORT ?? 3105), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); await startOutboxPublisher('files', app.get(FileRepository)); }
+async function bootstrap() { if (process.env.NODE_ENV === 'production') validateManagedRuntime(process.env, 'files'); const app = await NestFactory.create(FileModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.FILE_PORT ?? 3105), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); const repository=app.get(FileRepository); bindEventingShutdown(repository,await startOutboxPublisher('files',repository)); registerApplicationShutdown(app); }
 void bootstrap();

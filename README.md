@@ -42,6 +42,8 @@ Identity owns token issuance and session validity. `AUTHORIZATION_PROVIDER` sele
 
 ## Run locally
 
+Production-mode configuration preparation, including the explicit mock-OTP trial exception, read-only startup checks, deliberate migrations and rollback instructions, is in [docs/production-runtime.md](docs/production-runtime.md). The existing live trial is unchanged until a separate deployment; mock OTP is never suitable for real school data.
+
 Requirements: Docker Desktop, Node.js 20+ and pnpm.
 
 ```text
@@ -69,6 +71,8 @@ Kafka is now required for event delivery and read projections. The local broker 
 
 ## Verification
 
+The [15 October release gate](docs/release-readiness-2026-10-15.md) records real isolated PostgreSQL/Kafka E2E tests, 100-distinct-user load results, cloud monitoring and signing checks. Deployment is on hold: the load latency target and other production gates have not passed. See the [operations runbook](docs/operations-readiness.md) for monitoring and rollback.
+
 ```text
 pnpm typecheck
 pnpm lint
@@ -82,6 +86,9 @@ pnpm audit --prod
 ```
 
 ## Sources and decisions
+
+The [step-3 security report](docs/security-hardening-step-3.md) records dependency fixes, authorization boundary tests, verification results and the remaining unsuppressed advisories.
+The [step-4 Kafka recovery runbook](docs/kafka-recovery-step-4.md) covers fenced publishing, durable consumer quarantine, owner-only replay APIs, the additive migration and outstanding live-stack acceptance tests.
 
 The [business overview and operating requirements](docs/nexqon-business-document.md) describe the roles, workflows, scope, trial limitations, pilot acceptance checks and decisions needed before a production launch.
 

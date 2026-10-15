@@ -7,7 +7,7 @@ import { BadRequestException, Body, ConflictException, Controller, ForbiddenExce
 import { NestFactory } from '@nestjs/core';
 import { Pool, type PoolClient } from 'pg';
 import { domainEventTypes } from '@schoolconnect/contracts';
-import { startOutboxPublisher } from '@schoolconnect/eventing';
+import { PgOutbox, eventingStatus, eventingHealth, bindEventingShutdown, registerApplicationShutdown, startOutboxPublisher } from '@schoolconnect/eventing';
 
 @Injectable()
 class SchoolRepository implements OnModuleDestroy {
@@ -230,16 +230,10 @@ class SchoolRepository implements OnModuleDestroy {
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
 
-  async claimOutbox(limit: number) {
-    const result = await this.pool.query(`UPDATE outbox_events SET attempt_count=attempt_count+1,available_at=now()+interval '30 seconds'
-      WHERE id IN (SELECT id FROM outbox_events WHERE processed_at IS NULL AND available_at<=now() ORDER BY occurred_at FOR UPDATE SKIP LOCKED LIMIT $1)
-      RETURNING id,event_type AS "eventType",aggregate_id AS "aggregateId",payload,occurred_at AS "occurredAt"`, [Math.min(Math.max(limit, 1), 100)]);
-    return result.rows;
-  }
-  async completeOutbox(eventId: string, success: boolean) {
-    await this.pool.query(success ? `UPDATE outbox_events SET processed_at=now() WHERE id=$1` : `UPDATE outbox_events SET available_at=now()+interval '1 minute' WHERE id=$1 AND processed_at IS NULL`, [eventId]);
-    return { completed: success };
-  }
+  async claimOutbox(limit: number) { return new PgOutbox(this.pool).claim(limit); }
+  async renewOutbox(id: string, token: string) { return new PgOutbox(this.pool).renew(id,token); }
+  async completeOutbox(id: string, success: boolean, token?: string, errorCode?: string) { return new PgOutbox(this.pool).complete(id,success,token,errorCode); }
+  async eventingDiagnostics() { return { runtime:eventingStatus('publisher:school'),outbox:await new PgOutbox(this.pool).status() }; }
 
   async feeRoster(schoolId: string, input: { admissionNumbers?: string[]; grade?: string }) {
     if (input.grade !== undefined && !/^(?:[1-9]|1[0-2])$/.test(input.grade) || input.admissionNumbers !== undefined && (!Array.isArray(input.admissionNumbers) || input.admissionNumbers.length > 200 || input.admissionNumbers.some((number) => typeof number !== 'string' || number.length > 120))) throw new BadRequestException({ code:'FEE_ROSTER_FILTER_INVALID' });
@@ -480,7 +474,8 @@ class SchoolRepository implements OnModuleDestroy {
 class SchoolController {
   constructor(@Inject(SchoolRepository) private readonly repository: SchoolRepository) {}
   @Post('schools/:schoolId/fee-roster') feeRoster(@Param('schoolId') schoolId: string, @Body() body: { admissionNumbers?: string[]; grade?: string }, @Headers('x-schoolconnect-school-id') scopedSchool?: string) { if (schoolId !== scopedSchool) throw new ForbiddenException({ code:'SCHOOL_SCOPE_REQUIRED' }); return this.repository.feeRoster(schoolId,body); }
-  @Get('health') async health() { return { status: 'ok', service: 'school', database: await this.repository.health() }; }
+  @Get('health') async health() { return { status:eventingHealth('publisher:school'), service: 'school', database: await this.repository.health() }; }
+  @Get('events/status') eventsStatus() { return this.repository.eventingDiagnostics(); }
   @Get('schools/:schoolId') school(@Param('schoolId') schoolId: string) { return this.repository.school(schoolId); }
   @Get('reports/platform-summary') platformSummary() { return this.repository.platformSummary(); }
   @Get('schools') schools() { return this.repository.schools(); }
@@ -509,11 +504,11 @@ class SchoolController {
   @Get('authorization/guardian') async guardian(@Query('schoolId') schoolId: string, @Query('guardianUserId') guardianUserId: string, @Query('studentId') studentId: string) { return { allowed: await this.repository.guardianAuthorized(schoolId, guardianUserId, studentId) }; }
   @Get('authorization/teacher') async teacher(@Query('schoolId') schoolId: string, @Query('membershipId') membershipId: string, @Query('classId') classId: string, @Query('capability') capability = 'ATTENDANCE') { return { allowed: await this.repository.teacherAuthorized(schoolId, membershipId, classId, capability) }; }
   @Get('outbox') outbox(@Query('limit') limit = '25') { return this.repository.claimOutbox(Number(limit)); }
-  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean }) { return this.repository.completeOutbox(eventId, body.success !== false); }
+  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean; claimToken?: string }) { return this.repository.completeOutbox(eventId, body.success === true,body.claimToken); }
 }
 
 @Module({ controllers: [SchoolController], providers: [SchoolRepository] })
 class SchoolModule {}
 
-async function bootstrap() { const app = await NestFactory.create(SchoolModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.SCHOOL_PORT ?? 3102), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); await startOutboxPublisher('school', app.get(SchoolRepository)); }
+async function bootstrap() { const app = await NestFactory.create(SchoolModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.SCHOOL_PORT ?? 3102), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); const repository=app.get(SchoolRepository); bindEventingShutdown(repository,await startOutboxPublisher('school',repository)); registerApplicationShutdown(app); }
 void bootstrap();

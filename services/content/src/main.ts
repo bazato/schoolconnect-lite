@@ -8,7 +8,7 @@ import { NestFactory } from '@nestjs/core';
 import { createHash, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { domainEventTypes } from '@schoolconnect/contracts';
-import { startOutboxPublisher } from '@schoolconnect/eventing';
+import { PgOutbox, eventingStatus, eventingHealth, bindEventingShutdown, registerApplicationShutdown, startOutboxPublisher } from '@schoolconnect/eventing';
 import { ScheduledPostRunner } from './scheduled-runner';
 
 type CreatePostRequest = {
@@ -441,17 +441,10 @@ class ContentRepository implements OnModuleDestroy {
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
 
-  async claimOutbox(limit: number) {
-    const result = await this.pool.query(
-      `UPDATE outbox_events SET attempt_count=attempt_count+1,available_at=now()+interval '30 seconds'
-       WHERE id IN (SELECT id FROM outbox_events WHERE processed_at IS NULL AND available_at<=now() ORDER BY occurred_at FOR UPDATE SKIP LOCKED LIMIT $1)
-       RETURNING id,event_type AS "eventType",aggregate_id AS "aggregateId",payload,occurred_at AS "occurredAt"`, [Math.min(Math.max(limit, 1), 100)]);
-    return result.rows;
-  }
-  async completeOutbox(eventId: string, success: boolean) {
-    await this.pool.query(success ? `UPDATE outbox_events SET processed_at=now() WHERE id=$1` : `UPDATE outbox_events SET available_at=now()+interval '1 minute' WHERE id=$1 AND processed_at IS NULL`, [eventId]);
-    return { completed: success };
-  }
+  async claimOutbox(limit: number) { return new PgOutbox(this.pool).claim(limit); }
+  async renewOutbox(id: string, token: string) { return new PgOutbox(this.pool).renew(id,token); }
+  async completeOutbox(id: string, success: boolean, token?: string, errorCode?: string) { return new PgOutbox(this.pool).complete(id,success,token,errorCode); }
+  async eventingDiagnostics() { return { runtime:eventingStatus('publisher:content'),outbox:await new PgOutbox(this.pool).status() }; }
 
   async onModuleDestroy() { await this.pool.end(); }
 }
@@ -459,7 +452,8 @@ class ContentRepository implements OnModuleDestroy {
 @Controller('internal/v1')
 class ContentController {
   constructor(@Inject(ContentRepository) private readonly repository: ContentRepository) {}
-  @Get('health') async health() { return { status: 'ok', service: 'content', database: await this.repository.health() }; }
+  @Get('health') async health() { return { status:eventingHealth('publisher:content'), service: 'content', database: await this.repository.health() }; }
+  @Get('events/status') eventsStatus() { return this.repository.eventingDiagnostics(); }
   @Get('timeline') timeline(@Query('schoolId') schoolId: string, @Query('guardianUserId') guardianUserId: string, @Query('studentId') studentId: string, @Query('before') before?: string, @Query('limit') limit = '50') { return this.repository.timeline(schoolId, guardianUserId, studentId, before, Number(limit)); }
   @Get('teacher-posts') teacherPosts(@Query('schoolId') schoolId: string, @Query('authorMembershipId') authorMembershipId: string, @Query('before') before?: string, @Query('limit') limit = '50') { return this.repository.teacherPosts(schoolId, authorMembershipId, before, Number(limit)); }
   @Get('posts/:postId') post(@Param('postId') postId: string, @Query('schoolId') schoolId: string, @Query('guardianUserId') guardianUserId?: string, @Query('studentId') studentId?: string) { return this.repository.findPost(schoolId, postId, guardianUserId, studentId); }
@@ -475,7 +469,7 @@ class ContentController {
   @Get('posts/:postId/report') report(@Param('postId') postId: string, @Query('schoolId') schoolId: string) { return this.repository.report(schoolId, postId); }
   @Post('scheduled/publish-due') publishDue(@Body() body: { limit?: number }) { return this.repository.publishDue(body.limit); }
   @Get('outbox') outbox(@Query('limit') limit = '25') { return this.repository.claimOutbox(Number(limit)); }
-  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean }) { return this.repository.completeOutbox(eventId, body.success !== false); }
+  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean; claimToken?: string }) { return this.repository.completeOutbox(eventId, body.success === true,body.claimToken); }
 }
 
 @Module({ controllers: [ContentController], providers: [ContentRepository,
@@ -483,5 +477,5 @@ class ContentController {
     process.env.CONTENT_DATABASE_URL ?? 'postgresql://schoolconnect:schoolconnect@localhost:5432/schoolconnect_content'), inject: [ContentRepository] },
 ] })
 class ContentModule {}
-async function bootstrap() { const app = await NestFactory.create(ContentModule); app.enableShutdownHooks(); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.CONTENT_PORT ?? 3103), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); await startOutboxPublisher('content', app.get(ContentRepository)); }
+async function bootstrap() { const app = await NestFactory.create(ContentModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.CONTENT_PORT ?? 3103), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); const repository=app.get(ContentRepository); bindEventingShutdown(repository,await startOutboxPublisher('content',repository)); registerApplicationShutdown(app); }
 void bootstrap();

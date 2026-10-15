@@ -7,11 +7,12 @@ import { BadRequestException, Body, ConflictException, Controller, Get, Headers,
 import { NestFactory } from '@nestjs/core';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
-import { domainEventTypes } from '@schoolconnect/contracts';
+import { domainEventTypes, validateManagedRuntime } from '@schoolconnect/contracts';
 import { AccessTokenValidationError, AuthorizationProvider, createAuthorizationProvider } from './authorization';
 import { parentInvitationStatus } from './provisioning';
-import { startOutboxPublisher } from '@schoolconnect/eventing';
+import { PgOutbox, eventingStatus, eventingHealth, bindEventingShutdown, registerApplicationShutdown, startOutboxPublisher } from '@schoolconnect/eventing';
 import { hashPasscode, matchesPasscode, validPasscode } from './passcode';
+import { developmentOtpCode } from './otp';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 type MembershipRole = 'PLATFORM_OWNER' | 'SCHOOL_ADMIN' | 'TEACHER' | 'PARENT';
@@ -20,12 +21,7 @@ const positiveInteger = (name: string, fallback: number, maximum: number) => {
   if (!Number.isInteger(value) || value < 1 || value > maximum) throw new Error(`${name}_INVALID`);
   return value;
 };
-const otpCode = () => {
-  const provider = process.env.OTP_PROVIDER ?? 'development';
-  if (provider !== 'development') throw new Error(`OTP_PROVIDER_UNAVAILABLE:${provider}`);
-  if (process.env.NODE_ENV === 'production') throw new Error('DEVELOPMENT_OTP_PROVIDER_FORBIDDEN_IN_PRODUCTION');
-  return process.env.DEVELOPMENT_OTP_CODE ?? '123456';
-};
+const otpCode = () => developmentOtpCode();
 
 @Injectable()
 export class IdentityRepository implements OnModuleDestroy {
@@ -516,17 +512,10 @@ export class IdentityRepository implements OnModuleDestroy {
     return result.rows;
   }
 
-  async claimOutbox(limit: number) {
-    const result = await this.pool.query(`UPDATE outbox_events SET attempt_count=attempt_count+1,available_at=now()+interval '30 seconds'
-      WHERE id IN (SELECT id FROM outbox_events WHERE processed_at IS NULL AND available_at<=now() ORDER BY occurred_at FOR UPDATE SKIP LOCKED LIMIT $1)
-      RETURNING id,event_type AS "eventType",aggregate_id AS "aggregateId",payload,occurred_at AS "occurredAt"`, [Math.min(Math.max(limit, 1), 100)]);
-    return result.rows;
-  }
-
-  async completeOutbox(eventId: string, success: boolean) {
-    await this.pool.query(success ? `UPDATE outbox_events SET processed_at=now() WHERE id=$1` : `UPDATE outbox_events SET available_at=now()+interval '1 minute' WHERE id=$1 AND processed_at IS NULL`, [eventId]);
-    return { completed: success };
-  }
+  async claimOutbox(limit: number) { return new PgOutbox(this.pool).claim(limit); }
+  async renewOutbox(id: string, token: string) { return new PgOutbox(this.pool).renew(id,token); }
+  async completeOutbox(id: string, success: boolean, token?: string, errorCode?: string) { return new PgOutbox(this.pool).complete(id,success,token,errorCode); }
+  async eventingDiagnostics() { return { runtime:eventingStatus('publisher:identity'),outbox:await new PgOutbox(this.pool).status() }; }
 
   async onModuleDestroy() { await this.pool.end(); }
 }
@@ -535,7 +524,8 @@ export class IdentityRepository implements OnModuleDestroy {
 class IdentityController {
   constructor(@Inject(IdentityRepository) private readonly repository: IdentityRepository) {}
 
-  @Get('health') async health() { return { status: 'ok', service: 'identity', database: await this.repository.health() }; }
+  @Get('health') async health() { return { status:eventingHealth('publisher:identity'), service: 'identity', database: await this.repository.health() }; }
+  @Get('events/status') eventsStatus() { return this.repository.eventingDiagnostics(); }
 
   @Post('otp/request')
   async request(@Body() body: { phoneE164?: string; invitationCode?: string; purpose?: 'ACTIVATE' | 'RESET' }) {
@@ -615,7 +605,7 @@ class IdentityController {
   @Get('reports/platform-memberships') platformMembershipSummary() { return this.repository.platformMembershipSummary(); }
   @Patch('members/:membershipId') updateMember(@Param('membershipId') membershipId: string, @Body() body: { schoolId: string | null; displayName?: string; phoneE164?: string; status?: 'ACTIVE' | 'REVOKED' }, @Headers('x-schoolconnect-user-id') actorUserId?: string, @Headers('x-correlation-id') correlationId?: string) { return this.repository.updateMember(membershipId, body.schoolId, body, actorUserId, correlationId); }
   @Get('outbox') outbox(@Query('limit') limit = '25') { return this.repository.claimOutbox(Number(limit)); }
-  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean }) { return this.repository.completeOutbox(eventId, body.success !== false); }
+  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean; claimToken?: string }) { return this.repository.completeOutbox(eventId, body.success === true,body.claimToken); }
 }
 
 @Module({
@@ -628,11 +618,14 @@ class IdentityController {
 class IdentityModule {}
 
 async function bootstrap() {
+  if (process.env.NODE_ENV === 'production') validateManagedRuntime(process.env, 'identity');
   const app = await NestFactory.create(IdentityModule);
   const internalToken = process.env.INTERNAL_SERVICE_TOKEN;
   if (process.env.NODE_ENV === 'production' && (!internalToken || internalToken.length < 32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED');
   if (internalToken) app.use((request: { headers: Record<string, string | string[] | undefined> }, response: { status: (code: number) => { json: (body: unknown) => void } }, next: () => void) => request.headers['x-internal-service-token'] === internalToken ? next() : response.status(401).json({ code: 'INTERNAL_AUTHENTICATION_REQUIRED' }));
   await app.listen(Number(process.env.IDENTITY_PORT ?? 3101), process.env.SERVICE_BIND_HOST ?? '127.0.0.1');
-  await startOutboxPublisher('identity', app.get(IdentityRepository));
+  const repository=app.get(IdentityRepository);
+  bindEventingShutdown(repository,await startOutboxPublisher('identity',repository));
+  registerApplicationShutdown(app);
 }
 if (process.env.IDENTITY_SKIP_BOOTSTRAP !== 'true') void bootstrap();

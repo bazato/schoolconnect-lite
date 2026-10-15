@@ -14,6 +14,8 @@ export const defaultRouteRules: RouteRule[] = [
   { methods: ['GET'], pattern: '^/api/v1/bff/admin/home$', roles: ['SCHOOL_ADMIN'] },
   { methods: ['GET','POST','PATCH'], pattern: '^/api/v1/admin/(schools(?:/[^/]+(?:/admins(?:/[^/]+(?:/reissue-invitation)?)?)?)?|platform-owners(?:/[^/]+(?:/reissue-invitation)?)?|reports/platform-summary)$', roles: ['PLATFORM_OWNER'] },
   { methods: ['GET'], pattern: '^/api/v1/admin/reports/audit$', roles: ['PLATFORM_OWNER','SCHOOL_ADMIN'] },
+  { methods: ['GET'], pattern: '^/api/v1/admin/operations/events$', roles: ['PLATFORM_OWNER'] },
+  { methods: ['POST'], pattern: '^/api/v1/admin/operations/events/[^/]+/[^/]+/retry$', roles: ['PLATFORM_OWNER'] },
   { methods: ['POST'], pattern: '^/api/v1/admin/fees/(import-preview|import-commit|search)$', roles: ['SCHOOL_ADMIN'] },
   { methods: ['GET','POST','PATCH'], pattern: '^/api/v1/admin/.+$', roles: ['SCHOOL_ADMIN'] },
   { methods: ['GET'], pattern: '^/api/v1/timeline/[^/]+$', roles: ['PARENT'] },
@@ -78,6 +80,7 @@ export class PolicyEngine {
       path = `/internal/v1/authorization/guardian?schoolId=${encodeURIComponent(principal.schoolId)}&guardianUserId=${encodeURIComponent(principal.userId)}&studentId=${encodeURIComponent(input.studentId)}`;
     } else return { allowed: false, reason: 'UNKNOWN_ACTION' };
     const relationship = await this.relationships(path);
-    return { allowed: relationship.allowed === true, reason: relationship.allowed ? 'RELATIONSHIP_ALLOWED' : 'RELATIONSHIP_DENIED' };
+    const allowed = relationship?.allowed === true;
+    return { allowed, reason: allowed ? 'RELATIONSHIP_ALLOWED' : 'RELATIONSHIP_DENIED' };
   }
 }

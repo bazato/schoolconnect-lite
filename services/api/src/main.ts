@@ -8,16 +8,18 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import helmet from 'helmet';
 import { requestContextMiddleware } from './request-context';
+import { configuredCorsOrigins, validateManagedRuntime } from '@schoolconnect/contracts';
+import { registerApplicationShutdown } from '@schoolconnect/eventing';
 
 async function bootstrap() {
+  if (process.env.NODE_ENV === 'production') validateManagedRuntime(process.env, 'api');
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser:false });
   app.useBodyParser('json',{ limit:'512kb' });
   app.use(requestContextMiddleware);
   app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: 'cross-origin' } }));
   app.setGlobalPrefix('api/v1');
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
-  const configuredOrigins = (process.env.CORS_ALLOWED_ORIGINS ?? 'http://localhost:8081,http://127.0.0.1:8081')
-    .split(',').map((origin) => origin.trim()).filter(Boolean);
+  const configuredOrigins = configuredCorsOrigins(process.env);
   app.enableCors({
     origin: (origin: string | undefined, callback: (error: Error | null, allow?: boolean) => void) => callback(null, !origin || configuredOrigins.includes(origin)),
     credentials: true,
@@ -35,6 +37,7 @@ async function bootstrap() {
     });
   }
   await app.listen(Number(process.env.PORT ?? 3000));
+  registerApplicationShutdown(app,true);
 }
 
 void bootstrap();

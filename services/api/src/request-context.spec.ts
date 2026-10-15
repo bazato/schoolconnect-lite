@@ -19,7 +19,11 @@ describe('request correlation', () => {
             const trace = currentRequestContext();
             expect(trace?.correlationId).toBe('school-trace-1');
             Object.assign(trace!, { schoolId: 'school-1', userId: 'teacher-1', membershipId: 'member-1', role: 'TEACHER' });
-            await new ServiceClient().request('school', '/internal/v1/health');
+            await new ServiceClient().request('school', '/internal/v1/health', {headers:{
+              'x-correlation-id':'forged-trace','x-schoolconnect-school-id':'other-school',
+              'x-schoolconnect-user-id':'attacker','x-schoolconnect-membership-id':'attacker-member',
+              'x-schoolconnect-role':'PLATFORM_OWNER',
+            }});
           })().then(resolve, reject);
         },
       );
@@ -28,6 +32,7 @@ describe('request correlation', () => {
     expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({
       'x-correlation-id': 'school-trace-1', 'x-schoolconnect-school-id': 'school-1',
       'x-schoolconnect-user-id': 'teacher-1', 'x-schoolconnect-membership-id': 'member-1',
+      'x-schoolconnect-role':'TEACHER',
     });
   });
 

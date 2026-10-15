@@ -3,17 +3,21 @@ import { config } from 'dotenv';
 import { resolve } from 'node:path';
 config({ path: resolve(__dirname, '../../../.env') });
 import 'reflect-metadata';
-import { Body, ConflictException, Controller, Get, Headers, Inject, Injectable, Module, OnModuleDestroy, Param, Post, Query } from '@nestjs/common';
+import { NotFoundException, ForbiddenException, Body, ConflictException, Controller, Get, Headers, Inject, Injectable, Module, OnModuleDestroy, Param, Post, Query } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { Pool } from 'pg';
 import { domainEventTypes } from '@schoolconnect/contracts';
-import { startEventConsumer, startOutboxPublisher } from '@schoolconnect/eventing';
+import { EventReplayError, PgOutbox, PgConsumerFailures, parseEventEnvelope, eventingStatus, eventingHealth, bindEventingShutdown, registerApplicationShutdown, startEventConsumer, startOutboxPublisher } from '@schoolconnect/eventing';
 import { applyNotificationEvent } from './event-consumer';
 
 @Injectable()
 class NotificationRepository implements OnModuleDestroy {
   private readonly pool = new Pool({ connectionString: process.env.NOTIFICATION_DATABASE_URL ?? 'postgresql://schoolconnect:schoolconnect@localhost:5432/schoolconnect_notifications', max: Number(process.env.NOTIFICATIONS_DB_POOL_MAX ?? 8), connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS ?? 3000), statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS ?? 5000) });
   async health() { const result = await this.pool.query<{ now: Date }>('SELECT now() AS now'); return result.rows[0]; }
+  readonly failures=new PgConsumerFailures(this.pool,'schoolconnect-notifications-v2');
+  async replayFailure(id: string, actorUserId: string) {
+    return this.failures.replay(id,actorUserId,(raw) => applyNotificationEvent(parseEventEnvelope(raw),(input,correlationId) => this.enqueue(input,correlationId)));
+  }
   async inbox(schoolId: string, recipientUserId: string, before?: string, limit = 50) {
     const result = await this.pool.query(
       `SELECT id, notification_type AS "notificationType", resource_type AS "resourceType", resource_id AS "resourceId", student_id AS "studentId", title, body, deep_link AS "deepLink", status, read_at AS "readAt", created_at AS "createdAt"
@@ -61,16 +65,11 @@ class NotificationRepository implements OnModuleDestroy {
       return result;
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
-  async claimOutbox(limit: number) {
-    const result = await this.pool.query(`UPDATE outbox_events SET attempt_count=attempt_count+1,available_at=now()+interval '30 seconds'
-      WHERE id IN (SELECT id FROM outbox_events WHERE processed_at IS NULL AND available_at<=now() ORDER BY occurred_at FOR UPDATE SKIP LOCKED LIMIT $1)
-      RETURNING id,event_type AS "eventType",aggregate_id AS "aggregateId",payload,occurred_at AS "occurredAt"`, [Math.min(Math.max(limit, 1), 100)]);
-    return result.rows;
-  }
-  async completeOutbox(eventId: string, success: boolean) {
-    await this.pool.query(success ? `UPDATE outbox_events SET processed_at=now() WHERE id=$1` : `UPDATE outbox_events SET available_at=now()+interval '1 minute' WHERE id=$1 AND processed_at IS NULL`, [eventId]);
-    return { completed: success };
-  }
+  async claimOutbox(limit: number) { return new PgOutbox(this.pool).claim(limit); }
+  async renewOutbox(id: string, token: string) { return new PgOutbox(this.pool).renew(id,token); }
+  async completeOutbox(id: string, success: boolean, token?: string, errorCode?: string) { return new PgOutbox(this.pool).complete(id,success,token,errorCode); }
+  async eventingDiagnostics() { return { runtime:eventingStatus('publisher:notifications','consumer:schoolconnect-notifications-v2'),outbox:await new PgOutbox(this.pool).status(),failures:await this.failures.list(),failureCounts:await this.failures.counts() }; }
+
   async resourceReport(schoolId: string, resourceType: string, resourceId: string) {
     const result = await this.pool.query(`SELECT COUNT(*)::int AS "inboxCount",COUNT(read_at)::int AS "readCount",
       COUNT(*) FILTER (WHERE status='DELIVERED')::int AS "deliveredCount",
@@ -88,15 +87,28 @@ class NotificationRepository implements OnModuleDestroy {
 @Controller('internal/v1')
 class NotificationController {
   constructor(@Inject(NotificationRepository) private readonly repository: NotificationRepository) {}
-  @Get('health') async health() { return { status: 'ok', service: 'notifications', database: await this.repository.health() }; }
+  @Get('health') async health() { return { status:eventingHealth('publisher:notifications','consumer:schoolconnect-notifications-v2'), service: 'notifications', database: await this.repository.health() }; }
+  @Get('events/status') eventsStatus() { return this.repository.eventingDiagnostics(); }
+  @Post('events/failures/:id/retry')
+  async replayFailure(@Param('id') id: string,@Headers('x-schoolconnect-user-id') actorUserId?: string) {
+    if (!actorUserId || !/^[0-9a-f-]{36}$/i.test(actorUserId)) throw new ForbiddenException({code:'EVENT_REPLAY_ACTOR_REQUIRED'});
+    try { return await this.repository.replayFailure(id,actorUserId); }
+    catch (error) {
+      if (error instanceof EventReplayError) {
+        if (error.message==='EVENT_FAILURE_NOT_FOUND') throw new NotFoundException({code:error.message});
+        throw new ConflictException({code:error.message});
+      }
+      throw error;
+    }
+  }
   @Get('notifications') inbox(@Query('schoolId') schoolId: string, @Query('recipientUserId') recipientUserId: string, @Query('before') before?: string, @Query('limit') limit = '50') { return this.repository.inbox(schoolId, recipientUserId, before, Number(limit)); }
   @Post('notifications') enqueue(@Body() body: Parameters<NotificationRepository['enqueue']>[0], @Headers('x-correlation-id') correlationId?: string) { return this.repository.enqueue(body, correlationId); }
   @Post('notifications/:id/read') read(@Param('id') id: string, @Body() body: { schoolId: string; recipientUserId: string }, @Headers('x-correlation-id') correlationId?: string) { return this.repository.read(id, body.schoolId, body.recipientUserId, correlationId); }
   @Get('outbox') outbox(@Query('limit') limit = '25') { return this.repository.claimOutbox(Number(limit)); }
-  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean }) { return this.repository.completeOutbox(eventId, body.success !== false); }
+  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean; claimToken?: string }) { return this.repository.completeOutbox(eventId, body.success === true,body.claimToken); }
   @Get('resources/:resourceType/:resourceId/report') report(@Param('resourceType') resourceType: string, @Param('resourceId') resourceId: string, @Query('schoolId') schoolId: string) { return this.repository.resourceReport(schoolId, resourceType, resourceId); }
   @Get('notifications/summary') summary(@Query('schoolId') schoolId: string, @Query('fromDate') fromDate: string, @Query('toDate') toDate: string) { return this.repository.summary(schoolId, fromDate, toDate); }
 }
 @Module({ controllers: [NotificationController], providers: [NotificationRepository] }) class NotificationModule {}
-async function bootstrap() { const app = await NestFactory.create(NotificationModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.NOTIFICATION_PORT ?? 3106), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); const repository = app.get(NotificationRepository); await startOutboxPublisher('notifications', repository); await startEventConsumer('schoolconnect-notifications-v2', (event) => applyNotificationEvent(event, (input, correlationId) => repository.enqueue(input, correlationId))); }
+async function bootstrap() { const app = await NestFactory.create(NotificationModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.NOTIFICATION_PORT ?? 3106), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); const repository = app.get(NotificationRepository); bindEventingShutdown(repository,await startOutboxPublisher('notifications',repository),await startEventConsumer('schoolconnect-notifications-v2', (event) => applyNotificationEvent(event, (input, correlationId) => repository.enqueue(input, correlationId)),{failureStore:repository.failures})); registerApplicationShutdown(app); }
 void bootstrap();

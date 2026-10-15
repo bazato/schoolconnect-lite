@@ -3,16 +3,20 @@ import { config } from 'dotenv';
 import { resolve } from 'node:path';
 config({ path: resolve(__dirname, '../../../.env') });
 import 'reflect-metadata';
-import { Body, Controller, Get, Inject, Injectable, Module, OnModuleDestroy, Post, Query } from '@nestjs/common';
+import { Param, Headers, NotFoundException, ForbiddenException, ConflictException, Body, Controller, Get, Inject, Injectable, Module, OnModuleDestroy, Post, Query } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { Pool } from 'pg';
-import { startEventConsumer } from '@schoolconnect/eventing';
+import { EventReplayError, PgConsumerFailures, parseEventEnvelope, eventingStatus, eventingHealth, bindEventingShutdown, registerApplicationShutdown, startEventConsumer } from '@schoolconnect/eventing';
 import { auditFromEvent } from './event-consumer';
 
 @Injectable()
 class AuditRepository implements OnModuleDestroy {
   private readonly pool = new Pool({ connectionString: process.env.AUDIT_DATABASE_URL ?? 'postgresql://schoolconnect:schoolconnect@localhost:5432/schoolconnect_audit', max: Number(process.env.AUDIT_DB_POOL_MAX ?? 6), connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS ?? 3000), statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS ?? 5000) });
   async health() { const result = await this.pool.query<{ now: Date }>('SELECT now() AS now'); return result.rows[0]; }
+  readonly failures=new PgConsumerFailures(this.pool,'schoolconnect-audit-v2');
+  async consume(raw: string) { const audit=auditFromEvent(parseEventEnvelope(raw)); if (audit) await this.append(audit); }
+  async replayFailure(id: string, actorUserId: string) { return this.failures.replay(id,actorUserId,(raw) => this.consume(raw)); }
+  async eventingDiagnostics() { return { runtime:eventingStatus('consumer:schoolconnect-audit-v2'),failures:await this.failures.list(),failureCounts:await this.failures.counts() }; }
   async append(input: { sourceEventId?: string; schoolId: string; actorUserId?: string; actorMembershipId?: string; action: string; resourceType: string; resourceId: string; outcome: 'SUCCEEDED' | 'DENIED' | 'FAILED'; correlationId: string; metadata?: Record<string, unknown>; occurredAt: string }) {
     const result = await this.pool.query(
       `INSERT INTO audit_events (source_event_id, school_id, actor_user_id, actor_membership_id, action, resource_type, resource_id, outcome, correlation_id, metadata, occurred_at)
@@ -35,10 +39,23 @@ class AuditRepository implements OnModuleDestroy {
 @Controller('internal/v1')
 class AuditController {
   constructor(@Inject(AuditRepository) private readonly repository: AuditRepository) {}
-  @Get('health') async health() { return { status: 'ok', service: 'audit', database: await this.repository.health() }; }
+  @Get('health') async health() { return { status:eventingHealth('consumer:schoolconnect-audit-v2'), service: 'audit', database: await this.repository.health() }; }
+  @Get('events/status') eventsStatus() { return this.repository.eventingDiagnostics(); }
+  @Post('events/failures/:id/retry')
+  async replayFailure(@Param('id') id: string,@Headers('x-schoolconnect-user-id') actorUserId?: string) {
+    if (!actorUserId || !/^[0-9a-f-]{36}$/i.test(actorUserId)) throw new ForbiddenException({code:'EVENT_REPLAY_ACTOR_REQUIRED'});
+    try { return await this.repository.replayFailure(id,actorUserId); }
+    catch (error) {
+      if (error instanceof EventReplayError) {
+        if (error.message==='EVENT_FAILURE_NOT_FOUND') throw new NotFoundException({code:error.message});
+        throw new ConflictException({code:error.message});
+      }
+      throw error;
+    }
+  }
   @Post('audit-events') append(@Body() body: Parameters<AuditRepository['append']>[0]) { return this.repository.append(body); }
   @Get('audit-events') list(@Query('schoolId') schoolId?: string, @Query('resourceType') resourceType?: string, @Query('resourceId') resourceId?: string) { return this.repository.list(schoolId ?? null, resourceType, resourceId); }
 }
 @Module({ controllers: [AuditController], providers: [AuditRepository] }) class AuditModule {}
-async function bootstrap() { const app = await NestFactory.create(AuditModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.AUDIT_PORT ?? 3107), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); const repository = app.get(AuditRepository); await startEventConsumer('schoolconnect-audit-v2', async (event) => { const audit = auditFromEvent(event); if (audit) await repository.append(audit); }); }
+async function bootstrap() { const app = await NestFactory.create(AuditModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.AUDIT_PORT ?? 3107), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); const repository = app.get(AuditRepository); bindEventingShutdown(repository,await startEventConsumer('schoolconnect-audit-v2', async (event) => { const audit=auditFromEvent(event); if (audit) await repository.append(audit); },{failureStore:repository.failures})); registerApplicationShutdown(app); }
 void bootstrap();

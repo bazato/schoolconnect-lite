@@ -9,7 +9,7 @@ export const DEMO_DATABASES = [
   'schoolconnect_notifications', 'schoolconnect_audit', 'schoolconnect_read', 'schoolconnect_fees',
 ];
 
-const SERVICE_DATABASES = {
+export const SERVICE_DATABASES = {
   IDENTITY_DATABASE_URL: 'schoolconnect_identity',
   SCHOOL_DATABASE_URL: 'schoolconnect_school',
   CONTENT_DATABASE_URL: 'schoolconnect_content',
@@ -21,13 +21,13 @@ const SERVICE_DATABASES = {
   FEES_DATABASE_URL: 'schoolconnect_fees',
 };
 
-const MIGRATIONS = [
+export const MIGRATIONS = [
   '010-identity.sql', '020-school.sql', '030-content.sql',
   '040-attendance.sql', '050-files.sql', '060-notifications.sql',
   '070-audit.sql', '080-admin-provisioning.sql',
   '095-security-and-scale.sql', '096-product-workflows.sql',
   '097-publishing-permissions.sql',
-  '098-observability.sql', '099-notification-lifecycle.sql', '100-read-model.sql', '101-read-model-backfill.sql', '102-fees.sql', '103-passcode-auth.sql',
+  '098-observability.sql', '099-notification-lifecycle.sql', '100-read-model.sql', '101-read-model-backfill.sql', '102-fees.sql', '103-passcode-auth.sql', '104-event-recovery.sql',
 ];
 
 export function databaseUrl(baseUrl, databaseName) {
@@ -66,7 +66,7 @@ export function parseMigrationSegments(source, fileName) {
   return segments;
 }
 
-async function applySegment(Client, baseUrl, segment) {
+export async function applySegment(Client, baseUrl, segment) {
   const client = new Client({ connectionString: databaseUrl(baseUrl, segment.databaseName), connectionTimeoutMillis: 10_000 });
   await client.connect();
   try {

@@ -1,4 +1,5 @@
 export * from './fees';
+export * from './runtime-config';
 export type Role = 'PLATFORM_OWNER' | 'SCHOOL_ADMIN' | 'TEACHER' | 'PARENT';
 
 export type RequestPrincipal = {
