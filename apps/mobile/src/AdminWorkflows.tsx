@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as Crypto from 'expo-crypto';
 import { colors } from './theme';
@@ -9,8 +9,8 @@ import type { QueuedMutation } from './offline';
 function Button({ label, onPress, disabled = false }: { label: string; onPress: () => void; disabled?: boolean }) {
   return <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress} style={[style.button, disabled && style.disabled]}><Text style={style.buttonText}>{label}</Text></Pressable>;
 }
-function Field({ label, value, setValue, multiline = false }: { label: string; value: string; setValue: (value: string) => void; multiline?: boolean }) {
-  return <View style={style.field}><Text style={style.label}>{label}</Text><TextInput accessibilityLabel={label} value={value} onChangeText={setValue} multiline={multiline} autoCapitalize="none" style={[style.input, multiline && style.largeInput]} /></View>;
+function Field({ label, value, setValue, multiline = false,disabled=false }: { label: string; value: string; setValue: (value: string) => void; multiline?: boolean;disabled?:boolean }) {
+  return <View style={style.field}><Text style={style.label}>{label}</Text><TextInput accessibilityLabel={label} editable={!disabled} value={value} onChangeText={setValue} multiline={multiline} autoCapitalize="none" style={[style.input, multiline && style.largeInput]} /></View>;
 }
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return <View style={style.section}><Text style={style.title}>{title}</Text>{children}</View>;
@@ -22,6 +22,22 @@ function Toggle({ label, value, setValue }: { label: string; value: boolean; set
   return <View style={style.toggle}><Text style={style.rowTitle}>{label}</Text><Switch value={value} onValueChange={setValue} /></View>;
 }
 const failureText = (error: unknown) => error instanceof Error ? error.message : 'Operation failed';
+const activationDetail = (member: ApiMember) => member.activation ? ` · Activation: ${member.activation.code ?? (member.activation.requiresActivation ? 'Reissue to display code' : 'Use existing passcode')} (${member.activation.state.toLowerCase()})` : '';
+
+export function SchoolAnnouncementManager({session}:{session:MobileSession}) {
+  const [title,setTitle]=useState(''),[body,setBody]=useState(''),[busy,setBusy]=useState(false),[message,setMessage]=useState('');
+  const [items,setItems]=useState<Awaited<ReturnType<typeof mobileApi.schoolAnnouncements>>>([]);const key=useRef(Crypto.randomUUID());
+  useEffect(()=>{let active=true;void mobileApi.schoolAnnouncements(session).then((rows)=>{if(active)setItems(rows);}).catch((error)=>{if(active)setMessage(failureText(error));});return()=>{active=false;};},[session]);
+  const publish=async()=>{setBusy(true);setMessage('');try{await mobileApi.announceSchool(session,{title,body,idempotencyKey:key.current});setTitle('');setBody('');key.current=Crypto.randomUUID();setMessage('Published. Delivery to parents and teachers is processing.');setItems(await mobileApi.schoolAnnouncements(session));}catch(error){setMessage(failureText(error));}finally{setBusy(false);}};
+  return <Section title="School announcements"><Text style={style.detail}>All classes · Parents and teachers in your school. Teachers read these notices but cannot edit them.</Text>
+    <Field label="Announcement title" disabled={busy} value={title} setValue={(value)=>{setTitle(value.slice(0,150));key.current=Crypto.randomUUID();}}/>
+    <Field label="Announcement message" disabled={busy} value={body} multiline setValue={(value)=>{setBody(value.slice(0,20000));key.current=Crypto.randomUUID();}}/>
+    <Button label={busy?'Publishing…':'Publish to all classes'} disabled={busy || !title.trim() || !body.trim()} onPress={()=>Alert.alert('Publish school announcement?','Notify parents in every active class and all active teachers in this school.',[{text:'Cancel',style:'cancel'},{text:'Publish',onPress:()=>{void publish();}}])}/>
+    {message ? <Text accessibilityRole="alert" style={style.message}>{message}</Text>:null}
+    {items.filter((item)=>item.status!=='ARCHIVED').slice(0,10).map((item)=><Row key={item.id} title={item.title} detail={`${item.status} · ${item.recipientCount} parent-child deliveries · ${item.teacherCount} teachers`}><Text style={style.detail}>{item.body}</Text></Row>)}
+    <Text style={style.detail}>Recent notices shown here. Use the web Announcements page to edit or archive your published notices.</Text>
+  </Section>;
+}
 
 export function OwnerOperations({ session }: { session: MobileSession }) {
   const [schools, setSchools] = useState<ApiSchool[]>([]);
@@ -58,12 +74,12 @@ export function OwnerOperations({ session }: { session: MobileSession }) {
       {schoolId ? <><Field label="School name" value={schoolName} setValue={setSchoolName} /><Field label="Timezone" value={schoolTimezone} setValue={setSchoolTimezone} />
         <Button label="Save school details" disabled={busy} onPress={() => { void run(() => mobileApi.updateSchool(session, schoolId, { displayName: schoolName, timezone: schoolTimezone }), 'School updated'); }} />
         <View style={style.actions}><Button label="Suspend" disabled={busy} onPress={() => { void run(() => mobileApi.updateSchool(session, schoolId, { status: 'SUSPENDED' }), 'School suspended'); }} /><Button label="Reactivate" disabled={busy} onPress={() => { void run(() => mobileApi.updateSchool(session, schoolId, { status: 'ACTIVE' }), 'School active'); }} /></View>
-        <Text style={style.subtitle}>School administrators</Text>{admins.map((admin) => <Row key={admin.membershipId} title={admin.displayName} detail={`${admin.phoneE164} · ${admin.status}`}><Button label="Edit" onPress={() => { setEditing(admin); setAccountName(admin.displayName); setAccountPhone(admin.phoneE164); }} /><Button label="New invite" disabled={busy} onPress={() => { void run(async () => { const invite = await mobileApi.reissueSchoolAdmin(session, schoolId, admin.membershipId); return `Invitation: ${invite.invitationCode}`; }, 'Invitation reissued'); }} /></Row>)}
+        <Text style={style.subtitle}>School administrators</Text>{admins.map((admin) => <Row key={admin.membershipId} title={admin.displayName} detail={`${admin.phoneE164} · ${admin.status}${activationDetail(admin)}`}><Button label="Edit" onPress={() => { setEditing(admin); setAccountName(admin.displayName); setAccountPhone(admin.phoneE164); }} /><Button label="New invite" disabled={busy} onPress={() => { void run(async () => { const invite = await mobileApi.reissueSchoolAdmin(session, schoolId, admin.membershipId); return `Invitation: ${invite.invitationCode}`; }, 'Invitation reissued'); }} /></Row>)}
         <Text style={style.subtitle}>Add school administrator</Text><Field label="Administrator name" value={accountName} setValue={setAccountName} /><Field label="Administrator mobile" value={accountPhone} setValue={setAccountPhone} /><Button label="Add administrator" disabled={busy} onPress={() => { void run(async () => { const account = await mobileApi.createSchoolAdmin(session, schoolId, { displayName: accountName, phoneE164: accountPhone }); return `Invitation: ${account.invitationCode}`; }, 'Administrator added'); }} />
       </> : null}
     </Section>
     <Section title="Platform owners">
-      {owners.map((owner) => <Row key={owner.membershipId} title={owner.displayName} detail={`${owner.phoneE164} · ${owner.status}`}><Button label="Edit" onPress={() => { setEditing(owner); setAccountName(owner.displayName); setAccountPhone(owner.phoneE164); }} /><Button label="New invite" disabled={busy} onPress={() => { void run(async () => { const invite = await mobileApi.reissuePlatformOwner(session, owner.membershipId); return `Invitation: ${invite.invitationCode}`; }, 'Invitation reissued'); }} /></Row>)}
+      {owners.map((owner) => <Row key={owner.membershipId} title={owner.displayName} detail={`${owner.phoneE164} · ${owner.status}${activationDetail(owner)}`}><Button label="Edit" onPress={() => { setEditing(owner); setAccountName(owner.displayName); setAccountPhone(owner.phoneE164); }} /><Button label="New invite" disabled={busy} onPress={() => { void run(async () => { const invite = await mobileApi.reissuePlatformOwner(session, owner.membershipId); return `Invitation: ${invite.invitationCode}`; }, 'Invitation reissued'); }} /></Row>)}
       <Field label="New owner name" value={accountName} setValue={setAccountName} /><Field label="New owner mobile" value={accountPhone} setValue={setAccountPhone} />
       <Button label="Add platform owner" disabled={busy} onPress={() => { void run(async () => { const account = await mobileApi.createPlatformOwner(session, { displayName: accountName, phoneE164: accountPhone }); return `Invitation: ${account.invitationCode}`; }, 'Owner added'); }} />
     </Section>
@@ -142,8 +158,9 @@ export function SchoolOperations({ session, classes, onClassesChanged }: { sessi
   const chooseStudent = (student: ApiStudent) => { setSelectedStudent(student); setName(student.displayName); setClassId(student.classId); };
   const pickCsv = async () => { const file = await DocumentPicker.getDocumentAsync({ type: 'text/csv', copyToCacheDirectory: true }); if (!file.canceled) setCsv(await fetch(file.assets[0]!.uri).then((response) => response.text())); };
   return <>
+    <SchoolAnnouncementManager session={session}/>
     <Section title="Manage teachers and parents">
-      {[...teachers, ...parents].map((member) => <Row key={member.membershipId} title={member.displayName} detail={`${member.role} · ${member.phoneE164} · ${member.status}`}><Button label="Manage" onPress={() => chooseMember(member)} /><Button label="Invite" disabled={busy} onPress={() => { void run(async () => { const invite = await mobileApi.reissueInvitation(session, member.membershipId); return `Invitation: ${invite.invitationCode}`; }, 'Invitation reissued'); }} /></Row>)}
+      {[...teachers, ...parents].map((member) => <Row key={member.membershipId} title={member.displayName} detail={`${member.role} · ${member.phoneE164} · ${member.status}${activationDetail(member)}`}><Button label="Manage" onPress={() => chooseMember(member)} /><Button label="Invite" disabled={busy} onPress={() => { void run(async () => { const invite = await mobileApi.reissueInvitation(session, member.membershipId); return `Invitation: ${invite.invitationCode}`; }, 'Invitation reissued'); }} /></Row>)}
       {selectedMember ? <><Text style={style.subtitle}>Editing {selectedMember.displayName}</Text><Field label="Name" value={name} setValue={setName} /><Field label="Mobile" value={phone} setValue={setPhone} /><Button label="Save account" disabled={busy} onPress={() => { void run(() => mobileApi.updateMember(session, selectedMember.membershipId, { displayName: name, phoneE164: phone }), 'Account updated'); }} /><Button label={selectedMember.status === 'ACTIVE' ? 'Deactivate' : 'Reactivate'} disabled={busy} onPress={() => { void run(() => mobileApi.updateMember(session, selectedMember.membershipId, { status: selectedMember.status === 'ACTIVE' ? 'REVOKED' : 'ACTIVE' }), 'Account status updated'); }} />
         {selectedMember.role === 'TEACHER' ? <><Text style={style.subtitle}>Assignments</Text>{assignments.map((assignment) => <Row key={assignment.assignmentId} title={`${assignment.className} · ${assignment.subjectName}`} detail={assignment.status}><Button label="Edit assignment" onPress={() => { setSelectedAssignment(assignment); setClassId(assignment.classId); }} /></Row>)}</> : null}
       </> : null}

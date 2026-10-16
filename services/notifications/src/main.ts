@@ -11,7 +11,7 @@ import { EventReplayError, PgOutbox, PgConsumerFailures, parseEventEnvelope, eve
 import { applyNotificationEvent } from './event-consumer';
 
 @Injectable()
-class NotificationRepository implements OnModuleDestroy {
+export class NotificationRepository implements OnModuleDestroy {
   private readonly pool = new Pool({ connectionString: process.env.NOTIFICATION_DATABASE_URL ?? 'postgresql://schoolconnect:schoolconnect@localhost:5432/schoolconnect_notifications', max: Number(process.env.NOTIFICATIONS_DB_POOL_MAX ?? 8), connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS ?? 3000), statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS ?? 5000) });
   async health() { const result = await this.pool.query<{ now: Date }>('SELECT now() AS now'); return result.rows[0]; }
   readonly failures=new PgConsumerFailures(this.pool,'schoolconnect-notifications-v2');
@@ -111,4 +111,4 @@ class NotificationController {
 }
 @Module({ controllers: [NotificationController], providers: [NotificationRepository] }) class NotificationModule {}
 async function bootstrap() { const app = await NestFactory.create(NotificationModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.NOTIFICATION_PORT ?? 3106), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); const repository = app.get(NotificationRepository); bindEventingShutdown(repository,await startOutboxPublisher('notifications',repository),await startEventConsumer('schoolconnect-notifications-v2', (event) => applyNotificationEvent(event, (input, correlationId) => repository.enqueue(input, correlationId)),{failureStore:repository.failures})); registerApplicationShutdown(app); }
-void bootstrap();
+if(process.env.NOTIFICATION_SKIP_BOOTSTRAP!=='true') void bootstrap();

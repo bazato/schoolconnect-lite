@@ -70,6 +70,22 @@ describe('resource policy', () => {
 
 describe('route policy', () => {
   const routes = new RoutePolicy();
+  it('permits owner CRUD only in an explicitly selected school and keeps school admins scoped',()=>{
+    const school='123e4567-e89b-42d3-a456-426614174000';
+    for(const method of ['GET','POST','PATCH','DELETE']) {
+      expect(routes.decide(method,'/api/v1/admin/teachers','PLATFORM_OWNER',school,null)).toMatchObject({allowed:true,schoolId:school});
+      expect(routes.decide(method,'/api/v1/admin/teachers','PLATFORM_OWNER').allowed).toBe(false);
+      expect(routes.decide(method,'/api/v1/admin/teachers','SCHOOL_ADMIN','other',school).allowed).toBe(false);
+      for(const role of ['TEACHER','PARENT'] as const) expect(routes.decide(method,'/api/v1/admin/teachers',role,school,school).allowed).toBe(false);
+    }
+    expect(routes.decide('GET','/api/v1/admin/teachers','PLATFORM_OWNER','not-a-school',null).allowed).toBe(false);
+    expect(routes.decide('DELETE',`/api/v1/admin/schools/${school}`,'SCHOOL_ADMIN').allowed).toBe(false);
+    expect(routes.decide('DELETE',`/api/v1/admin/schools/${school}`,'PLATFORM_OWNER').allowed).toBe(true);
+  });
+  it('does not grant school selection through a custom policy unless explicitly configured',()=>{
+    const custom=new RoutePolicy('[{"methods":["GET"],"pattern":"^/api/v1/admin/teachers$","roles":["PLATFORM_OWNER"]}]');
+    expect(custom.decide('GET','/api/v1/admin/teachers','PLATFORM_OWNER','123e4567-e89b-42d3-a456-426614174000',null).allowed).toBe(false);
+  });
   it('keeps event recovery operations platform-owner-only', () => {
     for (const [method,path] of [['GET','/api/v1/admin/operations/events'],['POST','/api/v1/admin/operations/events/read/failure-1/retry']]) {
       expect(routes.decide(method!,path!,'PLATFORM_OWNER').allowed).toBe(true);

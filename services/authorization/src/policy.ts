@@ -1,7 +1,7 @@
 export type Principal = { userId: string; membershipId: string; schoolId: string | null; role: 'PLATFORM_OWNER' | 'SCHOOL_ADMIN' | 'TEACHER' | 'PARENT' };
 export type ResourceDecision = { action: 'TEACHER_CLASS' | 'GUARDIAN_CHILD'; principal: Principal; classId?: string; studentId?: string; capability?: 'RESULTS' | 'ANNOUNCEMENTS' | 'ATTENDANCE' };
-export type RelationshipClient = (path: string) => Promise<{ allowed: boolean }>;
-export type RouteRule = { methods: string[]; pattern: string; roles: Principal['role'][] };
+export type RelationshipClient = (path: string) => Promise<{ allowed: boolean; guardianUserIds?:string[] }>;
+export type RouteRule = { methods: string[]; pattern: string; roles: Principal['role'][]; selectableSchoolRoles?: Principal['role'][] };
 
 const allRoles: Principal['role'][] = ['PLATFORM_OWNER','SCHOOL_ADMIN','TEACHER','PARENT'];
 export const defaultRouteRules: RouteRule[] = [
@@ -12,12 +12,12 @@ export const defaultRouteRules: RouteRule[] = [
   { methods: ['GET'], pattern: '^/api/v1/bff/parent/home$', roles: ['PARENT'] },
   { methods: ['GET'], pattern: '^/api/v1/bff/teacher/home$', roles: ['TEACHER'] },
   { methods: ['GET'], pattern: '^/api/v1/bff/admin/home$', roles: ['SCHOOL_ADMIN'] },
-  { methods: ['GET','POST','PATCH'], pattern: '^/api/v1/admin/(schools(?:/[^/]+(?:/admins(?:/[^/]+(?:/reissue-invitation)?)?)?)?|platform-owners(?:/[^/]+(?:/reissue-invitation)?)?|reports/platform-summary)$', roles: ['PLATFORM_OWNER'] },
-  { methods: ['GET'], pattern: '^/api/v1/admin/reports/audit$', roles: ['PLATFORM_OWNER','SCHOOL_ADMIN'] },
+  { methods: ['GET','POST','PATCH','DELETE'], pattern: '^/api/v1/admin/(schools(?:/[^/]+(?:/admins(?:/[^/]+(?:/reissue-invitation)?)?)?)?|platform-owners(?:/[^/]+(?:/reissue-invitation)?)?|reports/platform-summary)$', roles: ['PLATFORM_OWNER'] },
+  { methods: ['GET'], pattern: '^/api/v1/admin/reports/audit$', roles: ['PLATFORM_OWNER','SCHOOL_ADMIN'], selectableSchoolRoles:['PLATFORM_OWNER'] },
   { methods: ['GET'], pattern: '^/api/v1/admin/operations/events$', roles: ['PLATFORM_OWNER'] },
   { methods: ['POST'], pattern: '^/api/v1/admin/operations/events/[^/]+/[^/]+/retry$', roles: ['PLATFORM_OWNER'] },
-  { methods: ['POST'], pattern: '^/api/v1/admin/fees/(import-preview|import-commit|search)$', roles: ['SCHOOL_ADMIN'] },
-  { methods: ['GET','POST','PATCH'], pattern: '^/api/v1/admin/.+$', roles: ['SCHOOL_ADMIN'] },
+  { methods: ['POST'], pattern: '^/api/v1/admin/fees/(import-preview|import-commit|search)$', roles: ['PLATFORM_OWNER','SCHOOL_ADMIN'], selectableSchoolRoles: ['PLATFORM_OWNER'] },
+  { methods: ['GET','POST','PATCH','DELETE'], pattern: '^/api/v1/admin/.+$', roles: ['PLATFORM_OWNER','SCHOOL_ADMIN'], selectableSchoolRoles: ['PLATFORM_OWNER'] },
   { methods: ['GET'], pattern: '^/api/v1/timeline/[^/]+$', roles: ['PARENT'] },
   { methods: ['GET'], pattern: '^/api/v1/teacher-posts$', roles: ['TEACHER'] },
   { methods: ['GET'], pattern: '^/api/v1/posts/[^/]+$', roles: ['PARENT','TEACHER','SCHOOL_ADMIN'] },
@@ -45,13 +45,20 @@ export class RoutePolicy {
     this.rules = parsed.map((rule: RouteRule) => {
       if (!Array.isArray(rule.methods) || rule.methods.some((method) => !['GET','POST','PATCH','DELETE'].includes(method)) ||
         !Array.isArray(rule.roles) || rule.roles.some((role) => !allRoles.includes(role)) || typeof rule.pattern !== 'string' ||
-        !rule.pattern.startsWith('^') || !rule.pattern.endsWith('$') || rule.pattern.length > 500) throw new Error('AUTHORIZATION_ROUTE_RULES_INVALID');
+        !rule.pattern.startsWith('^') || !rule.pattern.endsWith('$') || rule.pattern.length > 500 ||
+        rule.selectableSchoolRoles !== undefined && (!Array.isArray(rule.selectableSchoolRoles) || rule.selectableSchoolRoles.some((role) => !rule.roles.includes(role)))) throw new Error('AUTHORIZATION_ROUTE_RULES_INVALID');
       return { ...rule, matcher: new RegExp(rule.pattern) };
     });
   }
-  decide(method: string, path: string, role: Principal['role']) {
+  decide(method: string, path: string, role: Principal['role'], selectedSchoolId?: string, membershipSchoolId?: string | null) {
     if (!['GET','POST','PATCH','DELETE'].includes(method) || !path.startsWith('/api/v1/') || !allRoles.includes(role)) return { allowed: false, reason: 'ROUTE_INVALID' };
     const rule = this.rules.find((candidate) => candidate.methods.includes(method) && candidate.matcher.test(path));
+    if (rule?.selectableSchoolRoles?.includes(role) && !selectedSchoolId && !membershipSchoolId && path!=='/api/v1/admin/reports/audit') return {allowed:false,reason:'SCHOOL_CONTEXT_REQUIRED'};
+    if (selectedSchoolId && rule?.selectableSchoolRoles?.includes(role)) {
+      const valid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(selectedSchoolId);
+      return { allowed: valid && rule.roles.includes(role), reason: valid ? 'SELECTED_SCHOOL_POLICY' : 'SCHOOL_CONTEXT_INVALID', schoolId: valid ? selectedSchoolId : undefined };
+    }
+    if (selectedSchoolId && membershipSchoolId !== selectedSchoolId) return { allowed:false,reason:'SCHOOL_SCOPE_DENIED' };
     return { allowed: Boolean(rule?.roles.includes(role)), reason: rule ? 'ROUTE_POLICY' : 'ROUTE_UNCONFIGURED' };
   }
 }
@@ -69,7 +76,7 @@ export class PolicyEngine {
     this.roleRules = candidate as Record<ResourceDecision['action'], string[]>;
   }
 
-  async decide(input: ResourceDecision): Promise<{ allowed: boolean; reason: string }> {
+  async decide(input: ResourceDecision): Promise<{ allowed: boolean; reason: string; guardianUserIds?:string[] }> {
     const { principal } = input;
     if (!principal?.userId || !principal.membershipId || !principal.schoolId || !this.roleRules[input.action]?.includes(principal.role)) return { allowed: false, reason: 'ROLE_OR_SCHOOL_DENIED' };
     let path: string;
@@ -82,6 +89,7 @@ export class PolicyEngine {
     } else return { allowed: false, reason: 'UNKNOWN_ACTION' };
     const relationship = await this.relationships(path);
     const allowed = relationship?.allowed === true;
-    return { allowed, reason: allowed ? 'RELATIONSHIP_ALLOWED' : 'RELATIONSHIP_DENIED' };
+    return { allowed, reason: allowed ? 'RELATIONSHIP_ALLOWED' : 'RELATIONSHIP_DENIED',
+      ...(allowed && input.action==='GUARDIAN_CHILD' && relationship.guardianUserIds ? {guardianUserIds:relationship.guardianUserIds} : {}) };
   }
 }

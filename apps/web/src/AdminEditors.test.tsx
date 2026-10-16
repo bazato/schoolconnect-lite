@@ -23,15 +23,16 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
 
 describe('school administration editors', () => {
-  it('saves class edits by the stable class identifier and retains the academic year', async () => {
+  it('saves editable class fields by stable ID without asking for a class code', async () => {
     api.mockResolvedValue({ ...classes[0], displayName: 'Renamed class' });
     await act(async () => root.render(<ClassEditor item={classes[0]!} request={request} onSaved={saved} />));
     await click('Edit');
     const input = host.querySelector<HTMLInputElement>('input[name="displayName"]')!; input.value = 'Renamed class';
-    const academicYear = [...host.querySelectorAll('input')].find((i) => i.value === '2026-2027'); expect(academicYear?.readOnly).toBe(true);
+    const academicYear = host.querySelector<HTMLInputElement>('input[name="academicYear"]')!; expect(academicYear.readOnly).toBe(false); academicYear.value='2027-2028';
+    expect(host.querySelector('input[name="classCode"]')).toBeNull();
     await submit(host.querySelector('form')!);
     expect(api.mock.calls[0]?.[0]).toBe('/admin/classes/class-a');
-    expect(JSON.parse(api.mock.calls[0]?.[1].body)).toEqual({ displayName: 'Renamed class', classCode: 'A', gradeCode: 'G1', status: 'ACTIVE' });
+    expect(JSON.parse(api.mock.calls[0]?.[1].body)).toEqual({ displayName: 'Renamed class', academicYear:'2027-2028',gradeCode: 'G1', status: 'ACTIVE' });
     expect(saved).toHaveBeenCalledOnce(); expect(host.querySelector('dialog')).toBeNull();
   });
 
@@ -49,7 +50,7 @@ describe('school administration editors', () => {
     api.mockImplementation(async (_path: string, init?: RequestInit) => init?.method ? { assignmentId: 'assignment-b' } : [assignment]);
     await act(async () => root.render(<TeacherEditor item={{ membershipId: 'teacher', displayName: 'Teacher', phoneE164: '+966500000001', status: 'ACTIVE' }} classes={classes} request={request} onSaved={saved} />));
     await click('Edit / classes'); expect(host.textContent).toContain('Mathematics'); await click('＋ Assign another class');
-    const form = host.querySelectorAll('form')[1]!; form.querySelector<HTMLSelectElement>('select[name="classId"]')!.value = 'class-b'; form.querySelector<HTMLInputElement>('input[name="subjectCode"]')!.value = 'SCI'; form.querySelector<HTMLInputElement>('input[name="subjectName"]')!.value = 'Science';
+    const form = host.querySelectorAll('form')[1]!; form.querySelector<HTMLSelectElement>('select[name="classId"]')!.value = 'class-b'; expect(form.querySelector('input[name="subjectCode"]')).toBeNull();form.querySelector<HTMLInputElement>('input[name="subjectName"]')!.value = 'Science';
     await submit(form);
     const posted = api.mock.calls.find(([, init]) => init?.method === 'POST');
     expect(posted?.[0]).toBe('/admin/teachers/teacher/assignments'); expect(JSON.parse(posted?.[1].body)).toMatchObject({ classId: 'class-b', subjectName: 'Science', canRecordAttendance: true });

@@ -28,6 +28,7 @@ type CreatePostRequest = {
   idempotencyKey: string;
   correlationId?: string;
   recipients: Array<{ studentId: string; guardianUserId: string; snapshot?: Record<string, unknown> }>;
+  staffRecipients?: string[];
   attachments?: Array<{ fileId: string; studentId?: string; privacyClassification: 'GENERAL' | 'STUDENT_PRIVATE' | 'APPROVED_CLASS_PUBLIC' }>;
 };
 
@@ -72,7 +73,7 @@ type BulkResultInput = {
 const requestHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 @Injectable()
-class ContentRepository implements OnModuleDestroy {
+export class ContentRepository implements OnModuleDestroy {
   private readonly pool = new Pool({ connectionString: process.env.CONTENT_DATABASE_URL ?? 'postgresql://schoolconnect:schoolconnect@localhost:5432/schoolconnect_content', max: Number(process.env.CONTENT_DB_POOL_MAX ?? 10), connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS ?? 3000), statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS ?? 5000) });
   async health() { const result = await this.pool.query<{ now: Date }>('SELECT now() AS now'); return result.rows[0]; }
   async nextScheduledAt() {
@@ -112,18 +113,18 @@ class ContentRepository implements OnModuleDestroy {
     return result.rows;
   }
 
-  async findPost(schoolId: string, postId: string, guardianUserId?: string, studentId?: string) {
-    const params: unknown[] = [schoolId, postId, guardianUserId ?? null, studentId ?? null];
+  async findPost(schoolId: string, postId: string, guardianUserId?: string, studentId?: string,guardianUserIds?:string[]) {
+    const params: unknown[] = [schoolId, postId, guardianUserId ? guardianUserIds ?? [guardianUserId] : null, studentId ?? null];
     let authorization = '';
     if (guardianUserId && studentId) {
-      authorization = `AND p.status IN ('PUBLISHED','UPDATED') AND EXISTS (SELECT 1 FROM post_recipients pr WHERE pr.post_id=p.id AND pr.guardian_user_id=$3 AND pr.student_id=$4)`;
+      authorization = `AND p.status IN ('PUBLISHED','UPDATED') AND EXISTS (SELECT 1 FROM post_recipients pr WHERE pr.post_id=p.id AND pr.guardian_user_id=ANY($3::uuid[]) AND pr.student_id=$4)`;
     }
     const result = await this.pool.query(
       `SELECT p.id, p.school_id AS "schoolId", p.author_membership_id AS "authorMembershipId", p.class_id AS "classId", p.post_type AS "postType", p.status,
               p.published_at AS "publishedAt",p.scheduled_for AS "scheduledFor", r.id AS "revisionId", r.revision_number AS "revisionNumber",
               r.title, r.body, r.subject_code AS "subjectCode", r.exam_name AS "examName", r.due_date AS "dueDate", r.urgent,r.audience_type AS "audienceType",
               COALESCE((SELECT json_agg(json_build_object('fileId',a.file_id,'studentId',a.student_id,'privacyClassification',a.privacy_classification) ORDER BY a.display_order)
-                FROM post_attachments a WHERE a.post_revision_id=r.id AND ($3::uuid IS NULL OR $4::uuid IS NULL OR a.student_id IS NULL OR a.student_id=$4)), '[]') AS attachments
+                FROM post_attachments a WHERE a.post_revision_id=r.id AND ($3::uuid[] IS NULL OR $4::uuid IS NULL OR a.student_id IS NULL OR a.student_id=$4)), '[]') AS attachments
        FROM posts p JOIN post_revisions r ON r.post_id=p.id AND r.revision_number=p.current_revision_number
        WHERE p.school_id=$1 AND p.id=$2 ${authorization}`, params);
     if (!result.rowCount) throw new NotFoundException({ code: 'POST_NOT_FOUND_OR_NOT_AUTHORIZED' });
@@ -142,7 +143,9 @@ class ContentRepository implements OnModuleDestroy {
   }
 
   async create(input: CreatePostRequest) {
-    if (!input.title?.trim() || !input.body?.trim() || !input.recipients?.length) throw new BadRequestException({ code: 'VALIDATION_FAILED' });
+    const schoolNotice=input.postType==='ANNOUNCEMENT' && input.audienceType==='SCHOOL' && !input.classId;
+    if (!input.title?.trim() || !input.body?.trim() || (!input.recipients?.length && !(schoolNotice && input.staffRecipients?.length))) throw new BadRequestException({ code: 'VALIDATION_FAILED' });
+    if(input.staffRecipients?.length && !schoolNotice) throw new BadRequestException({code:'STAFF_RECIPIENTS_REQUIRE_SCHOOL_NOTICE'});
     if (input.postType === 'HOMEWORK' && !input.dueDate) throw new BadRequestException({ code: 'DUE_DATE_REQUIRED' });
     if (input.postType === 'RESULT') {
       if (!input.examName || !input.attachments?.length || input.attachments.some((item) => item.privacyClassification === 'STUDENT_PRIVATE' && !item.studentId)) {
@@ -156,6 +159,7 @@ class ContentRepository implements OnModuleDestroy {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))',[input.actorUserId,`CREATE_POST:${input.idempotencyKey}`]);
       const hash = requestHash({ ...input, correlationId: undefined });
       const existing = await client.query<{ request_hash: string; response_body: unknown }>(
         `SELECT request_hash, response_body FROM idempotency_keys WHERE actor_id=$1 AND operation='CREATE_POST' AND idempotency_key=$2 AND expires_at>now() FOR UPDATE`,
@@ -186,11 +190,13 @@ class ContentRepository implements OnModuleDestroy {
           `INSERT INTO post_attachments (post_revision_id, file_id, student_id, privacy_classification) VALUES ($1,$2,$3,$4)`,
           [revisionId, attachment.fileId, attachment.studentId ?? null, attachment.privacyClassification]);
       }
+      for(const userId of new Set(input.staffRecipients ?? [])) await client.query(
+        'INSERT INTO post_staff_recipients(post_id,school_id,user_id) VALUES($1,$2,$3)',[postId,input.schoolId,userId]);
       const eventId = randomUUID();
       await client.query(
         `INSERT INTO outbox_events (id, event_type, aggregate_id, payload) VALUES ($1,$2,$3,$4)`,
-        [eventId, scheduledFor ? domainEventTypes.postScheduled : domainEventTypes.postPublished, postId, { schoolId: input.schoolId, postId, postType: input.postType, correlationId: input.correlationId,
-          recipients: input.recipients, notification: { title: input.title.trim(), body: input.body.trim().slice(0, 500) },
+        [eventId, scheduledFor ? domainEventTypes.postScheduled : domainEventTypes.postPublished, postId, { schoolId: input.schoolId, postId, postType: input.postType,actorUserId:input.actorUserId,actorMembershipId:input.authorMembershipId, correlationId: input.correlationId,
+          recipients: input.recipients, staffRecipients:input.staffRecipients ?? [], notification: { title: input.title.trim(), body: input.body.trim().slice(0, 500) },
           post: { id: postId, schoolId: input.schoolId, authorMembershipId: input.authorMembershipId, classId: input.classId ?? null,
             postType: input.postType, status: scheduledFor ? 'SCHEDULED' : 'PUBLISHED', publishedAt: scheduledFor ? null : new Date().toISOString(),
             scheduledFor: scheduledFor?.toISOString() ?? null, revisionNumber: 1, title: input.title.trim(), body: input.body.trim(),
@@ -341,6 +347,7 @@ class ContentRepository implements OnModuleDestroy {
       const recipients = await client.query<{ student_id: string; guardian_user_id: string }>(
         `SELECT student_id, guardian_user_id FROM post_recipients WHERE post_id=$1`,
         [postId]);
+      const staff=await client.query<{user_id:string}>('SELECT user_id FROM post_staff_recipients WHERE post_id=$1 AND school_id=$2',[postId,input.schoolId]);
       const attachments = await client.query<{ file_id: string; student_id: string | null; privacy_classification: string }>(
         `SELECT file_id,student_id,privacy_classification FROM post_attachments WHERE post_revision_id=$1 ORDER BY display_order`, [revisionId]);
       const eventId = randomUUID();
@@ -356,6 +363,7 @@ class ContentRepository implements OnModuleDestroy {
           material: (input.changeKind ?? 'MATERIAL') === 'MATERIAL',
           notification: { title: input.title.trim(), body: input.body.trim().slice(0, 500) },
           recipients: recipients.rows.map((recipient) => ({ studentId: recipient.student_id, guardianUserId: recipient.guardian_user_id })),
+          staffRecipients:staff.rows.map((row)=>row.user_id),
           post: { id: postId, schoolId: input.schoolId, authorMembershipId: input.authorMembershipId, classId: post.class_id,
             postType: post.post_type, status: nextStatus, publishedAt: post.published_at, scheduledFor,
             revisionNumber: nextRevisionNumber, title: input.title.trim(), body: input.body.trim(),
@@ -371,8 +379,8 @@ class ContentRepository implements OnModuleDestroy {
     } finally { client.release(); }
   }
 
-  async recordView(schoolId: string, postId: string, guardianUserId: string, studentId: string) {
-    await this.findPost(schoolId, postId, guardianUserId, studentId);
+  async recordView(schoolId: string, postId: string, guardianUserId: string, studentId: string,guardianUserIds?:string[]) {
+    await this.findPost(schoolId, postId, guardianUserId, studentId,guardianUserIds);
     const result = await this.pool.query(
       `INSERT INTO post_views (post_id, guardian_user_id, student_id) VALUES ($1,$2,$3)
        ON CONFLICT (post_id, guardian_user_id, student_id) DO UPDATE SET last_viewed_at=now(), view_count=post_views.view_count+1
@@ -411,6 +419,18 @@ class ContentRepository implements OnModuleDestroy {
     return result.rows[0];
   }
 
+  async schoolAnnouncements(schoolId:string,includeArchived=false) {
+    const result=await this.pool.query(`SELECT p.id,p.author_membership_id AS "authorMembershipId",p.post_type AS "postType",p.class_id AS "classId",p.status,p.published_at AS "publishedAt",
+      r.revision_number AS "revisionNumber",r.title,r.body,r.urgent,
+      (SELECT COUNT(*)::int FROM post_recipients pr WHERE pr.post_id=p.id) AS "recipientCount",
+      (SELECT COUNT(*)::int FROM post_staff_recipients sr WHERE sr.post_id=p.id) AS "teacherCount"
+      FROM posts p JOIN post_revisions r ON r.post_id=p.id AND r.revision_number=p.current_revision_number
+      WHERE p.school_id=$1 AND p.class_id IS NULL AND p.post_type='ANNOUNCEMENT' AND r.audience_type='SCHOOL'
+      AND (p.status IN ('PUBLISHED','UPDATED') OR ($2 AND p.status='ARCHIVED'))
+      ORDER BY p.created_at DESC,p.id DESC LIMIT 100`,[schoolId,includeArchived]);
+    return result.rows;
+  }
+
   async publishDue(limit = 25) {
     const client = await this.pool.connect();
     try {
@@ -424,11 +444,13 @@ class ContentRepository implements OnModuleDestroy {
       for (const post of due.rows) {
         await client.query(`UPDATE posts SET status='PUBLISHED',published_at=now(),updated_at=now() WHERE id=$1`, [post.id]);
         const recipients = await client.query<{ student_id: string; guardian_user_id: string }>(`SELECT student_id,guardian_user_id FROM post_recipients WHERE post_id=$1`, [post.id]);
+        const staff=await client.query<{user_id:string}>('SELECT user_id FROM post_staff_recipients WHERE post_id=$1 AND school_id=$2',[post.id,post.school_id]);
         const attachments = await client.query<{ file_id: string; student_id: string | null; privacy_classification: string }>(
           `SELECT file_id,student_id,privacy_classification FROM post_attachments WHERE post_revision_id=$1 ORDER BY display_order`, [post.revision_id]);
         await client.query(`INSERT INTO outbox_events (event_type,aggregate_id,payload) VALUES ($1,$2,$3)`,
           [domainEventTypes.postPublished, post.id, { schoolId: post.school_id, postId: post.id, postType: post.post_type, correlationId: post.created_correlation_id,
             recipients: recipients.rows.map((row) => ({ studentId: row.student_id, guardianUserId: row.guardian_user_id })),
+            staffRecipients:staff.rows.map((row)=>row.user_id),
             notification: { title: post.title, body: post.body.slice(0, 500) },
             post: { id: post.id, schoolId: post.school_id, authorMembershipId: post.author_membership_id, classId: post.class_id,
               postType: post.post_type, status: 'PUBLISHED', publishedAt: new Date().toISOString(), scheduledFor: null,
@@ -452,11 +474,12 @@ class ContentRepository implements OnModuleDestroy {
 @Controller('internal/v1')
 class ContentController {
   constructor(@Inject(ContentRepository) private readonly repository: ContentRepository) {}
+  @Get('school-announcements') announcements(@Query('schoolId') schoolId:string,@Query('includeArchived') includeArchived?:string) { return this.repository.schoolAnnouncements(schoolId,includeArchived==='true'); }
   @Get('health') async health() { return { status:eventingHealth('publisher:content'), service: 'content', database: await this.repository.health() }; }
   @Get('events/status') eventsStatus() { return this.repository.eventingDiagnostics(); }
   @Get('timeline') timeline(@Query('schoolId') schoolId: string, @Query('guardianUserId') guardianUserId: string, @Query('studentId') studentId: string, @Query('before') before?: string, @Query('limit') limit = '50') { return this.repository.timeline(schoolId, guardianUserId, studentId, before, Number(limit)); }
   @Get('teacher-posts') teacherPosts(@Query('schoolId') schoolId: string, @Query('authorMembershipId') authorMembershipId: string, @Query('before') before?: string, @Query('limit') limit = '50') { return this.repository.teacherPosts(schoolId, authorMembershipId, before, Number(limit)); }
-  @Get('posts/:postId') post(@Param('postId') postId: string, @Query('schoolId') schoolId: string, @Query('guardianUserId') guardianUserId?: string, @Query('studentId') studentId?: string) { return this.repository.findPost(schoolId, postId, guardianUserId, studentId); }
+  @Get('posts/:postId') post(@Param('postId') postId: string, @Query('schoolId') schoolId: string, @Query('guardianUserId') guardianUserId?: string, @Query('studentId') studentId?: string,@Query('guardianUserIds') guardianUserIds?:string) { return this.repository.findPost(schoolId, postId, guardianUserId, studentId,guardianUserIds?.split(',')); }
   @Get('files/:fileId/context') fileContext(@Param('fileId') fileId: string, @Query('schoolId') schoolId: string) { return this.repository.fileContext(schoolId, fileId); }
   @Post('posts') create(@Body() body: CreatePostRequest) { return this.repository.create(body); }
   @Post('results/bulk-publish') publishResultBatch(@Body() body: BulkResultInput) { return this.repository.publishResultBatch(body); }
@@ -464,7 +487,7 @@ class ContentController {
   @Get('drafts') drafts(@Query('schoolId') schoolId: string, @Query('authorMembershipId') authorMembershipId: string) { return this.repository.drafts(schoolId, authorMembershipId); }
   @Post('drafts/:draftId/delete') deleteDraft(@Param('draftId') draftId: string, @Body() body: { schoolId: string; authorMembershipId: string }) { return this.repository.deleteDraft(body.schoolId, body.authorMembershipId, draftId); }
   @Post('posts/:postId/revisions') createRevision(@Param('postId') postId: string, @Body() body: CreatePostRevisionRequest) { return this.repository.createRevision(postId, body); }
-  @Post('posts/:postId/views') view(@Param('postId') postId: string, @Body() body: { schoolId: string; guardianUserId: string; studentId: string }) { return this.repository.recordView(body.schoolId, postId, body.guardianUserId, body.studentId); }
+  @Post('posts/:postId/views') view(@Param('postId') postId: string, @Body() body: { schoolId: string; guardianUserId: string; studentId: string; guardianUserIds?:string[] }) { return this.repository.recordView(body.schoolId, postId, body.guardianUserId, body.studentId,body.guardianUserIds); }
   @Post('posts/:postId/archive') archive(@Param('postId') postId: string, @Body() body: { schoolId: string; authorMembershipId: string; expectedRevisionNumber: number; actorUserId?: string; correlationId?: string }) { return this.repository.archive(body.schoolId, postId, body.authorMembershipId, body.expectedRevisionNumber,body.actorUserId,body.correlationId); }
   @Get('posts/:postId/report') report(@Param('postId') postId: string, @Query('schoolId') schoolId: string) { return this.repository.report(schoolId, postId); }
   @Post('scheduled/publish-due') publishDue(@Body() body: { limit?: number }) { return this.repository.publishDue(body.limit); }
@@ -478,4 +501,4 @@ class ContentController {
 ] })
 class ContentModule {}
 async function bootstrap() { const app = await NestFactory.create(ContentModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.CONTENT_PORT ?? 3103), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); const repository=app.get(ContentRepository); bindEventingShutdown(repository,await startOutboxPublisher('content',repository)); registerApplicationShutdown(app); }
-void bootstrap();
+if(process.env.CONTENT_SKIP_BOOTSTRAP !== 'true') void bootstrap();

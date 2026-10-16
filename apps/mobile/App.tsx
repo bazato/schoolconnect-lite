@@ -19,6 +19,7 @@ import * as DocumentPicker from "expo-document-picker";
 import { uploadPickedAttachment, attachmentErrorMessage, attachmentsDisabledMessage, type FileCapabilities } from './src/attachmentUpload';
 import { AttachmentAvailability } from './src/AttachmentAvailability';
 import { ResultStudentPicker } from './src/ResultStudentPicker';
+import { LoginRoleSelector } from './src/LoginRoleSelector';
 import {
   ArrowLeft,
   Bell,
@@ -301,6 +302,7 @@ function LoginScreen({
 }) {
   const [phase, setPhase] = useState<"phone" | "otp" | "setup">("phone");
   const [mode, setMode] = useState<'login' | 'activate' | 'reset'>('login');
+  const [loginRole,setLoginRole]=useState<Role>('PARENT');
   const [phone, setPhone] = useState(demoMode ? "+91 98765 43210" : "");
   const [invitation, setInvitation] = useState("");
   const [otp, setOtp] = useState("");
@@ -320,13 +322,13 @@ function LoginScreen({
     try {
       if (phase === "phone") {
         if (mode === 'login') {
-          if (demoMode) { onSignedIn('PARENT'); return; }
-          const session = await loginPasscode(phone, passcode);
-          await saveSession(session); onSignedIn(session.memberships[0]?.role ?? 'PARENT', session); return;
+          if (demoMode) { onSignedIn(loginRole); return; }
+          const session = await loginPasscode(phone, passcode,loginRole);
+          await saveSession(session); onSignedIn(session.memberships.find((membership)=>membership.id===session.activeMembershipId)?.role ?? loginRole, session); return;
         }
         if (demoMode) { setDevelopmentCode('123456'); setOtp('123456'); }
         else {
-          const challenge = await requestOtp(phone, invitation, mode === 'reset' ? 'RESET' : 'ACTIVATE');
+          const challenge = await requestOtp(phone, invitation, mode === 'reset' ? 'RESET' : 'ACTIVATE',loginRole);
           setChallengeId(challenge.challengeId);
           setDevelopmentCode(challenge.developmentCode ?? ''); setOtp(challenge.developmentCode ?? '');
         }
@@ -337,10 +339,10 @@ function LoginScreen({
         setOtp(''); setPhase('setup');
       } else {
         if (passcode !== confirmation) throw new Error('PASSCODES_DO_NOT_MATCH');
-        if (demoMode) { onSignedIn('PARENT'); return; }
-        const session = await setupPasscode(setupToken, passcode);
+        if (demoMode) { onSignedIn(loginRole); return; }
+        const session = await setupPasscode(setupToken, passcode,loginRole);
         await saveSession(session);
-        onSignedIn(session.memberships[0]?.role ?? "PARENT", session);
+        onSignedIn(session.memberships.find((membership)=>membership.id===session.activeMembershipId)?.role ?? loginRole, session);
       }
     } catch (error) {
       setServerError(
@@ -377,6 +379,8 @@ function LoginScreen({
           </Text>
           {phase === "phone" ? (
             <>
+              <Text style={styles.helper}>Sign in as</Text>
+              <LoginRoleSelector value={loginRole} disabled={loading} onChange={(role)=>{setLoginRole(role);setServerError('');}}/>
               <Field
                 label="Mobile number"
                 value={phone}
@@ -457,6 +461,7 @@ function TeacherHome({
   assignment,
   session,
   onNotifications,
+  schoolAnnouncements=[],
 }: {
   navigate: (route: Route) => void;
   publishedPosts?: ApiTeacherPost[];
@@ -464,6 +469,7 @@ function TeacherHome({
   assignment?: ApiTeachingAssignment;
   session: MobileSession | null;
   onNotifications: () => void;
+  schoolAnnouncements?:ApiTeacherPost[];
 }) {
   const [followUps, setFollowUps] = useState<Array<{
     responseStatus: string;
@@ -577,6 +583,7 @@ function TeacherHome({
           <ChevronRight size={20} color={colors.muted} />
         </Pressable>
       ) : null}
+      {schoolAnnouncements.length>0 && <><Text style={styles.sectionTitle}>School announcements · All classes</Text>{schoolAnnouncements.slice(0,10).map((post)=><ActivityRow key={post.id} type="ANNOUNCEMENT" title={post.title} meta="School office · Read only" onPress={()=>navigate({name:'post-detail',postId:post.id})}/>)}</>}
       <Text style={styles.sectionTitle}>Recent publishing</Text>
       {publishedPosts === undefined ? (
         <>
@@ -1102,7 +1109,7 @@ function NotificationsScreen({
             navigate({ name: "absence", eventId: item.resourceId });
           else if (item.resourceType === "POST")
             navigate({
-              name: role === "TEACHER" ? "edit-post" : "post-detail",
+              name: role === "TEACHER" && item.type!=='SCHOOL_ANNOUNCEMENT' ? "edit-post" : "post-detail",
               postId: item.resourceId,
               ...(role === "PARENT" ? { studentId: item.studentId } : {}),
             });
@@ -1407,7 +1414,6 @@ function PlatformOwnerDashboard({
   logout: () => void;
 }) {
   const [schools, setSchools] = useState<ApiSchool[]>([]);
-  const [schoolCode, setSchoolCode] = useState("");
   const [schoolName, setSchoolName] = useState("");
   const [timezone, setTimezone] = useState("Asia/Riyadh");
   const [adminName, setAdminName] = useState("");
@@ -1416,8 +1422,8 @@ function PlatformOwnerDashboard({
     schoolName: string;
     adminName: string;
     adminPhone: string;
-    invitationCode: string;
-    expiresAt: string;
+    invitationCode: string | null;
+    expiresAt: string | null;
   } | null>(null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -1438,7 +1444,6 @@ function PlatformOwnerDashboard({
     setSaving(true);
     try {
       const created = await mobileApi.createSchool(session, {
-        schoolCode,
         displayName: schoolName,
         timezone,
         adminDisplayName: adminName,
@@ -1451,7 +1456,6 @@ function PlatformOwnerDashboard({
         invitationCode: created.administrator.invitationCode,
         expiresAt: created.administrator.expiresAt,
       });
-      setSchoolCode("");
       setSchoolName("");
       setAdminName("");
       setAdminPhone("");
@@ -1474,18 +1478,11 @@ function PlatformOwnerDashboard({
         <View style={styles.notice}>
           <ShieldCheck size={19} color={colors.info} />
           <Text style={styles.noticeText}>
-            Platform Owner can provision schools, but cannot access school
-            posts, students, results or attendance.
+            Platform owners can manage all schools. Open the web portal to
+            select a school and manage its staff, students, results and fees.
           </Text>
         </View>
         <Text style={styles.sectionTitle}>Add a school</Text>
-        <Field
-          label="School code"
-          value={schoolCode}
-          onChangeText={setSchoolCode}
-          placeholder="e.g. NORTH001"
-          required
-        />
         <Field
           label="School name"
           value={schoolName}
@@ -1523,7 +1520,6 @@ function PlatformOwnerDashboard({
           }}
           loading={saving}
           disabled={
-            !schoolCode.trim() ||
             !schoolName.trim() ||
             !adminName.trim() ||
             adminPhone.length < 8
@@ -1537,10 +1533,10 @@ function PlatformOwnerDashboard({
             <Text style={styles.cardBody}>
               {result.adminName} · {result.adminPhone}
             </Text>
-            <Text style={styles.invitationCode}>{result.invitationCode}</Text>
+            <Text style={styles.invitationCode}>{result.invitationCode ?? 'Use existing phone number and passcode'}</Text>
             <Text style={styles.cardMeta}>
               Invitation expires{" "}
-              {new Date(result.expiresAt).toLocaleDateString()}. Development
+              {result.expiresAt ? new Date(result.expiresAt).toLocaleDateString() : 'not needed for an activated account'}. Development
               OTP: 123456
             </Text>
           </View>
@@ -1575,13 +1571,11 @@ function SchoolAdminDashboard({
 }) {
   const [schoolName, setSchoolName] = useState("School administration");
   const [classes, setClasses] = useState<ApiSchoolClass[]>([]);
-  const [classCode, setClassCode] = useState("");
   const [className, setClassName] = useState("");
   const [academicYear, setAcademicYear] = useState("2026-2027");
   const [selectedClassId, setSelectedClassId] = useState("");
   const [teacherName, setTeacherName] = useState("");
   const [teacherPhone, setTeacherPhone] = useState("");
-  const [subjectCode, setSubjectCode] = useState("");
   const [subjectName, setSubjectName] = useState("");
   const [canPublishResults, setCanPublishResults] = useState(false);
   const [canPublishAnnouncements, setCanPublishAnnouncements] = useState(true);
@@ -1599,7 +1593,6 @@ function SchoolAdminDashboard({
   const [parentName, setParentName] = useState("");
   const [parentPhone, setParentPhone] = useState("");
   const [studentName, setStudentName] = useState("");
-  const [admissionNumber, setAdmissionNumber] = useState("");
   const [savingParent, setSavingParent] = useState(false);
   const refreshClasses = () => {
     void mobileApi
@@ -1628,12 +1621,10 @@ function SchoolAdminDashboard({
     setSavingClass(true);
     try {
       const created = await mobileApi.createClass(session, {
-        classCode,
         displayName: className,
         academicYear,
       });
       setSelectedClassId(created.id);
-      setClassCode("");
       setClassName("");
       setMessage(`${created.displayName} is ready for teacher assignments.`);
       refreshClasses();
@@ -1655,21 +1646,17 @@ function SchoolAdminDashboard({
         displayName: teacherName,
         phoneE164: teacherPhone.replace(/\s/g, ""),
         classId: selectedClassId,
-        subjectCode,
         subjectName,
         canPublishResults,
         canPublishAnnouncements,
         canRecordAttendance,
       });
-      setInvitation({
-        displayName: teacherName,
-        phone: teacherPhone,
-        code: created.teacher.invitationCode,
-        expiresAt: created.teacher.expiresAt,
+      if(created.teacher.invitationCode && created.teacher.expiresAt) setInvitation({
+        displayName: teacherName,phone: teacherPhone,code: created.teacher.invitationCode,expiresAt: created.teacher.expiresAt,
       });
+      else setMessage('Teacher role linked. Activated users sign in with their existing phone number and passcode; pending users keep their current activation code.');
       setTeacherName("");
       setTeacherPhone("");
-      setSubjectCode("");
       setSubjectName("");
     } catch (failure) {
       setError(
@@ -1689,7 +1676,6 @@ function SchoolAdminDashboard({
         displayName: parentName,
         phoneE164: parentPhone.replace(/\s/g, ""),
         studentDisplayName: studentName,
-        admissionNumber,
         classId: selectedClassId,
         relationship: "Parent",
       });
@@ -1706,7 +1692,6 @@ function SchoolAdminDashboard({
       setParentName("");
       setParentPhone("");
       setStudentName("");
-      setAdmissionNumber("");
     } catch (failure) {
       setError(
         failure instanceof Error ? failure.message : "PARENT_CREATION_FAILED",
@@ -1728,13 +1713,6 @@ function SchoolAdminDashboard({
         </View>
         <Text style={styles.sectionTitle}>Add a class</Text>
         <Field
-          label="Class code"
-          value={classCode}
-          onChangeText={setClassCode}
-          placeholder="e.g. G5A"
-          required
-        />
-        <Field
           label="Class name"
           value={className}
           onChangeText={setClassName}
@@ -1754,7 +1732,7 @@ function SchoolAdminDashboard({
             void createClass();
           }}
           loading={savingClass}
-          disabled={!classCode.trim() || !className.trim()}
+          disabled={!className.trim()}
         />
         <Text style={styles.sectionTitle}>Select a class</Text>
         {classes.map((item) => (
@@ -1802,13 +1780,6 @@ function SchoolAdminDashboard({
               required
             />
             <Field
-              label="Subject code"
-              value={subjectCode}
-              onChangeText={setSubjectCode}
-              placeholder="e.g. MATH"
-              required
-            />
-            <Field
               label="Subject name"
               value={subjectName}
               onChangeText={setSubjectName}
@@ -1840,7 +1811,6 @@ function SchoolAdminDashboard({
                 !selectedClassId ||
                 !teacherName.trim() ||
                 teacherPhone.length < 8 ||
-                !subjectCode.trim() ||
                 !subjectName.trim()
               }
             />
@@ -1850,13 +1820,6 @@ function SchoolAdminDashboard({
               value={studentName}
               onChangeText={setStudentName}
               placeholder="Student full name"
-              required
-            />
-            <Field
-              label="Admission number"
-              value={admissionNumber}
-              onChangeText={setAdmissionNumber}
-              placeholder="e.g. SC-1024"
               required
             />
             <Field
@@ -1882,7 +1845,6 @@ function SchoolAdminDashboard({
               disabled={
                 !selectedClassId ||
                 !studentName.trim() ||
-                !admissionNumber.trim() ||
                 !parentName.trim() ||
                 parentPhone.length < 8
               }
@@ -3081,7 +3043,7 @@ function PostDetail({
   const [offlineFailure, setOfflineFailure] = useState(false);
   const [viewRecorded, setViewRecorded] = useState(!session);
   useEffect(() => {
-    if (!session || role !== "PARENT") return;
+    if (!session || !['PARENT','TEACHER'].includes(role)) return;
     let active = true;
     void mobileApi
       .postDetail(session, postId, childId)
@@ -3090,7 +3052,7 @@ function PostDetail({
         setLivePost(timelinePost(item, childId));
         setLoading(false);
         try {
-          await mobileApi.markPostViewed(session, postId, childId);
+          if(role==='PARENT') await mobileApi.markPostViewed(session, postId, childId);
           if (active) setViewRecorded(true);
         } catch {
           /* Viewing remains separate from absence acknowledgement. */
@@ -3504,6 +3466,7 @@ function MainApp() {
   const [activeSchoolName, setActiveSchoolName] = useState('');
   const [livePosts, setLivePosts] = useState<TimelinePost[]>([]);
   const [teacherPosts, setTeacherPosts] = useState<ApiTeacherPost[]>([]);
+  const [schoolAnnouncements,setSchoolAnnouncements]=useState<ApiTeacherPost[]>([]);
   const [teacherDrafts, setTeacherDrafts] = useState<ApiDraft[]>([]);
   const [teachingScope, setTeachingScope] = useState<ApiTeachingAssignment[]>(
     [],
@@ -3536,10 +3499,11 @@ function MainApp() {
   }, [session]);
 
   useEffect(() => {
-    if (!session || role !== "PARENT") return;
+    if (!session || !['PARENT','TEACHER'].includes(role)) return;
     const open = (url: string | null) => {
       const next = url ? routeFromDeepLink(url) : null;
       if (!next) return;
+      if(role==='TEACHER' && (next.name!=='post-detail' || next.studentId)) return;
       if (next.name === "post-detail" && next.studentId)
         setChildId(next.studentId);
       setRoute(next);
@@ -3654,8 +3618,9 @@ function MainApp() {
     let active = true;
     const refresh = () => {
       void mobileApi.teacherHome(session)
-        .then(({ posts, drafts, teachingScope }) => {
+        .then(({ posts, drafts, teachingScope,schoolAnnouncements }) => {
           if (active) {
+            setSchoolAnnouncements(schoolAnnouncements ?? []);
             setTeacherPosts(posts);
             setTeacherDrafts(drafts);
             setTeachingScope(teachingScope);
@@ -3684,7 +3649,8 @@ function MainApp() {
   const refreshTeacherPosts = () => {
     if (!session) return;
     void mobileApi.teacherHome(session)
-      .then(({ posts, drafts, teachingScope }) => {
+      .then(({ posts, drafts, teachingScope,schoolAnnouncements }) => {
+        setSchoolAnnouncements(schoolAnnouncements ?? []);
         setTeacherPosts(posts);
         setTeacherDrafts(drafts);
         setTeachingScope(teachingScope);
@@ -3741,6 +3707,7 @@ function MainApp() {
     setLiveChildren([]);
     setLivePosts([]);
     setTeacherPosts([]);
+    setSchoolAnnouncements([]);
     setTeachingScope([]);
     setAttendanceHistory([]);
     setTab("home");
@@ -3907,6 +3874,7 @@ function MainApp() {
               onNotifications={() => setTab("notifications")}
               navigate={setRoute}
               publishedPosts={session ? teacherPosts : undefined}
+              schoolAnnouncements={session ? schoolAnnouncements : []}
               teacherName={session?.user.displayName}
               assignment={selectedAssignment}
             />

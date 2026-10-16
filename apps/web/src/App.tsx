@@ -4,18 +4,20 @@ import { ClassEditor, StudentEditor, TeacherEditor } from './AdminEditors';
 import { portalMemberships } from './portal-roles';
 import { downloadResultsTemplate, parseResultsWorkbook, type ResultRow } from './results-workbook';
 import { FeesPage } from './FeesPage';
+import { ActivationDisplay, MemberEditor, MemberDirectory, SchoolEditor, type ManagedMember } from './AccountManagement';
+import { SchoolAnnouncements } from './SchoolAnnouncements';
 
 type SchoolRow = { id: string; schoolCode: string; displayName: string; timezone: string; status: string; activeStudentCount?: number; totalStudentCount?: number; activeTeacherCount?: number; activeParentCount?: number; activeAdminCount?: number };
-type MemberRow = { userId: string; membershipId: string; displayName: string; phoneE164: string; role: Role; status: string };
+type MemberRow = ManagedMember & { userId:string;role:Role };
 type ClassRow = { id: string; classCode: string; displayName: string; academicYear: string; gradeCode?: string; status: string };
 type StudentRow = { id: string; admissionNumber: string; displayName: string; classId: string; className: string | null; guardianCount: number; status: string };
 type StudentImportPreview = { count: number; valid: boolean; rows: Array<{ row: number; admissionNumber: string; studentDisplayName: string; classCode: string; classId: string | null }> };
 type ParentInvitationStatus = 'ISSUED' | 'ALREADY_PENDING' | 'ALREADY_ACTIVE';
 type StudentImportResult = { imported: number; failed: number; results: Array<{ row: number; admissionNumber: string; status: 'IMPORTED' | 'FAILED'; invitationCode?: string; parentInvitationStatus?: ParentInvitationStatus; error?: string }> };
-type Invitation = { code: string; phone: string; role: string; expiresAt?: string };
+type Invitation = { code: string | null; phone: string; role: string; expiresAt?: string };
 type PreviewRow = ResultRow & { row: number; studentId: string | null; studentName: string | null; classId: string | null; className: string | null; guardianCount: number; status: 'READY' | 'INVALID'; error?: string };
 type Summary = { studentCount: number; teacherCount: number; attendance?: Array<{ classId: string; status: string; count: number }>; recentAudit?: Array<{ action: string; createdAt: string }> };
-type Page = 'Overview' | 'Schools' | 'Classes' | 'Teachers' | 'Students' | 'Results' | 'Fees';
+type Page = 'Overview' | 'Schools' | 'Owners' | 'Administrators' | 'Parents' | 'Classes' | 'Teachers' | 'Students' | 'Results' | 'Fees' | 'Announcements';
 
 const roleLabel: Record<Role, string> = { PLATFORM_OWNER: 'Platform owner', SCHOOL_ADMIN: 'School administrator', TEACHER: 'Teacher', PARENT: 'Parent' };
 const displayError = (error: unknown) => error instanceof Error ? error.message.replaceAll('_', ' ').toLowerCase() : 'Something went wrong. Please try again.';
@@ -67,6 +69,7 @@ export function SignIn({ onSignedIn }: { onSignedIn: (session: Session) => void 
   const [otp, setOtp] = useState('');
   const [developmentCode, setDevelopmentCode] = useState('');
   const [mode, setMode] = useState<'login' | 'activate' | 'reset'>('login');
+  const [loginRole,setLoginRole]=useState<Role>('SCHOOL_ADMIN');
   const [passcode, setPasscode] = useState('');
   const [confirmation, setConfirmation] = useState('');
   const [setupToken, setSetupToken] = useState('');
@@ -79,8 +82,8 @@ export function SignIn({ onSignedIn }: { onSignedIn: (session: Session) => void 
   const sendCode = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError('');
     try {
-      if (mode === 'login') { onSignedIn(await loginPasscode(phone, passcode)); return; }
-      const result = await requestOtp(phone, invitation, mode === 'reset' ? 'RESET' : 'ACTIVATE');
+      if (mode === 'login') { onSignedIn(await loginPasscode(phone, passcode,loginRole)); return; }
+      const result = await requestOtp(phone, invitation, mode === 'reset' ? 'RESET' : 'ACTIVATE',loginRole);
       setChallengeId(result.challengeId); setDevelopmentCode(result.developmentCode ?? '');
       if (result.developmentCode) setOtp(result.developmentCode);
     } catch (failure) { setError(displayError(failure)); }
@@ -112,6 +115,7 @@ export function SignIn({ onSignedIn }: { onSignedIn: (session: Session) => void 
         <h2>{setupToken ? 'Set your 4-digit passcode' : challengeId ? 'Verify your number' : mode === 'login' ? 'Sign in to your workspace' : mode === 'reset' ? 'Reset your passcode' : 'Activate your account'}</h2>
         <p className="muted">{setupToken ? 'Use this same passcode for future web and mobile logins.' : challengeId ? `Enter the one-time code for ${phone}.` : mode === 'login' ? 'Use your registered mobile number and 4-digit passcode.' : mode === 'reset' ? 'Verify your mobile number to choose a new passcode. Existing sessions will be signed out.' : 'Invitation and OTP are needed only for first-time activation. Already activated? Leave the invitation empty to set up your passcode.'}</p>
         {!challengeId ? <form onSubmit={(event) => { void sendCode(event); }} className="stack-form">
+          <label>Sign in as<select aria-label="Sign in as" value={loginRole} disabled={busy} onChange={(event)=>{setLoginRole(event.target.value as Role);setError('');}}><option value="SCHOOL_ADMIN">School administrator</option><option value="PLATFORM_OWNER">Platform owner</option></select></label>
           <label>Mobile number<input autoComplete="tel" inputMode="tel" placeholder="+966 5X XXX XXXX" value={phone} onChange={(event) => setPhone(event.target.value)} required /></label>
           {mode === 'activate' && <label>Invitation code <span className="optional">(first sign-in only)</span><input autoComplete="off" placeholder="Provided by your school" value={invitation} onChange={(event) => setInvitation(event.target.value.trim())} /></label>}
           {mode === 'login' && <label>4-digit passcode<input type="password" autoComplete="current-password" inputMode="numeric" maxLength={4} pattern="[0-9]{4}" value={passcode} onChange={(event) => setPasscode(event.target.value.replace(/\D/g, '').slice(0,4))} required /></label>}
@@ -135,14 +139,13 @@ export function SignIn({ onSignedIn }: { onSignedIn: (session: Session) => void 
   </main>;
 }
 
-function Portal({ context, session, onSession, request, onSignOut }: {
+function Portal({ context, session, onSession, request: baseRequest, onSignOut }: {
   context: AppContext; session: Session; onSession: (session: Session) => void;
   request: <T>(path: string, init?: RequestInit) => Promise<T>; onSignOut: () => void;
 }) {
   const adminMemberships = portalMemberships(session.memberships);
   const owner = context.principal.role === 'PLATFORM_OWNER';
   const admin = context.principal.role === 'SCHOOL_ADMIN';
-  const allowedPages: Page[] = owner ? ['Overview', 'Schools'] : admin ? ['Overview', 'Classes', 'Teachers', 'Students', 'Results', 'Fees'] : ['Overview'];
   const [page, setPage] = useState<Page>('Overview');
   const [schools, setSchools] = useState<SchoolRow[]>([]);
   const [classes, setClasses] = useState<ClassRow[]>([]);
@@ -151,32 +154,40 @@ function Portal({ context, session, onSession, request, onSignOut }: {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [members, setMembers] = useState<MemberRow[]>([]);
   const [selectedSchool, setSelectedSchool] = useState('');
+  const allowedPages: Page[] = owner ? ['Overview','Schools','Owners',...(selectedSchool ? ['Classes','Teachers','Students','Parents','Announcements','Results','Fees'] as Page[] : [])] : admin ? ['Overview','Classes','Teachers','Students','Parents','Administrators','Announcements','Results','Fees'] : ['Overview'];
+  const request=useCallback(<T,>(path:string,init:RequestInit={})=>baseRequest<T>(path,owner && selectedSchool && !/^\/admin\/(schools|platform-owners|reports\/platform-summary|operations)(?:\/|$)/.test(path) ? {...init,headers:{...init.headers,'x-schoolconnect-school-id':selectedSchool}} : init),[baseRequest,owner,selectedSchool]);
+  const schoolContext=owner ? schools.find((school)=>school.id===selectedSchool) : context.school;
   const [invitation, setInvitation] = useState<Invitation | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [formOpen, setFormOpen] = useState(false);
+  const reloadGeneration = useRef(0);
 
   const reload = useCallback(async () => {
+    const generation = ++reloadGeneration.current;
     setBusy(true); setError('');
     try {
       if (context.principal.role === 'PLATFORM_OWNER') {
         const [schoolRows, platform] = await Promise.all([
           request<SchoolRow[]>('/admin/schools'), request<{ schoolCount: number; activeSchoolCount: number; schools: SchoolRow[] }>('/admin/reports/platform-summary'),
         ]);
+        if (generation !== reloadGeneration.current) return;
         setSchools(platform.schools ?? schoolRows);
-      } else if (context.principal.role === 'SCHOOL_ADMIN') {
+      }
+      if (context.principal.role === 'SCHOOL_ADMIN' || context.principal.role==='PLATFORM_OWNER' && selectedSchool) {
         const [classRows, teacherRows, studentRows, report] = await Promise.all([
           request<ClassRow[]>('/admin/classes'), request<MemberRow[]>('/admin/teachers'), request<StudentRow[]>('/admin/students'),
           request<Summary>(`/admin/reports/summary?fromDate=${localDate()}&toDate=${localDate()}`),
         ]);
+        if (generation !== reloadGeneration.current) return;
         setClasses(classRows); setTeachers(teacherRows); setStudents(studentRows); setSummary(report);
       }
-    } catch (failure) { setError(displayError(failure)); }
-    finally { setBusy(false); }
-  }, [context.principal.role, request]);
+    } catch (failure) { if (generation === reloadGeneration.current) setError(displayError(failure)); }
+    finally { if (generation === reloadGeneration.current) setBusy(false); }
+  }, [context.principal.role, request, selectedSchool]);
 
-  useEffect(() => { void reload(); }, [reload]);
+  useEffect(() => { void reload(); return () => { reloadGeneration.current++; }; }, [reload]);
 
   const switchRole = async (event: FormEvent<HTMLSelectElement>) => {
     const membershipId = event.currentTarget.value;
@@ -189,7 +200,7 @@ function Portal({ context, session, onSession, request, onSignOut }: {
     finally { setBusy(false); }
   };
   const announce = (message: string) => { setNotice(message); window.setTimeout(() => setNotice(''), 5000); };
-  const invite = (value: Invitation) => { setInvitation(value); setFormOpen(false); };
+  const invite = (value: Invitation) => { if(value.code) setInvitation(value); else {setInvitation(null);announce('Account linked. Activated users keep their passcode; pending users keep their current activation code.');} setFormOpen(false);void reload(); };
 
   return <div className="app-shell">
     <aside className="sidebar">
@@ -207,6 +218,7 @@ function Portal({ context, session, onSession, request, onSignOut }: {
     </aside>
     <main className="main-area">
       <header className="topbar"><div className="breadcrumb"><span>Nexqon School App</span><b>/</b><strong>{page}</strong></div><div className="topbar-actions">
+        {owner && <label className="role-switch"><span>Manage school</span><select aria-label="Select school to manage" value={selectedSchool} disabled={busy} onChange={(event)=>{setSelectedSchool(event.target.value);setClasses([]);setTeachers([]);setStudents([]);setMembers([]);setFormOpen(false);setPage('Overview');setInvitation(null);}}><option value="">Platform only</option>{schools.map((school)=><option key={school.id} value={school.id}>{school.displayName}</option>)}</select></label>}
         {adminMemberships.length > 1 && <label className="role-switch"><span>View as</span><select aria-label="Switch role" value={context.principal.membershipId} onChange={(event) => { void switchRole(event); }}>
           {adminMemberships.map((membership) => <option key={membership.id} value={membership.id}>{roleLabel[membership.role]}{membership.schoolId && membership.schoolId !== context.principal.schoolId ? ' · another school' : ''}</option>)}
         </select></label>}
@@ -220,24 +232,32 @@ function Portal({ context, session, onSession, request, onSignOut }: {
         </div>
         {error && <div className="alert danger">{error}<button onClick={() => setError('')}>×</button></div>}
         {notice && <div className="alert success">{notice}</div>}
-        {invitation && <div className="invitation-banner"><div className="invite-icon">✓</div><div className="invite-copy"><strong>{invitation.role} account is ready</strong><span>Send this one-time invitation to {invitation.phone}. The user will set up access on first sign-in.</span></div><code>{invitation.code}</code><button className="button secondary small" onClick={() => { void navigator.clipboard?.writeText(invitation.code); announce('Invitation copied. Share it securely with the invited user.'); }}>Copy code</button><button className="icon-button" onClick={() => setInvitation(null)} aria-label="Dismiss invitation">×</button></div>}
+        {invitation && <div className="invitation-banner"><div className="invite-icon">✓</div><div className="invite-copy"><strong>{invitation.role} account is ready</strong><span>Send this one-time invitation to {invitation.phone}. The user will set up access on first sign-in.</span></div><code>{invitation.code}</code><button className="button secondary small" onClick={() => { void navigator.clipboard?.writeText(invitation.code ?? ''); announce('Invitation copied. Share it securely with the invited user.'); }}>Copy code</button><button className="icon-button" onClick={() => setInvitation(null)} aria-label="Dismiss invitation">×</button></div>}
         {page === 'Overview' && <Overview owner={owner} context={context} schools={schools} classes={classes} teachers={teachers} students={students} summary={summary} busy={busy} onNavigate={setPage} />}
-        {page === 'Schools' && <OwnerSchools schools={schools} request={request} selectedSchool={selectedSchool} setSelectedSchool={setSelectedSchool} members={members} setMembers={setMembers} formOpen={formOpen} setFormOpen={setFormOpen} onInvite={invite} onMessage={announce} />}
+        {page === 'Schools' && <OwnerSchools schools={schools} request={request} selectedSchool={selectedSchool} setSelectedSchool={setSelectedSchool} members={members} setMembers={setMembers} formOpen={formOpen} setFormOpen={setFormOpen} onInvite={invite} onMessage={announce} onSaved={()=>{void reload();}} />}
+        {page === 'Owners' && <MemberDirectory title="Platform owners" listPath="/admin/platform-owners" memberPath="/admin/platform-owners" createPath="/admin/platform-owners" request={request}/>}
+        {page === 'Parents' && <MemberDirectory key={selectedSchool} title="Parent accounts" listPath="/admin/parents" memberPath="/admin/members" request={request}/>}
+        {page === 'Administrators' && <MemberDirectory title="School administrators" listPath="/admin/administrators" memberPath="/admin/administrators" request={request} statusEditable={false} deletable={false}/>}
         {page === 'Classes' && <ClassesPage classes={classes} formOpen={formOpen} setFormOpen={setFormOpen} request={request} onSaved={() => { void reload(); announce('Class saved successfully.'); }} />}
         {page === 'Teachers' && <TeachersPage teachers={teachers} classes={classes} formOpen={formOpen} setFormOpen={setFormOpen} request={request} onInvite={invite} onSaved={() => { void reload(); announce('Teacher details and class assignments saved.'); }} />}
         {page === 'Students' && <StudentsPage students={students} classes={classes} request={request} onInvite={invite} onSaved={(message) => { void reload(); announce(message ?? 'Student account and guardian invitation created.'); }} />}
         {page === 'Results' && <ResultsPage students={students} request={request} onMessage={announce} />}
-        {page === 'Fees' && <FeesPage request={request} schoolName={context.school?.displayName} />}
+        {page === 'Fees' && <FeesPage request={request} schoolName={schoolContext?.displayName} />}
+        {page === 'Announcements' && <SchoolAnnouncements key={selectedSchool} request={request} membershipId={context.principal.membershipId}/>}
         <footer className="page-footer"><span>Nexqon School App</span><span>Role-scoped workspace · {context.school?.displayName ?? 'All schools'}</span></footer>
       </section>
     </main>
   </div>;
 }
 
-function headingFor(page: Page) { return page === 'Overview' ? 'Good to see you' : page === 'Schools' ? 'Schools' : page === 'Classes' ? 'Classes & grades' : page === 'Teachers' ? 'Teachers' : page === 'Students' ? 'Students' : page === 'Fees' ? 'Fees & collections' : 'Publish results'; }
+function headingFor(page: Page) { return page === 'Overview' ? 'Good to see you' : page === 'Schools' ? 'Schools' : page === 'Classes' ? 'Classes & grades' : page === 'Teachers' ? 'Teachers' : page === 'Students' ? 'Students' : page === 'Fees' ? 'Fees & collections' : ['Owners','Parents','Administrators','Announcements'].includes(page) ? page : 'Publish results'; }
 function descriptionFor(page: Page, context: AppContext) {
+  if(page==='Announcements') return 'Publish official notices to parents in all classes and every teacher in this school.';
   if (page === 'Overview') return context.principal.role === 'PLATFORM_OWNER' ? 'Here is what is happening across your school network.' : 'A clear view of your school, team and academic activity.';
   if (page === 'Schools') return 'Create schools and provision their first school administrator.';
+  if (page === 'Owners') return 'Manage platform owners and their application-wide access.';
+  if (page === 'Parents') return 'Manage parent profiles, phone numbers and activation details for this school.';
+  if (page === 'Administrators') return 'Edit school administrator contact details and view activation codes.';
   if (page === 'Classes') return 'Set up the academic year and keep class rosters organized.';
   if (page === 'Teachers') return 'Invite teachers and assign the classes and capabilities they need.';
   if (page === 'Students') return 'Review the current student roster and guardian links.';
@@ -273,16 +293,17 @@ function Overview({ owner, context, schools, classes, teachers, students, summar
   </div>;
 }
 
-function OwnerSchools({ schools, request, selectedSchool, setSelectedSchool, members, setMembers, formOpen, setFormOpen, onInvite, onMessage }: {
+function OwnerSchools({ schools, request, selectedSchool, setSelectedSchool, members, setMembers, formOpen, setFormOpen, onInvite, onMessage,onSaved }: {
   schools: SchoolRow[]; request: <T>(path: string, init?: RequestInit) => Promise<T>; selectedSchool: string; setSelectedSchool: (id: string) => void;
   members: MemberRow[]; setMembers: (value: MemberRow[]) => void; formOpen: boolean; setFormOpen: (value: boolean) => void;
-  onInvite: (value: Invitation) => void; onMessage: (message: string) => void;
+  onInvite: (value: Invitation) => void; onMessage: (message: string) => void;onSaved:()=>void;
 }) {
   const [adminsBusy, setAdminsBusy] = useState(false);
   const [adminsError, setAdminsError] = useState('');
   const [addingAdmin, setAddingAdmin] = useState(false);
   const [schoolBusy, setSchoolBusy] = useState(false);
   const [search, setSearch] = useState('');
+  const adminsGeneration = useRef(0);
   const selected = schools.find((school) => school.id === selectedSchool);
   const filteredSchools = schools.filter((school) => `${school.displayName} ${school.schoolCode}`.toLowerCase().includes(search.toLowerCase()));
 
@@ -290,7 +311,7 @@ function OwnerSchools({ schools, request, selectedSchool, setSelectedSchool, mem
     event.preventDefault(); const form = new FormData(event.currentTarget); setSchoolBusy(true); setAdminsError('');
     try {
       const created = await request<{ school: SchoolRow; administrator: { invitationCode: string; expiresAt: string } }>('/admin/schools', { method: 'POST', body: JSON.stringify({
-        schoolCode: String(form.get('schoolCode')).trim().toUpperCase(), displayName: String(form.get('displayName')).trim(), timezone: String(form.get('timezone')),
+        displayName: String(form.get('displayName')).trim(), timezone: String(form.get('timezone')),
         adminDisplayName: String(form.get('adminDisplayName')).trim(), adminPhoneE164: String(form.get('adminPhoneE164')).replace(/\s/g, ''),
       }) });
       onInvite({ code: created.administrator.invitationCode, phone: String(form.get('adminPhoneE164')), role: 'School administrator', expiresAt: created.administrator.expiresAt });
@@ -298,12 +319,18 @@ function OwnerSchools({ schools, request, selectedSchool, setSelectedSchool, mem
     } catch (failure) { setAdminsError(displayError(failure)); }
     finally { setSchoolBusy(false); }
   };
-  const loadAdmins = async (schoolId: string) => {
+  const loadAdmins = useCallback(async (schoolId: string) => {
+    const generation = ++adminsGeneration.current;
     setSelectedSchool(schoolId); setAdminsBusy(true); setAdminsError('');
-    try { setMembers(await request<MemberRow[]>(`/admin/schools/${schoolId}/admins`)); }
-    catch (failure) { setAdminsError(displayError(failure)); }
-    finally { setAdminsBusy(false); }
-  };
+    try { const rows = await request<MemberRow[]>(`/admin/schools/${schoolId}/admins`); if (generation === adminsGeneration.current) setMembers(rows); }
+    catch (failure) { if (generation === adminsGeneration.current) setAdminsError(displayError(failure)); }
+    finally { if (generation === adminsGeneration.current) setAdminsBusy(false); }
+  }, [request, setMembers, setSelectedSchool]);
+  useEffect(() => {
+    setMembers([]);
+    if (selectedSchool) void loadAdmins(selectedSchool);
+    return () => { adminsGeneration.current++; };
+  }, [selectedSchool, loadAdmins, setMembers]);
   const addAdmin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); if (!selectedSchool) return;
     const formElement = event.currentTarget;
@@ -318,14 +345,14 @@ function OwnerSchools({ schools, request, selectedSchool, setSelectedSchool, mem
 
   return <div className="content-stack">
     {formOpen && <section className="section-card form-card"><div className="card-heading"><div><span className="eyebrow">NEW SCHOOL</span><h3>School details & first administrator</h3></div><button className="icon-button" onClick={() => setFormOpen(false)}>×</button></div>
-      <form className="data-form" onSubmit={(event) => { void createSchool(event); }}><label>School name<input name="displayName" placeholder="e.g. Al Noor International School" required maxLength={160} /></label><label>School code<input name="schoolCode" placeholder="e.g. ALNOOR01" required maxLength={40} /></label><label>Timezone<select name="timezone" defaultValue="Asia/Riyadh"><option value="Asia/Riyadh">Asia/Riyadh</option><option value="Asia/Kolkata">Asia/Kolkata</option><option value="Asia/Dubai">Asia/Dubai</option><option value="UTC">UTC</option></select></label><div className="form-divider">FIRST SCHOOL ADMINISTRATOR</div><label>Administrator name<input name="adminDisplayName" placeholder="Full name" required /></label><label>Administrator mobile<input name="adminPhoneE164" placeholder="+966 5X XXX XXXX" required inputMode="tel" /></label><div className="form-actions"><button type="button" className="button secondary" onClick={() => setFormOpen(false)}>Cancel</button><button className="button primary" disabled={schoolBusy}>{schoolBusy ? 'Creating…' : 'Create school & invite admin'}</button></div></form>
+      <form className="data-form" onSubmit={(event) => { void createSchool(event); }}><label>School name<input name="displayName" placeholder="e.g. Al Noor International School" required maxLength={160} /></label><label>Timezone<select name="timezone" defaultValue="Asia/Riyadh"><option value="Asia/Riyadh">Asia/Riyadh</option><option value="Asia/Kolkata">Asia/Kolkata</option><option value="Asia/Dubai">Asia/Dubai</option><option value="UTC">UTC</option></select></label><div className="form-divider">FIRST SCHOOL ADMINISTRATOR</div><label>Administrator name<input name="adminDisplayName" placeholder="Full name" required /></label><label>Administrator mobile<input name="adminPhoneE164" placeholder="+966 5X XXX XXXX" required inputMode="tel" /></label><div className="form-actions"><button type="button" className="button secondary" onClick={() => setFormOpen(false)}>Cancel</button><button className="button primary" disabled={schoolBusy}>{schoolBusy ? 'Creating…' : 'Create school & invite admin'}</button></div></form>
       {adminsError && <div className="alert danger">{adminsError}</div>}
     </section>}
     <section className="section-card"><div className="card-heading"><div><span className="eyebrow">NETWORK DIRECTORY</span><h3>{schools.length} {schools.length === 1 ? 'school' : 'schools'} in your network</h3></div><span className="directory-search">⌕ <input placeholder="Search schools" aria-label="Search schools" value={search} onChange={(event) => setSearch(event.target.value)} /></span></div>
-      {schools.length ? filteredSchools.length ? <div className="school-grid">{filteredSchools.map((school) => <article className="school-card" key={school.id}><div className="school-card-top"><span className="school-token large">{school.displayName.slice(0, 1)}</span><StatusPill value={school.status} /></div><h3>{school.displayName}</h3><div className="school-code">{school.schoolCode}{school.timezone && <> <span>·</span> {school.timezone}</>}</div><div className="school-stats"><span><strong>{school.activeTeacherCount ?? 0}</strong> teachers</span><span><strong>{school.activeStudentCount ?? 0}</strong> students</span><span><strong>{school.activeAdminCount ?? 0}</strong> admins</span></div><button className={`button ${selectedSchool === school.id ? 'secondary' : 'light'} full`} onClick={() => { void loadAdmins(school.id); }}>{selectedSchool === school.id ? 'Administrators selected' : 'Manage administrators'} <span>→</span></button></article>)}</div> : <div className="empty-inline">No schools match “{search}”.</div> : <EmptyState title="Your school network starts here" body="Create a school and its first school administrator to begin onboarding." action="Add your first school" onClick={() => setFormOpen(true)} />}
+      {schools.length ? filteredSchools.length ? <div className="school-grid">{filteredSchools.map((school) => <article className="school-card" key={school.id}><div className="school-card-top"><span className="school-token large">{school.displayName.slice(0, 1)}</span><StatusPill value={school.status} /></div><h3>{school.displayName}</h3><SchoolEditor item={school} request={request} onSaved={onSaved}/><div className="school-code">{school.schoolCode}{school.timezone && <> <span>·</span> {school.timezone}</>}</div><div className="school-stats"><span><strong>{school.activeTeacherCount ?? 0}</strong> teachers</span><span><strong>{school.activeStudentCount ?? 0}</strong> students</span><span><strong>{school.activeAdminCount ?? 0}</strong> admins</span></div><button className={`button ${selectedSchool === school.id ? 'secondary' : 'light'} full`} onClick={() => { void loadAdmins(school.id); }}>{selectedSchool === school.id ? 'Administrators selected' : 'Manage administrators'} <span>→</span></button></article>)}</div> : <div className="empty-inline">No schools match “{search}”.</div> : <EmptyState title="Your school network starts here" body="Create a school and its first school administrator to begin onboarding." action="Add your first school" onClick={() => setFormOpen(true)} />}
     </section>
     {selected && <section className="section-card"><div className="card-heading"><div><span className="eyebrow">{selected.schoolCode}</span><h3>Administrators · {selected.displayName}</h3></div><span className="subtle-count">{members.length} accounts</span></div>
-      {adminsError && <div className="alert danger">{adminsError}</div>}{adminsBusy ? <div className="skeleton-line" /> : <div className="table-wrap"><table><thead><tr><th>Administrator</th><th>Mobile</th><th>Access</th><th>Status</th><th /></tr></thead><tbody>{members.map((member) => <tr key={member.membershipId}><td><div className="table-person"><span className="person-avatar">{member.displayName.slice(0, 1)}</span><strong>{member.displayName}</strong></div></td><td>{member.phoneE164}</td><td>School administrator</td><td><StatusPill value={member.status} /></td><td><button className="text-button" onClick={async () => { try { const result = await request<{ invitationCode: string; expiresAt: string }>(`/admin/schools/${selected.id}/admins/${member.membershipId}/reissue-invitation`, { method: 'POST' }); onInvite({ code: result.invitationCode, phone: member.phoneE164, role: 'School administrator', expiresAt: result.expiresAt }); } catch (failure) { setAdminsError(displayError(failure)); } }}>Reissue invite</button></td></tr>)}</tbody></table></div>}
+      {adminsError && <div className="alert danger">{adminsError}</div>}{adminsBusy ? <div className="skeleton-line" /> : <div className="table-wrap"><table><thead><tr><th>Administrator</th><th>Mobile</th><th>Access</th><th>Status</th><th /></tr></thead><tbody>{members.map((member) => <tr key={member.membershipId}><td><div className="table-person"><span className="person-avatar">{member.displayName.slice(0, 1)}</span><strong>{member.displayName}</strong></div></td><td>{member.phoneE164}</td><td>School administrator</td><td><StatusPill value={member.status} /></td><td><ActivationDisplay activation={member.activation}/><MemberEditor item={member} path={`/admin/schools/${selected.id}/admins/${member.membershipId}`} request={request} onSaved={()=>{void loadAdmins(selected.id);onSaved();}}/> <button className="text-button" onClick={async () => { try { const result = await request<{ invitationCode: string; expiresAt: string }>(`/admin/schools/${selected.id}/admins/${member.membershipId}/reissue-invitation`, { method: 'POST' }); onInvite({ code: result.invitationCode, phone: member.phoneE164, role: 'School administrator', expiresAt: result.expiresAt }); await loadAdmins(selected.id); } catch (failure) { setAdminsError(displayError(failure)); } }}>Reissue invite</button></td></tr>)}</tbody></table></div>}
       <form className="inline-invite-form" onSubmit={(event) => { void addAdmin(event); }}><span className="invite-icon">＋</span><div><strong>Add another school administrator</strong><small>They will only manage {selected.displayName}.</small></div><input name="displayName" aria-label="Administrator name" placeholder="Full name" required /><input name="phoneE164" aria-label="Administrator mobile" placeholder="+966 mobile" required inputMode="tel" /><button className="button primary small" disabled={addingAdmin}>{addingAdmin ? 'Adding…' : 'Add admin'}</button></form>
     </section>}
   </div>;
@@ -337,12 +364,12 @@ function ClassesPage({ classes, formOpen, setFormOpen, request, onSaved }: {
   const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   const create = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true); setError('');
-    try { await request('/admin/classes', { method: 'POST', body: JSON.stringify({ classCode: String(form.get('classCode')).trim().toUpperCase(), displayName: String(form.get('displayName')).trim(), gradeCode: String(form.get('gradeCode')).trim().toUpperCase(), academicYear: String(form.get('academicYear')).trim() }) }); onSaved(); setFormOpen(false); }
+    try { await request('/admin/classes', { method: 'POST', body: JSON.stringify({ displayName: String(form.get('displayName')).trim(), gradeCode: String(form.get('gradeCode')).trim().toUpperCase(), academicYear: String(form.get('academicYear')).trim() }) }); onSaved(); setFormOpen(false); }
     catch (failure) { setError(displayError(failure)); }
     finally { setBusy(false); }
   };
   return <div className="content-stack">
-    {formOpen && <section className="section-card form-card"><div className="card-heading"><div><span className="eyebrow">CLASS SETUP</span><h3>Create a class</h3></div><button className="icon-button" onClick={() => setFormOpen(false)}>×</button></div><form className="data-form compact" onSubmit={(event) => { void create(event); }}><label>Class name<input name="displayName" placeholder="Grade 5 — Section A" required /></label><label>Class code<input name="classCode" placeholder="G5A" required /></label><label>Grade code<input name="gradeCode" placeholder="G5" required /></label><label>Academic year<input name="academicYear" placeholder="2026-2027" pattern="\d{4}-\d{4}" required /></label><div className="form-actions"><button className="button secondary" type="button" onClick={() => setFormOpen(false)}>Cancel</button><button className="button primary" disabled={busy}>{busy ? 'Saving…' : 'Create class'}</button></div></form>{error && <div className="alert danger">{error}</div>}</section>}
+    {formOpen && <section className="section-card form-card"><div className="card-heading"><div><span className="eyebrow">CLASS SETUP</span><h3>Create a class</h3></div><button className="icon-button" onClick={() => setFormOpen(false)}>×</button></div><form className="data-form compact" onSubmit={(event) => { void create(event); }}><label>Class name<input name="displayName" placeholder="Grade 5 — Section A" required /></label><label>Grade<select name="gradeCode" required defaultValue=""><option value="" disabled>Select grade</option>{Array.from({length:12},(_,i)=><option key={i+1} value={`G${i+1}`}>Grade {i+1}</option>)}</select></label><label>Academic year<input name="academicYear" placeholder="2026-2027" pattern="\d{4}-\d{4}" required /></label><div className="form-actions"><button className="button secondary" type="button" onClick={() => setFormOpen(false)}>Cancel</button><button className="button primary" disabled={busy}>{busy ? 'Saving…' : 'Create class'}</button></div></form>{error && <div className="alert danger">{error}</div>}</section>}
     <section className="section-card"><div className="card-heading"><div><span className="eyebrow">ACADEMIC STRUCTURE</span><h3>Current classes</h3></div><span className="subtle-count">{classes.length} total</span></div>{classes.length ? <div className="table-wrap"><table><thead><tr><th>Class</th><th>Code</th><th>Grade</th><th>Academic year</th><th>Status</th><th>Actions</th></tr></thead><tbody>{classes.map((item) => <tr key={item.id}><td><div className="table-person"><span className="class-token">▦</span><strong>{item.displayName}</strong></div></td><td><code>{item.classCode}</code></td><td>{item.gradeCode ?? '—'}</td><td>{item.academicYear}</td><td><StatusPill value={item.status} /></td><td><ClassEditor item={item} request={request} onSaved={onSaved} /></td></tr>)}</tbody></table></div> : <EmptyState title="No classes set up yet" body="Create classes before inviting teachers or importing student records." action="Create first class" onClick={() => setFormOpen(true)} />}</section>
   </div>;
 }
@@ -357,7 +384,7 @@ function TeachersPage({ teachers, classes, formOpen, setFormOpen, request, onInv
     try {
       const result = await request<{ teacher: { invitationCode: string; expiresAt: string }; assignment: unknown }>('/admin/teachers', { method: 'POST', body: JSON.stringify({
         displayName: String(form.get('displayName')).trim(), phoneE164: String(form.get('phoneE164')).replace(/\s/g, ''), classId: String(form.get('classId')),
-        subjectCode: String(form.get('subjectCode')).trim().toUpperCase(), subjectName: String(form.get('subjectName')).trim(),
+        subjectName: String(form.get('subjectName')).trim(),
         canPublishResults: form.get('canPublishResults') === 'on', canPublishAnnouncements: form.get('canPublishAnnouncements') === 'on', canRecordAttendance: form.get('canRecordAttendance') === 'on',
       }) });
       onInvite({ code: result.teacher.invitationCode, phone: String(form.get('phoneE164')), role: 'Teacher', expiresAt: result.teacher.expiresAt });
@@ -366,8 +393,8 @@ function TeachersPage({ teachers, classes, formOpen, setFormOpen, request, onInv
     finally { setBusy(false); }
   };
   return <div className="content-stack">
-    {formOpen && <section className="section-card form-card"><div className="card-heading"><div><span className="eyebrow">TEACHER ONBOARDING</span><h3>Teacher profile & first assignment</h3></div><button className="icon-button" onClick={() => setFormOpen(false)}>×</button></div><form className="data-form" onSubmit={(event) => { void create(event); }}><label>Teacher name<input name="displayName" required placeholder="Full name" /></label><label>Mobile number<input name="phoneE164" required inputMode="tel" placeholder="+966 5X XXX XXXX" /></label><label>First class<select name="classId" required defaultValue=""><option value="" disabled>Select a class</option>{classes.filter((item) => item.status === 'ACTIVE').map((item) => <option key={item.id} value={item.id}>{item.displayName} ({item.classCode})</option>)}</select></label><label>Subject name<input name="subjectName" required placeholder="Mathematics" /></label><label>Subject code<input name="subjectCode" required placeholder="MATH" /></label><div className="form-divider">ASSIGNMENT PERMISSIONS</div><div className="permission-list"><label className="check-toggle"><input type="checkbox" name="canPublishResults" /> Publish class results</label><label className="check-toggle"><input type="checkbox" name="canPublishAnnouncements" defaultChecked /> Publish announcements</label><label className="check-toggle"><input type="checkbox" name="canRecordAttendance" defaultChecked /> Record attendance</label></div><div className="form-actions"><button type="button" className="button secondary" onClick={() => setFormOpen(false)}>Cancel</button><button className="button primary" disabled={busy || classes.length === 0}>{busy ? 'Creating…' : 'Create teacher & assign'}</button></div></form>{error && <div className="alert danger">{error}</div>}</section>}
-    <section className="section-card"><div className="card-heading"><div><span className="eyebrow">SCHOOL TEAM</span><h3>Teachers</h3></div><span className="subtle-count">{teachers.length} members</span></div>{teachers.length ? <div className="table-wrap"><table><thead><tr><th>Teacher</th><th>Mobile</th><th>Role</th><th>Status</th><th /></tr></thead><tbody>{teachers.map((member) => <tr key={member.membershipId}><td><div className="table-person"><span className="person-avatar blue">{member.displayName.slice(0, 1)}</span><strong>{member.displayName}</strong></div></td><td>{member.phoneE164}</td><td>Teacher</td><td><StatusPill value={member.status} /></td><td><TeacherEditor item={member} classes={classes} request={request} onSaved={onSaved} /> <button className="text-button" onClick={async () => { try { const invite = await request<{ invitationCode: string; expiresAt: string }>(`/admin/members/${member.membershipId}/reissue-invitation`, { method: 'POST' }); onInvite({ code: invite.invitationCode, phone: member.phoneE164, role: 'Teacher', expiresAt: invite.expiresAt }); } catch (failure) { setError(displayError(failure)); } }}>Reissue invite</button></td></tr>)}</tbody></table></div> : <EmptyState title="No teachers invited yet" body={classes.length ? 'Invite your first teacher and attach a class assignment.' : 'Create a class before adding a teacher.'} action={classes.length ? 'Add a teacher' : 'Set up classes'} onClick={() => setFormOpen(true)} />}</section>
+    {formOpen && <section className="section-card form-card"><div className="card-heading"><div><span className="eyebrow">TEACHER ONBOARDING</span><h3>Teacher profile & first assignment</h3></div><button className="icon-button" onClick={() => setFormOpen(false)}>×</button></div><form className="data-form" onSubmit={(event) => { void create(event); }}><label>Teacher name<input name="displayName" required placeholder="Full name" /></label><label>Mobile number<input name="phoneE164" required inputMode="tel" placeholder="+966 5X XXX XXXX" /></label><label>First class<select name="classId" required defaultValue=""><option value="" disabled>Select a class</option>{classes.filter((item) => item.status === 'ACTIVE').map((item) => <option key={item.id} value={item.id}>{item.displayName} ({item.classCode})</option>)}</select></label><label>Subject name<input name="subjectName" required placeholder="Mathematics" /></label><div className="form-divider">ASSIGNMENT PERMISSIONS</div><div className="permission-list"><label className="check-toggle"><input type="checkbox" name="canPublishResults" /> Publish class results</label><label className="check-toggle"><input type="checkbox" name="canPublishAnnouncements" defaultChecked /> Publish announcements</label><label className="check-toggle"><input type="checkbox" name="canRecordAttendance" defaultChecked /> Record attendance</label></div><div className="form-actions"><button type="button" className="button secondary" onClick={() => setFormOpen(false)}>Cancel</button><button className="button primary" disabled={busy || classes.length === 0}>{busy ? 'Creating…' : 'Create teacher & assign'}</button></div></form>{error && <div className="alert danger">{error}</div>}</section>}
+    <section className="section-card"><div className="card-heading"><div><span className="eyebrow">SCHOOL TEAM</span><h3>Teachers</h3></div><span className="subtle-count">{teachers.length} members</span></div>{teachers.length ? <div className="table-wrap"><table><thead><tr><th>Teacher</th><th>Mobile</th><th>Role</th><th>Status</th><th /></tr></thead><tbody>{teachers.map((member) => <tr key={member.membershipId}><td><div className="table-person"><span className="person-avatar blue">{member.displayName.slice(0, 1)}</span><strong>{member.displayName}</strong></div></td><td>{member.phoneE164}</td><td>Teacher</td><td><StatusPill value={member.status} /></td><td><ActivationDisplay activation={member.activation}/><TeacherEditor item={member} classes={classes} request={request} onSaved={onSaved} /> <button className="text-button" onClick={async () => { try { const invite = await request<{ invitationCode: string; expiresAt: string }>(`/admin/members/${member.membershipId}/reissue-invitation`, { method: 'POST' }); onInvite({ code: invite.invitationCode, phone: member.phoneE164, role: 'Teacher', expiresAt: invite.expiresAt }); } catch (failure) { setError(displayError(failure)); } }}>Reissue invite</button></td></tr>)}</tbody></table></div> : <EmptyState title="No teachers invited yet" body={classes.length ? 'Invite your first teacher and attach a class assignment.' : 'Create a class before adding a teacher.'} action={classes.length ? 'Add a teacher' : 'Set up classes'} onClick={() => setFormOpen(true)} />}</section>
   </div>;
 }
 
@@ -393,7 +420,7 @@ function StudentsPage({ students, classes, request, onInvite, onSaved }: {
     try {
       const created = await request<{ parent: { invitationCode: string | null; expiresAt: string | null; invitationStatus?: ParentInvitationStatus }; student: unknown }>('/admin/parents', { method: 'POST', body: JSON.stringify({
         displayName: String(form.get('parentDisplayName')).trim(), phoneE164: String(form.get('parentPhoneE164')).replace(/\s/g, ''),
-        studentDisplayName: String(form.get('studentDisplayName')).trim(), admissionNumber: String(form.get('admissionNumber')).trim().toUpperCase(),
+        studentDisplayName: String(form.get('studentDisplayName')).trim(),
         classId: String(form.get('classId')), relationship: String(form.get('relationship')).trim() || 'Parent',
       }) });
       if (created.parent.invitationCode) onInvite({ code: created.parent.invitationCode, phone: String(form.get('parentPhoneE164')).trim(), role: 'Parent', expiresAt: created.parent.expiresAt ?? undefined });
@@ -451,7 +478,7 @@ function StudentsPage({ students, classes, request, onInvite, onSaved }: {
       {formOpen && <section className="section-card form-card student-form-card" style={{ marginTop: 12 }}><div className="card-heading"><div><span className="eyebrow">STUDENT ONBOARDING</span><h3>Student & parent account</h3></div><button className="icon-button" onClick={() => setFormOpen(false)} aria-label="Close add student form">×</button></div>
         <form className="data-form" onSubmit={(event) => { void createStudent(event); }}>
           <label>Student name<input name="studentDisplayName" required maxLength={160} placeholder="Student full name" /></label>
-          <label>Admission number<input name="admissionNumber" required maxLength={80} pattern="[A-Za-z0-9_-]+" placeholder="SC-1001" /></label>
+
           <label>Class<select name="classId" required defaultValue=""><option value="" disabled>Select an active class</option>{activeClasses.map((item) => <option key={item.id} value={item.id}>{item.displayName} ({item.classCode})</option>)}</select></label>
           <div className="form-divider">PARENT / GUARDIAN ACCOUNT</div>
           <label>Parent or guardian name<input name="parentDisplayName" required maxLength={160} placeholder="Full name" /></label>

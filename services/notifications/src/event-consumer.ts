@@ -39,6 +39,12 @@ export async function applyNotificationEvent(envelope: EventEnvelope, enqueue: (
     await finishFanout(recipients(payload).map(({ guardianUserId, studentId }) => studentId ? write({ recipientUserId: guardianUserId, studentId,
       notificationType: event.eventType === domainEventTypes.postUpdated ? 'POST_UPDATED' : 'POST_PUBLISHED', resourceType: 'POST', resourceId: event.aggregateId,
       title: snapshot.title as string, body: (snapshot.body as string).slice(0, 500), deepLink: `schoolconnect://posts/${event.aggregateId}?studentId=${studentId}` }) : Promise.resolve()));
+    // These IDs are snapshotted by the administrator publication, never supplied by mobile clients.
+    const staff=payload.staffRecipients;
+    if(staff!==undefined && (!Array.isArray(staff) || staff.some((id)=>typeof id!=='string'))) throw new Error('POST_STAFF_RECIPIENTS_INVALID');
+    await finishFanout([...new Set((staff ?? []) as string[])].map((recipientUserId)=>write({recipientUserId,
+      notificationType:'SCHOOL_ANNOUNCEMENT',resourceType:'POST',resourceId:event.aggregateId,
+      title:snapshot.title as string,body:(snapshot.body as string).slice(0,500),deepLink:`schoolconnect://posts/${event.aggregateId}`})));
   }
   if (event.eventType === domainEventTypes.studentAbsent || event.eventType === domainEventTypes.attendanceCorrected || event.eventType === domainEventTypes.leaveReviewed) {
     const studentId = String(payload.studentId ?? '');

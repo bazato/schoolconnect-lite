@@ -20,6 +20,7 @@
     "test:integration": "node scripts/integration-test.mjs",
     "test:product": "node scripts/product-test.mjs",
     "test:admin-mobile": "node scripts/admin-mobile-regression.mjs",
+    "test:accounts": "node scripts/account-management-regression.mjs",
     "test:fees": "node scripts/fees-regression.mjs",
     "dev:test-stack": "node scripts/start-local-test-stack.mjs",
     "test:load": "node scripts/load-test.mjs",

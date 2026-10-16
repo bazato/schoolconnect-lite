@@ -100,7 +100,7 @@ export type ApiSchoolClass = {
   gradeCode?: string;
 };
 
-export type ApiMember = { userId: string; membershipId: string; displayName: string; phoneE164: string; role: Role; status: string };
+export type ApiMember = { userId: string; membershipId: string; displayName: string; phoneE164: string; role: Role; status: string; activation?: {code:string|null;state:string;requiresActivation:boolean;legacyCodeUnavailable?:boolean} };
 export type ApiStudent = { id: string; displayName: string; admissionNumber: string; classId: string; className: string; guardianCount: number; status: string };
 export type ApiAssignment = ApiTeachingAssignment & { status: string; canPublishSchoolWide: boolean; canPublishGradeWide: boolean; canPublishUrgent: boolean };
 export type ApiLeaveRequest = { id: string; studentId: string; studentName: string; guardianUserId: string; attendanceEventId: string; classId: string; attendanceDate: string; reason: string; status: string; reviewNote?: string; createdAt: string };
@@ -113,8 +113,9 @@ export type ProvisionedAccount = {
   userId: string;
   membershipId: string;
   role: Role;
-  invitationCode: string;
-  expiresAt: string;
+  invitationCode: string | null;
+  expiresAt: string | null;
+  invitationStatus?: 'ISSUED' | 'ALREADY_PENDING' | 'ALREADY_ACTIVE';
 };
 export type ParentProvisionedAccount = Omit<ProvisionedAccount, 'invitationCode' | 'expiresAt'> & {
   invitationCode: string | null;
@@ -174,10 +175,10 @@ async function request<T>(path: string, init?: RequestInit, session?: MobileSess
   return payload;
 }
 
-export async function requestOtp(phoneE164: string, invitationCode: string, purpose: 'ACTIVATE' | 'RESET' = 'ACTIVATE') {
+export async function requestOtp(phoneE164: string, invitationCode: string, purpose: 'ACTIVATE' | 'RESET' = 'ACTIVATE',role?:Role) {
   const normalizedPhone = phoneE164.replace(/\s/g, '');
   const send = (code: string) => request<{ challengeId: string; expiresInSeconds: number; resendAfterSeconds: number; developmentCode?: string }>('/auth/otp/request', {
-    method: 'POST', body: JSON.stringify({ phoneE164: normalizedPhone, invitationCode: purpose === 'RESET' ? undefined : code, purpose }),
+    method: 'POST', body: JSON.stringify({ phoneE164: normalizedPhone, invitationCode: purpose === 'RESET' ? undefined : code, purpose,role }),
   });
   return withReturningMemberFallback(invitationCode, send);
 }
@@ -188,13 +189,22 @@ export function verifyOtp(challengeId: string, code: string) {
   });
 }
 
-export function setupPasscode(setupToken: string, passcode: string) {
+export function setupPasscode(setupToken: string, passcode: string,role?:Role) {
   return request<MobileSession>('/auth/passcode/setup', { method: 'POST', body: JSON.stringify({ setupToken, passcode, deviceId: DEVICE_ID }) })
-    .then((session) => ({ ...session, activeMembershipId: session.memberships[0]?.id }));
+    .then((session)=>completeMobileSignIn(session,role));
 }
-export function loginPasscode(phoneE164: string, passcode: string) {
-  return request<MobileSession>('/auth/passcode/login', { method: 'POST', body: JSON.stringify({ phoneE164: phoneE164.replace(/\s/g, ''), passcode, deviceId: DEVICE_ID }) })
-    .then((session) => ({ ...session, activeMembershipId: session.memberships[0]?.id }));
+export function loginPasscode(phoneE164: string, passcode: string,role?:Role) {
+  return request<MobileSession>('/auth/passcode/login', { method: 'POST', body: JSON.stringify({ phoneE164: phoneE164.replace(/\s/g, ''), passcode, deviceId: DEVICE_ID,role }) })
+    .then((session)=>completeMobileSignIn(session,role));
+}
+async function completeMobileSignIn(session:MobileSession,role?:Role):Promise<MobileSession> {
+  const preferred=role ? session.memberships.find((membership)=>membership.role===role) : session.memberships.find((membership)=>['TEACHER','PARENT'].includes(membership.role)) ?? session.memberships[0];
+  if(!preferred) throw new Error('NO_ACTIVE_MEMBERSHIP');
+  if(preferred.id!==session.memberships[0]?.id) {
+    const switched=await request<{accessToken:string;expiresInSeconds:number;activeMembership:{id:string}}>('/auth/switch-role',{method:'POST',body:JSON.stringify({membershipId:preferred.id})},session);
+    return {...session,accessToken:switched.accessToken,expiresInSeconds:switched.expiresInSeconds,activeMembershipId:switched.activeMembership.id};
+  }
+  return {...session,activeMembershipId:preferred.id};
 }
 
 export async function saveSession(session: MobileSession) {
@@ -245,6 +255,8 @@ async function scopedRead<T>(session: MobileSession, path: string, permittedCach
 }
 
 export const mobileApi = {
+  schoolAnnouncements: (session:MobileSession)=>request<Array<ApiTeacherPost & {authorMembershipId:string;teacherCount:number}>>('/admin/announcements',undefined,session),
+  announceSchool: (session:MobileSession,payload:{title:string;body:string;idempotencyKey:string})=>request('/admin/announcements',{method:'POST',body:JSON.stringify(payload)},session),
   context: (session: MobileSession) => request<{ principal: { role: Role }; school: ApiSchool | null; memberships: MobileSession['memberships'] }>('/me/context', undefined, session),
   switchRole: (session: MobileSession, membershipId: string) => request<{ accessToken: string; expiresInSeconds: number; activeMembership: MobileSession['memberships'][number] }>('/auth/switch-role', {
     method: 'POST', body: JSON.stringify({ membershipId }),
@@ -265,7 +277,7 @@ export const mobileApi = {
   },
   teachingScope: (session: MobileSession) => scopedRead<ApiTeachingAssignment[]>(session, '/me/teaching-scope'),
   teacherHome: (session: MobileSession) => scopedRead<{
-    teachingScope: ApiTeachingAssignment[]; posts: ApiTeacherPost[]; drafts: ApiDraft[]; notifications: ApiNotification[];
+    teachingScope: ApiTeachingAssignment[]; posts: ApiTeacherPost[]; drafts: ApiDraft[]; notifications: ApiNotification[];schoolAnnouncements?:ApiTeacherPost[];
   }>(session, '/bff/teacher/home', (value) => ({ ...value,
     posts: value.posts.filter((item) => item.postType !== 'RESULT'),
     drafts: value.drafts.filter((item) => item.postType !== 'RESULT'),

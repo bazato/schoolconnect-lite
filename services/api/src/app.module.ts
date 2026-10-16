@@ -1,6 +1,6 @@
 import {
   BadGatewayException, BadRequestException, Body, CanActivate, ConflictException, Controller, createParamDecorator,
-  ExecutionContext, ForbiddenException, Get, HttpException, Inject, Injectable, Module, NotFoundException, Param, ParseUUIDPipe, Patch, Post, Query, SetMetadata, UnauthorizedException,
+  ExecutionContext, ForbiddenException, Get, HttpException, Inject, Injectable, Module, NotFoundException, Param, ParseUUIDPipe, Patch, Post, Query, SetMetadata, UnauthorizedException, Delete,
 } from '@nestjs/common';
 import { APP_GUARD, Reflector } from '@nestjs/core';
 import { randomUUID } from 'node:crypto';
@@ -11,6 +11,7 @@ import { currentRequestContext } from './request-context';
 import { parseFeeImport, type FeeSchoolContext, type FeeStudent } from '@schoolconnect/contracts';
 import { FeeQueryInterpreter } from './fees-query-interpreter';
 import { invalidScopeInput, validSessionPrincipal } from './security-boundary';
+import { announcementText } from './school-announcement';
 
 type Role = 'PLATFORM_OWNER' | 'SCHOOL_ADMIN' | 'TEACHER' | 'PARENT';
 type Principal = { userId: string; displayName: string; membershipId: string; schoolId: string | null; role: Role; sessionId: string };
@@ -19,6 +20,7 @@ type ServiceName = 'identity' | 'school' | 'content' | 'attendance' | 'files' | 
 
 const IS_PUBLIC = 'schoolconnect:is-public';
 const Public = () => SetMetadata(IS_PUBLIC, true);
+const guardianHistoryQuery = (ids:string[],current:string) => ids.some((id)=>id!==current) ? `&guardianUserIds=${encodeURIComponent([...new Set(ids)].join(','))}` : '';
 const CurrentPrincipal = createParamDecorator((_data: unknown, context: ExecutionContext) => context.switchToHttp().getRequest<ScopedRequest>().principal);
 const configuredNumber = (name: string, fallback: number, maximum: number) => {
   const value = Number(process.env[name] ?? fallback);
@@ -127,7 +129,7 @@ class SessionGuard implements CanActivate {
       method: 'POST', body: JSON.stringify({ accessToken: authorization.slice(7) }),
     });
     if (!validSessionPrincipal(principal)) throw new UnauthorizedException({ code: 'INVALID_SESSION_CONTEXT' });
-    request.principal = principal;
+    request.principal = { ...principal };
     const trace = currentRequestContext();
     if (trace) Object.assign(trace, { schoolId: request.principal.schoolId ?? undefined,
       userId: request.principal.userId, membershipId: request.principal.membershipId, role: request.principal.role });
@@ -146,10 +148,18 @@ class RoutePolicyGuard implements CanActivate {
     if (this.reflector.getAllAndOverride<boolean>(IS_PUBLIC, [context.getHandler(), context.getClass()])) return true;
     const request = context.switchToHttp().getRequest<ScopedRequest>();
     if (!request.principal) throw new UnauthorizedException({ code: 'AUTHENTICATION_REQUIRED' });
-    const decision = await this.clients.request<{ allowed: boolean; reason: string }>('authorization', '/internal/v1/decisions/route', {
-      method: 'POST', body: JSON.stringify({ method: request.method, path: request.path, principal: request.principal }),
+    const selectedSchoolId = request.headers['x-schoolconnect-school-id'];
+    if (selectedSchoolId !== undefined && typeof selectedSchoolId !== 'string') throw new BadRequestException({code:'SCHOOL_CONTEXT_INVALID'});
+    const decision = await this.clients.request<{ allowed: boolean; reason: string; schoolId?: string }>('authorization', '/internal/v1/decisions/route', {
+      method: 'POST', body: JSON.stringify({ method: request.method, path: request.path, principal: request.principal, selectedSchoolId }),
     });
     if (decision?.allowed !== true) throw new ForbiddenException({ code: 'ROUTE_ACCESS_DENIED', reason: decision?.reason });
+    if (decision.schoolId) {
+      const school = await this.clients.request<{ id:string }>('school',`/internal/v1/schools/${decision.schoolId}/management`);
+      if (school?.id !== decision.schoolId) throw new NotFoundException({code:'SCHOOL_NOT_FOUND'});
+      request.principal.schoolId = decision.schoolId;
+      const trace = currentRequestContext(); if(trace) trace.schoolId=decision.schoolId;
+    }
     return true;
   }
 }
@@ -157,7 +167,7 @@ class RoutePolicyGuard implements CanActivate {
 type TeachingCapability = 'RESULTS' | 'ANNOUNCEMENTS' | 'ATTENDANCE';
 type ResourceAuthorization = {
   teacher(principal: Principal, classId: string, capability: TeachingCapability): Promise<void>;
-  guardian(principal: Principal, studentId: string): Promise<void>;
+  guardian(principal: Principal, studentId: string): Promise<string[]>;
 };
 
 // Keep resource-policy decisions behind one replaceable gateway adapter. Identity
@@ -178,22 +188,24 @@ class SchoolResourceAuthorization implements ResourceAuthorization {
     if (principal.role !== 'PARENT' || !principal.schoolId || !studentId) {
       throw new ForbiddenException({ code: 'PARENT_CHILD_CONTEXT_REQUIRED' });
     }
-    const result = await this.clients.request<{ allowed: boolean }>('school',
+    const result = await this.clients.request<{ allowed: boolean; guardianUserIds?:string[] }>('school',
       `/internal/v1/authorization/guardian?schoolId=${encodeURIComponent(principal.schoolId)}&guardianUserId=${encodeURIComponent(principal.userId)}&studentId=${encodeURIComponent(studentId)}`);
     if (result?.allowed !== true) throw new ForbiddenException({ code: 'GUARDIAN_CHILD_ACCESS_DENIED' });
+    return result.guardianUserIds ?? [principal.userId];
   }
 }
 
 class PolicyServiceAuthorization implements ResourceAuthorization {
   constructor(private readonly clients: ServiceClient) {}
   private async decide(action: 'TEACHER_CLASS' | 'GUARDIAN_CHILD', principal: Principal, context: Record<string, unknown>) {
-    const decision = await this.clients.request<{ allowed: boolean; reason: string }>('authorization', '/internal/v1/decisions', {
+    const decision = await this.clients.request<{ allowed: boolean; reason: string; guardianUserIds?:string[] }>('authorization', '/internal/v1/decisions', {
       method: 'POST', body: JSON.stringify({ action, principal, ...context }),
     });
     if (decision?.allowed !== true) throw new ForbiddenException({ code: 'RESOURCE_ACCESS_DENIED', reason: decision?.reason });
+    return decision;
   }
-  teacher(principal: Principal, classId: string, capability: TeachingCapability) { return this.decide('TEACHER_CLASS', principal, { classId, capability }); }
-  guardian(principal: Principal, studentId: string) { return this.decide('GUARDIAN_CHILD', principal, { studentId }); }
+  async teacher(principal: Principal, classId: string, capability: TeachingCapability) { await this.decide('TEACHER_CLASS', principal, { classId, capability }); }
+  async guardian(principal: Principal, studentId: string) { return (await this.decide('GUARDIAN_CHILD', principal, { studentId })).guardianUserIds ?? [principal.userId]; }
 }
 
 const resourceAuthorizationProvider = {
@@ -230,7 +242,7 @@ class HealthController {
 @Controller('auth')
 class AuthController {
   constructor(@Inject(ServiceClient) private readonly clients: ServiceClient) {}
-  @Public() @Post('otp/request') request(@Body() body: { phoneE164: string; invitationCode?: string; purpose?: 'ACTIVATE' | 'RESET' }) {
+  @Public() @Post('otp/request') request(@Body() body: { phoneE164: string; invitationCode?: string; purpose?: 'ACTIVATE' | 'RESET'; role?: Role }) {
     return this.clients.request('identity', '/internal/v1/otp/request', { method: 'POST', body: JSON.stringify(body) });
   }
   @Public() @Post('otp/verify') verify(@Body() body: { challengeId: string; code: string; deviceId?: string }) {
@@ -243,7 +255,7 @@ class AuthController {
   @Public() @Post('passcode/setup') setupPasscode(@Body() body: { setupToken?: string; passcode?: string; deviceId?: string }) {
     return this.clients.request('identity', '/internal/v1/passcode/setup', { method: 'POST', body: JSON.stringify(body) });
   }
-  @Public() @Post('passcode/login') loginPasscode(@Body() body: { phoneE164?: string; passcode?: string; deviceId?: string }) {
+  @Public() @Post('passcode/login') loginPasscode(@Body() body: { phoneE164?: string; passcode?: string; deviceId?: string; role?: Role }) {
     return this.clients.request('identity', '/internal/v1/passcode/login', { method: 'POST', body: JSON.stringify(body) });
   }
   @Post('switch-role')
@@ -293,10 +305,10 @@ class MobileBffController {
   async parentHome(@Query('studentId') studentId: string, @CurrentPrincipal() principal: Principal) {
     if (principal.role !== 'PARENT' || !principal.schoolId) throw new ForbiddenException({ code: 'PARENT_ROLE_REQUIRED' });
     if (!studentId) throw new BadRequestException({ code: 'STUDENT_CONTEXT_REQUIRED' });
-    await this.authorization.guardian(principal, studentId);
+    const guardianUserIds=await this.authorization.guardian(principal, studentId);
     const [children, timeline, attendance, notifications] = await Promise.all([
       this.clients.request('school', `/internal/v1/schools/${principal.schoolId}/guardians/${principal.userId}/children`),
-      this.clients.request('read', `/internal/v1/timeline?schoolId=${principal.schoolId}&guardianUserId=${principal.userId}&studentId=${encodeURIComponent(studentId)}&limit=50`),
+      this.clients.request('read', `/internal/v1/timeline?schoolId=${principal.schoolId}&guardianUserId=${principal.userId}&studentId=${encodeURIComponent(studentId)}&limit=50${guardianHistoryQuery(guardianUserIds,principal.userId)}`),
       this.clients.request('attendance', `/internal/v1/students/${encodeURIComponent(studentId)}/attendance?schoolId=${principal.schoolId}&guardianUserId=${principal.userId}`),
       this.clients.request('notifications', `/internal/v1/notifications?schoolId=${principal.schoolId}&recipientUserId=${principal.userId}&limit=50`),
     ]);
@@ -306,13 +318,14 @@ class MobileBffController {
   @Get('teacher/home')
   async teacherHome(@CurrentPrincipal() principal: Principal) {
     if (principal.role !== 'TEACHER' || !principal.schoolId) throw new ForbiddenException({ code: 'TEACHER_ROLE_REQUIRED' });
-    const [teachingScope, posts, drafts, notifications] = await Promise.all([
+    const [teachingScope, posts, drafts, notifications,schoolAnnouncements] = await Promise.all([
       this.clients.request('school', `/internal/v1/schools/${principal.schoolId}/teachers/${principal.membershipId}/scope`),
       this.clients.request('read', `/internal/v1/teacher-posts?schoolId=${principal.schoolId}&authorMembershipId=${principal.membershipId}&limit=50`),
       this.clients.request('content', `/internal/v1/drafts?schoolId=${principal.schoolId}&authorMembershipId=${principal.membershipId}`),
       this.clients.request('notifications', `/internal/v1/notifications?schoolId=${principal.schoolId}&recipientUserId=${principal.userId}&limit=50`),
+      this.clients.request('content',`/internal/v1/school-announcements?schoolId=${principal.schoolId}`),
     ]);
-    return { teachingScope, posts, drafts, notifications };
+    return { teachingScope, posts, drafts, notifications,schoolAnnouncements };
   }
 
   @Get('admin/home')
@@ -342,7 +355,7 @@ class AdminController {
   @Post('operations/events/:service/:id/retry')
   retryEvent(@Param('service') service: string,@Param('id',ParseUUIDPipe) id: string,@CurrentPrincipal() principal: Principal) {
     // Role is decided centrally; a service whitelist prevents arbitrary routing.
-    if (!['notifications','audit','read'].includes(service)) throw new BadRequestException({code:'EVENT_REPLAY_SERVICE_INVALID'});
+    if (!['notifications','audit','read','school'].includes(service)) throw new BadRequestException({code:'EVENT_REPLAY_SERVICE_INVALID'});
     return this.clients.request(service as ServiceName,`/internal/v1/events/failures/${id}/retry`,{
       method:'POST',body:JSON.stringify({actorUserId:principal.userId}),
     });
@@ -352,6 +365,62 @@ class AdminController {
     if (!principal.schoolId) throw new ForbiddenException({ code: 'SCHOOL_CONTEXT_REQUIRED' });
     return principal.schoolId;
   }
+
+  @Get('announcements')
+  announcements(@CurrentPrincipal() principal:Principal) {
+    return this.clients.request('content',`/internal/v1/school-announcements?schoolId=${this.schoolId(principal)}&includeArchived=true`);
+  }
+  @Post('announcements')
+  async announceSchool(@Body() body:Record<string,unknown>,@CurrentPrincipal() principal:Principal) {
+    const schoolId=this.schoolId(principal),text=announcementText(body);
+    if(typeof body.idempotencyKey!=='string' || !/^[a-zA-Z0-9_-]{8,100}$/.test(body.idempotencyKey)) throw new BadRequestException({code:'IDEMPOTENCY_KEY_REQUIRED'});
+    const school=await this.clients.request<{active:boolean}>('school',`/internal/v1/schools/${schoolId}`);
+    if(school.active!==true) throw new ForbiddenException({code:'SCHOOL_INACTIVE'});
+    const [recipients,teachers]=await Promise.all([
+      this.clients.request<Array<{studentId:string;guardianUserId:string;snapshot:Record<string,unknown>}>>('school',`/internal/v1/schools/${schoolId}/announcement-recipients`),
+      this.clients.request<Array<{userId:string;status:string}>>('identity',`/internal/v1/schools/${schoolId}/members?role=TEACHER`),
+    ]);
+    const staffRecipients=[...new Set(teachers.filter((teacher)=>teacher.status==='ACTIVE').map((teacher)=>teacher.userId))];
+    if(!recipients.length && !staffRecipients.length) throw new BadRequestException({code:'AUDIENCE_HAS_NO_ACTIVE_RECIPIENTS'});
+    return this.clients.request('content','/internal/v1/posts',{method:'POST',body:JSON.stringify({...text,schoolId,actorUserId:principal.userId,authorMembershipId:principal.membershipId,
+      postType:'ANNOUNCEMENT',audienceType:'SCHOOL',recipients,staffRecipients,idempotencyKey:body.idempotencyKey,correlationId:currentRequestContext()?.correlationId})});
+  }
+  private async ownedAnnouncement(postId:string,principal:Principal) {
+    const post=await this.clients.request<{postType:string;classId:string|null;audienceType:string;authorMembershipId:string}>('content',`/internal/v1/posts/${postId}?schoolId=${this.schoolId(principal)}`);
+    if(post.postType!=='ANNOUNCEMENT' || post.classId || post.audienceType!=='SCHOOL' || post.authorMembershipId!==principal.membershipId) throw new ForbiddenException({code:'SCHOOL_ANNOUNCEMENT_EDIT_DENIED'});
+  }
+  @Patch('announcements/:postId')
+  async editAnnouncement(@Param('postId',ParseUUIDPipe) postId:string,@Body() body:Record<string,unknown>,@CurrentPrincipal() principal:Principal) {
+    const text=announcementText(body);
+    if(!Number.isInteger(body.expectedRevisionNumber)) throw new BadRequestException({code:'REVISION_REQUIRED'});
+    await this.ownedAnnouncement(postId,principal);
+    return this.clients.request('content',`/internal/v1/posts/${postId}/revisions`,{method:'POST',body:JSON.stringify({...text,expectedRevisionNumber:body.expectedRevisionNumber,schoolId:this.schoolId(principal),actorUserId:principal.userId,authorMembershipId:principal.membershipId,correlationId:currentRequestContext()?.correlationId})});
+  }
+  @Post('announcements/:postId/archive')
+  async archiveAnnouncement(@Param('postId',ParseUUIDPipe) postId:string,@Body() body:Record<string,unknown>,@CurrentPrincipal() principal:Principal) {
+    if(!Number.isInteger(body.expectedRevisionNumber)) throw new BadRequestException({code:'REVISION_REQUIRED'});
+    await this.ownedAnnouncement(postId,principal);
+    return this.clients.request('content',`/internal/v1/posts/${postId}/archive`,{method:'POST',body:JSON.stringify({expectedRevisionNumber:body.expectedRevisionNumber,schoolId:this.schoolId(principal),actorUserId:principal.userId,authorMembershipId:principal.membershipId,correlationId:currentRequestContext()?.correlationId})});
+  }
+
+  @Delete('schools/:schoolId')
+  deleteSchool(@Param('schoolId',ParseUUIDPipe) schoolId:string) { return this.updateSchool(schoolId,{status:'CLOSED'}); }
+  @Delete('schools/:schoolId/admins/:membershipId')
+  deleteSchoolAdmin(@Param('schoolId',ParseUUIDPipe) schoolId:string,@Param('membershipId',ParseUUIDPipe) membershipId:string) { return this.updateSchoolAdmin(schoolId,membershipId,{status:'REVOKED'}); }
+  @Delete('platform-owners/:membershipId')
+  deletePlatformOwner(@Param('membershipId',ParseUUIDPipe) membershipId:string,@CurrentPrincipal() principal:Principal) { return this.updatePlatformOwner(membershipId,{status:'REVOKED'},principal); }
+  @Delete('classes/:classId')
+  deleteClass(@Param('classId',ParseUUIDPipe) classId:string,@CurrentPrincipal() principal:Principal) { return this.updateClass(classId,{status:'ARCHIVED'},principal); }
+  @Delete('students/:studentId')
+  deleteStudent(@Param('studentId',ParseUUIDPipe) studentId:string,@CurrentPrincipal() principal:Principal) { return this.updateStudent(studentId,{status:'INACTIVE'},principal); }
+  @Delete('teachers/:membershipId')
+  async deleteTeacher(@Param('membershipId',ParseUUIDPipe) membershipId:string,@CurrentPrincipal() principal:Principal) {
+    const members = await this.clients.request<Array<{membershipId:string}>>('identity',`/internal/v1/schools/${this.schoolId(principal)}/members?role=TEACHER`);
+    if(!members.some((m)=>m.membershipId===membershipId)) throw new NotFoundException({code:'TEACHER_NOT_FOUND'});
+    return this.updateMember(membershipId,{status:'REVOKED'},principal);
+  }
+  @Delete('members/:membershipId')
+  deleteMember(@Param('membershipId',ParseUUIDPipe) membershipId:string,@CurrentPrincipal() principal:Principal) { return this.updateMember(membershipId,{status:'REVOKED'},principal); }
 
   private async feeImportContext(body: unknown, principal: Principal) {
     // Role decisions belong to the configurable Authorization route policy.
@@ -385,15 +454,13 @@ class AdminController {
   }
 
   @Get('schools')
-  schools(@CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'PLATFORM_OWNER') throw new ForbiddenException({ code: 'PLATFORM_OWNER_ROLE_REQUIRED' });
+  schools() {
     return this.clients.request('school', '/internal/v1/schools');
   }
 
   @Post('schools')
-  async createSchool(@Body() body: { schoolCode?: string; displayName?: string; timezone?: string; adminDisplayName?: string; adminPhoneE164?: string }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'PLATFORM_OWNER') throw new ForbiddenException({ code: 'PLATFORM_OWNER_ROLE_REQUIRED' });
-    if (!body.schoolCode || !body.displayName || !body.timezone || !body.adminDisplayName || !body.adminPhoneE164) {
+  async createSchool(@Body() body: { schoolCode?: string; displayName?: string; timezone?: string; adminDisplayName?: string; adminPhoneE164?: string }) {
+    if (!body.displayName || !body.timezone || !body.adminDisplayName || !body.adminPhoneE164) {
       throw new BadRequestException({ code: 'SCHOOL_AND_ADMIN_FIELDS_REQUIRED' });
     }
     const school = await this.clients.request<{ id: string; schoolCode: string; displayName: string; timezone: string; status: string; created: boolean }>('school', '/internal/v1/schools', {
@@ -411,32 +478,27 @@ class AdminController {
   }
 
   @Patch('schools/:schoolId')
-  updateSchool(@Param('schoolId') schoolId: string, @Body() body: { displayName?: string; timezone?: string; status?: 'ACTIVE' | 'SUSPENDED' | 'CLOSED' }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'PLATFORM_OWNER') throw new ForbiddenException({ code: 'PLATFORM_OWNER_ROLE_REQUIRED' });
+  updateSchool(@Param('schoolId') schoolId: string, @Body() body: { displayName?: string; timezone?: string; status?: 'ACTIVE' | 'SUSPENDED' | 'CLOSED' }) {
     return this.clients.request('school', `/internal/v1/schools/${schoolId}`, { method: 'PATCH', body: JSON.stringify(body) });
   }
 
   @Get('platform-owners')
-  platformOwners(@CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'PLATFORM_OWNER') throw new ForbiddenException({ code: 'PLATFORM_OWNER_ROLE_REQUIRED' });
+  platformOwners() {
     return this.clients.request('identity', '/internal/v1/platform/members');
   }
 
   @Post('platform-owners')
-  createPlatformOwner(@Body() body: { displayName?: string; phoneE164?: string }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'PLATFORM_OWNER') throw new ForbiddenException({ code: 'PLATFORM_OWNER_ROLE_REQUIRED' });
+  createPlatformOwner(@Body() body: { displayName?: string; phoneE164?: string }) {
     return this.clients.request('identity', '/internal/v1/provisioning/accounts', { method: 'POST', body: JSON.stringify({ schoolId: null, role: 'PLATFORM_OWNER', ...body }) });
   }
 
   @Get('schools/:schoolId/admins')
-  schoolAdmins(@Param('schoolId', new ParseUUIDPipe()) schoolId: string, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'PLATFORM_OWNER') throw new ForbiddenException({ code: 'PLATFORM_OWNER_ROLE_REQUIRED' });
+  schoolAdmins(@Param('schoolId', new ParseUUIDPipe()) schoolId: string) {
     return this.clients.request('identity', `/internal/v1/schools/${schoolId}/members?role=SCHOOL_ADMIN`);
   }
 
   @Post('schools/:schoolId/admins')
-  async addSchoolAdmin(@Param('schoolId') schoolId: string, @Body() body: { displayName?: string; phoneE164?: string }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'PLATFORM_OWNER') throw new ForbiddenException({ code: 'PLATFORM_OWNER_ROLE_REQUIRED' });
+  async addSchoolAdmin(@Param('schoolId') schoolId: string, @Body() body: { displayName?: string; phoneE164?: string }) {
     const school = await this.clients.request<{ id: string; active: boolean }>('school', `/internal/v1/schools/${schoolId}`);
     if (!school.active) throw new NotFoundException({ code: 'ACTIVE_SCHOOL_NOT_FOUND' });
     return this.clients.request('identity', '/internal/v1/provisioning/accounts', { method: 'POST', body: JSON.stringify({ schoolId, role: 'SCHOOL_ADMIN', ...body }) });
@@ -444,7 +506,6 @@ class AdminController {
 
   @Patch('platform-owners/:membershipId')
   async updatePlatformOwner(@Param('membershipId') membershipId: string, @Body() body: { displayName?: string; phoneE164?: string; status?: 'ACTIVE' | 'REVOKED' }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'PLATFORM_OWNER') throw new ForbiddenException({ code: 'PLATFORM_OWNER_ROLE_REQUIRED' });
     if (membershipId === principal.membershipId && body.status === 'REVOKED') throw new BadRequestException({ code: 'CANNOT_REVOKE_OWN_MEMBERSHIP' });
     const owners = await this.clients.request<Array<{ membershipId: string; status: string }>>('identity', '/internal/v1/platform/members');
     if (!owners.some((owner) => owner.membershipId === membershipId)) throw new NotFoundException({ code: 'PLATFORM_OWNER_NOT_FOUND' });
@@ -455,8 +516,7 @@ class AdminController {
   }
 
   @Patch('schools/:schoolId/admins/:membershipId')
-  async updateSchoolAdmin(@Param('schoolId') schoolId: string, @Param('membershipId') membershipId: string, @Body() body: { displayName?: string; phoneE164?: string; status?: 'ACTIVE' | 'REVOKED' }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'PLATFORM_OWNER') throw new ForbiddenException({ code: 'PLATFORM_OWNER_ROLE_REQUIRED' });
+  async updateSchoolAdmin(@Param('schoolId') schoolId: string, @Param('membershipId') membershipId: string, @Body() body: { displayName?: string; phoneE164?: string; status?: 'ACTIVE' | 'REVOKED' }) {
     const admins = await this.clients.request<Array<{ membershipId: string }>>('identity', `/internal/v1/schools/${schoolId}/members?role=SCHOOL_ADMIN`);
     if (!admins.some((admin) => admin.membershipId === membershipId)) throw new NotFoundException({ code: 'SCHOOL_ADMIN_NOT_FOUND' });
     return this.clients.request('identity', `/internal/v1/members/${membershipId}`, { method: 'PATCH', body: JSON.stringify({ ...body, schoolId }) });
@@ -464,7 +524,6 @@ class AdminController {
 
   @Post('schools/:schoolId/admins/:membershipId/reissue-invitation')
   async reissueSchoolAdmin(@Param('schoolId') schoolId: string, @Param('membershipId') membershipId: string, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'PLATFORM_OWNER') throw new ForbiddenException({ code: 'PLATFORM_OWNER_ROLE_REQUIRED' });
     const admins = await this.clients.request<Array<{ membershipId: string }>>('identity', `/internal/v1/schools/${schoolId}/members?role=SCHOOL_ADMIN`);
     if (!admins.some((admin) => admin.membershipId === membershipId)) throw new NotFoundException({ code: 'SCHOOL_ADMIN_NOT_FOUND' });
     return this.clients.request('identity', `/internal/v1/provisioning/accounts/${membershipId}/reissue-invitation`, { method: 'POST', body: JSON.stringify({ schoolId, actorUserId: principal.userId }) });
@@ -472,7 +531,6 @@ class AdminController {
 
   @Post('platform-owners/:membershipId/reissue-invitation')
   async reissuePlatformOwner(@Param('membershipId') membershipId: string, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'PLATFORM_OWNER') throw new ForbiddenException({ code: 'PLATFORM_OWNER_ROLE_REQUIRED' });
     const owners = await this.clients.request<Array<{ membershipId: string }>>('identity', '/internal/v1/platform/members');
     if (!owners.some((owner) => owner.membershipId === membershipId)) throw new NotFoundException({ code: 'PLATFORM_OWNER_NOT_FOUND' });
     return this.clients.request('identity', `/internal/v1/provisioning/accounts/${membershipId}/reissue-invitation`, { method: 'POST', body: JSON.stringify({ schoolId: null, actorUserId: principal.userId }) });
@@ -480,61 +538,66 @@ class AdminController {
 
   @Get('classes')
   classes(@CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
-    return this.clients.request('school', `/internal/v1/schools/${this.schoolId(principal)}/classes`);
+    return this.clients.request('school', `/internal/v1/schools/${this.schoolId(principal)}/classes?includeArchived=true`);
   }
 
   @Post('classes')
   createClass(@Body() body: { classCode?: string; displayName?: string; academicYear?: string; gradeCode?: string }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     return this.clients.request('school', `/internal/v1/schools/${this.schoolId(principal)}/classes`, {
       method: 'POST', body: JSON.stringify(body),
     });
   }
 
   @Patch('classes/:classId')
-  updateClass(@Param('classId', ParseUUIDPipe) classId: string, @Body() body: { classCode?: string; displayName?: string; gradeCode?: string; status?: 'ACTIVE' | 'ARCHIVED' }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
+  updateClass(@Param('classId', ParseUUIDPipe) classId: string, @Body() body: { classCode?: string; displayName?: string; academicYear?:string; gradeCode?: string; status?: 'ACTIVE' | 'ARCHIVED' }, @CurrentPrincipal() principal: Principal) {
     return this.clients.request('school', `/internal/v1/schools/${this.schoolId(principal)}/classes/${classId}`, { method: 'PATCH', body: JSON.stringify(body) });
   }
 
   @Patch('configuration')
   configuration(@Body() body: { scheduledAnnouncementsEnabled?: boolean; schoolWideAnnouncementsEnabled?: boolean; gradeWideAnnouncementsEnabled?: boolean; urgentAnnouncementsEnabled?: boolean }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     return this.clients.request('school', `/internal/v1/schools/${this.schoolId(principal)}/configuration`, { method: 'PATCH', body: JSON.stringify(body) });
   }
 
   @Post('academic-years/rollover')
   rollover(@Body() body: { fromYear?: string; toYear?: string }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     return this.clients.request('school', `/internal/v1/schools/${this.schoolId(principal)}/academic-years/rollover`, { method: 'POST', body: JSON.stringify(body) });
   }
 
   @Get('teachers')
   teachers(@CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     return this.clients.request('identity', `/internal/v1/schools/${this.schoolId(principal)}/members?role=TEACHER`);
   }
 
   @Get('parents')
   parents(@CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     return this.clients.request('identity', `/internal/v1/schools/${this.schoolId(principal)}/members?role=PARENT`);
+  }
+
+  @Get('administrators') administrators(@CurrentPrincipal() principal:Principal) {return this.clients.request('identity',`/internal/v1/schools/${this.schoolId(principal)}/members?role=SCHOOL_ADMIN`);}
+  @Patch('administrators/:membershipId') async editAdministrator(@Param('membershipId',ParseUUIDPipe) membershipId:string,@Body() body:{displayName?:string;phoneE164?:string},@CurrentPrincipal() principal:Principal) {
+    const schoolId=this.schoolId(principal);
+    const rows=await this.clients.request<Array<{membershipId:string}>>('identity',`/internal/v1/schools/${schoolId}/members?role=SCHOOL_ADMIN`);
+    if(!rows.some((row)=>row.membershipId===membershipId)) throw new NotFoundException({code:'SCHOOL_ADMIN_NOT_FOUND'});
+    return this.clients.request('identity',`/internal/v1/members/${membershipId}`,{method:'PATCH',body:JSON.stringify({schoolId,displayName:body.displayName,phoneE164:body.phoneE164})});
+  }
+  @Post('administrators/:membershipId/reissue-invitation') async reissueAdministrator(@Param('membershipId',ParseUUIDPipe) membershipId:string,@CurrentPrincipal() principal:Principal) {
+    const schoolId=this.schoolId(principal);
+    const rows=await this.clients.request<Array<{membershipId:string}>>('identity',`/internal/v1/schools/${schoolId}/members?role=SCHOOL_ADMIN`);
+    if(!rows.some((row)=>row.membershipId===membershipId)) throw new NotFoundException({code:'SCHOOL_ADMIN_NOT_FOUND'});
+    return this.clients.request('identity',`/internal/v1/provisioning/accounts/${membershipId}/reissue-invitation`,{method:'POST',body:JSON.stringify({schoolId})});
   }
 
   @Get('teachers/:membershipId/assignments')
   assignments(@Param('membershipId') membershipId: string, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     return this.clients.request('school', `/internal/v1/schools/${this.schoolId(principal)}/teachers/${membershipId}/assignments`);
   }
 
   @Post('teachers/:membershipId/assignments')
   async addAssignment(@Param('membershipId', ParseUUIDPipe) membershipId: string, @Body() body: { classId?: string; subjectCode?: string; subjectName?: string; canPublishResults?: boolean; canPublishAnnouncements?: boolean; canRecordAttendance?: boolean }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     const schoolId = this.schoolId(principal);
     const teachers = await this.clients.request<Array<{ membershipId: string; status: string }>>('identity', `/internal/v1/schools/${schoolId}/members?role=TEACHER`);
     if (!teachers.some((teacher) => teacher.membershipId === membershipId && teacher.status === 'ACTIVE')) throw new ForbiddenException({ code: 'TEACHER_NOT_ACTIVE_IN_SCHOOL' });
-    if (!body.classId || !body.subjectCode?.trim() || !body.subjectName?.trim()) throw new BadRequestException({ code: 'TEACHER_AND_ASSIGNMENT_FIELDS_REQUIRED' });
+    if (!body.classId || !body.subjectName?.trim()) throw new BadRequestException({ code: 'TEACHER_AND_ASSIGNMENT_FIELDS_REQUIRED' });
     for (const value of [body.canPublishResults, body.canPublishAnnouncements, body.canRecordAttendance]) {
       if (value !== undefined && typeof value !== 'boolean') throw new BadRequestException({ code: 'ASSIGNMENT_PERMISSION_INVALID' });
     }
@@ -546,18 +609,17 @@ class AdminController {
 
   @Patch('assignments/:assignmentId')
   updateAssignment(@Param('assignmentId') assignmentId: string, @Body() body: Record<string, unknown>, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     return this.clients.request('school', `/internal/v1/schools/${this.schoolId(principal)}/teacher-assignments/${assignmentId}`, { method: 'PATCH', body: JSON.stringify(body) });
   }
 
   @Patch('members/:membershipId')
   async updateMember(@Param('membershipId') membershipId: string, @Body() body: { displayName?: string; phoneE164?: string; status?: 'ACTIVE' | 'REVOKED' }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     const schoolId = this.schoolId(principal);
     const members = await this.clients.request<Array<{ membershipId: string; userId: string; role: Role }>>('identity', `/internal/v1/schools/${schoolId}/members`);
     const target = members.find((member) => member.membershipId === membershipId);
     if (!target || !['TEACHER','PARENT'].includes(target.role)) throw new ForbiddenException({ code: 'MEMBER_MANAGEMENT_DENIED' });
-    const result = await this.clients.request('identity', `/internal/v1/members/${membershipId}`, { method: 'PATCH', body: JSON.stringify({ ...body, schoolId }) });
+    const guardianStudentIds=target.role==='PARENT' && body.phoneE164 ? await this.clients.request<string[]>('school',`/internal/v1/schools/${schoolId}/guardians/${target.userId}/student-links`) : undefined;
+    const result = await this.clients.request('identity', `/internal/v1/members/${membershipId}`, { method: 'PATCH', body: JSON.stringify({ displayName:body.displayName,phoneE164:body.phoneE164,status:body.status,schoolId,guardianStudentIds }) });
     if (body.status === 'REVOKED' && target.role === 'TEACHER') await this.clients.request('school', `/internal/v1/schools/${schoolId}/teachers/${membershipId}/revoke-assignments`, { method: 'POST', body: '{}' });
     if (body.status === 'REVOKED' && target.role === 'PARENT') await this.clients.request('school', `/internal/v1/schools/${schoolId}/guardians/${target.userId}/revoke-links`, { method: 'POST', body: '{}' });
     return result;
@@ -565,14 +627,13 @@ class AdminController {
 
   @Post('teachers')
   async createTeacher(@Body() body: { displayName?: string; phoneE164?: string; classId?: string; subjectCode?: string; subjectName?: string; canPublishResults?: boolean; canPublishAnnouncements?: boolean; canRecordAttendance?: boolean; canPublishSchoolWide?: boolean; canPublishGradeWide?: boolean; canPublishUrgent?: boolean }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     const schoolId = this.schoolId(principal);
-    if (!body.displayName || !body.phoneE164 || !body.classId || !body.subjectCode || !body.subjectName) {
+    if (!body.displayName || !body.phoneE164 || !body.classId || !body.subjectName) {
       throw new BadRequestException({ code: 'TEACHER_AND_ASSIGNMENT_FIELDS_REQUIRED' });
     }
     const classes = await this.clients.request<Array<{ id: string }>>('school', `/internal/v1/schools/${schoolId}/classes`);
     if (!classes.some((item) => item.id === body.classId)) throw new BadRequestException({ code: 'CLASS_NOT_FOUND_IN_SCHOOL' });
-    const teacher = await this.clients.request<{ userId: string; membershipId: string; role: Role; invitationCode: string; expiresAt: string }>('identity', '/internal/v1/provisioning/accounts', {
+    const teacher = await this.clients.request<{ userId: string; membershipId: string; role: Role; invitationCode: string; expiresAt: string; membershipProvisioned?:boolean }>('identity', '/internal/v1/provisioning/accounts', {
       method: 'POST', body: JSON.stringify({ schoolId, role: 'TEACHER', phoneE164: body.phoneE164, displayName: body.displayName }),
     });
     try {
@@ -585,26 +646,23 @@ class AdminController {
       });
       return { teacher, assignment };
     } catch (error) {
-      await this.clients.request('identity', `/internal/v1/provisioning/accounts/${teacher.membershipId}/revoke`, { method: 'POST', body: '{}' }).catch(() => undefined);
+      if (teacher.membershipProvisioned === true) await this.clients.request('identity', `/internal/v1/provisioning/accounts/${teacher.membershipId}/revoke`, { method: 'POST', body: '{}' }).catch(() => undefined);
       throw error;
     }
   }
 
   @Get('students')
   students(@CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     return this.clients.request('school', `/internal/v1/schools/${this.schoolId(principal)}/students`);
   }
 
   @Patch('students/:studentId')
-  updateStudent(@Param('studentId') studentId: string, @Body() body: { displayName?: string; status?: 'ACTIVE' | 'INACTIVE' | 'GRADUATED'; classId?: string }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
+  updateStudent(@Param('studentId') studentId: string, @Body() body: { displayName?: string; admissionNumber?:string; status?: 'ACTIVE' | 'INACTIVE' | 'GRADUATED'; classId?: string }, @CurrentPrincipal() principal: Principal) {
     return this.clients.request('school', `/internal/v1/schools/${this.schoolId(principal)}/students/${studentId}`, { method: 'PATCH', body: JSON.stringify(body) });
   }
 
   @Post('students/:studentId/guardians/:guardianUserId/link')
   async linkGuardian(@Param('studentId') studentId: string, @Param('guardianUserId') guardianUserId: string, @Body() body: { active: boolean; relationship?: string }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     const schoolId = this.schoolId(principal);
     const parents = await this.clients.request<Array<{ userId: string; status: string }>>('identity', `/internal/v1/schools/${schoolId}/members?role=PARENT`);
     if (!parents.some((parent) => parent.userId === guardianUserId && parent.status === 'ACTIVE')) throw new ForbiddenException({ code: 'PARENT_NOT_ACTIVE_IN_SCHOOL' });
@@ -613,9 +671,8 @@ class AdminController {
 
   @Post('parents')
   async createParent(@Body() body: { displayName?: string; phoneE164?: string; studentDisplayName?: string; admissionNumber?: string; classId?: string; relationship?: string }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     const schoolId = this.schoolId(principal);
-    if (!body.displayName || !body.phoneE164 || !body.studentDisplayName || !body.admissionNumber || !body.classId) throw new BadRequestException({ code: 'PARENT_AND_STUDENT_FIELDS_REQUIRED' });
+    if (!body.displayName || !body.phoneE164 || !body.studentDisplayName || !body.classId) throw new BadRequestException({ code: 'PARENT_AND_STUDENT_FIELDS_REQUIRED' });
     const classes = await this.clients.request<Array<{ id: string }>>('school', `/internal/v1/schools/${schoolId}/classes`);
     if (!classes.some((item) => item.id === body.classId)) throw new BadRequestException({ code: 'CLASS_NOT_FOUND_IN_SCHOOL' });
     const parent = await this.clients.request<{ userId: string; membershipId: string; role: Role; invitationCode: string | null; expiresAt: string | null;
@@ -641,7 +698,6 @@ class AdminController {
 
   @Post('members/:membershipId/reissue-invitation')
   reissueInvitation(@Param('membershipId') membershipId: string, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     return this.clients.request('identity', `/internal/v1/provisioning/accounts/${membershipId}/reissue-invitation`, {
       method: 'POST', body: JSON.stringify({ schoolId: this.schoolId(principal), actorUserId: principal.userId }),
     });
@@ -649,7 +705,6 @@ class AdminController {
 
   @Post('students/import-preview')
   async previewImport(@Body() body: { csv?: string }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     const rows = parseStudentCsv(body.csv ?? '');
     const classes = await this.clients.request<Array<{ id: string; classCode: string }>>('school', `/internal/v1/schools/${this.schoolId(principal)}/classes`);
     return { count: rows.length, rows: rows.map((row, index) => ({ row: index + 2, admissionNumber: row.admissionNumber, studentDisplayName: row.studentDisplayName, classCode: row.classCode, classId: classes.find((item) => item.classCode === row.classCode)?.id ?? null })), valid: rows.every((row) => classes.some((item) => item.classCode === row.classCode)) };
@@ -657,7 +712,6 @@ class AdminController {
 
   @Post('students/import')
   async importStudents(@Body() body: { csv?: string }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     const schoolId = this.schoolId(principal);
     const rows = parseStudentCsv(body.csv ?? '');
     const classes = await this.clients.request<Array<{ id: string; classCode: string }>>('school', `/internal/v1/schools/${schoolId}/classes`);
@@ -734,7 +788,6 @@ class AdminController {
 
   @Get('leave-requests')
   async leaveRequests(@Query('status') status: string | undefined, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     const schoolId = this.schoolId(principal);
     const [leaves, students] = await Promise.all([
       this.clients.request<Array<{ studentId: string } & Record<string, unknown>>>('attendance', `/internal/v1/leave-requests?schoolId=${schoolId}${status ? `&status=${encodeURIComponent(status)}` : ''}`),
@@ -746,13 +799,11 @@ class AdminController {
 
   @Post('leave-requests/:leaveRequestId/review')
   reviewLeave(@Param('leaveRequestId') leaveRequestId: string, @Body() body: { decision?: 'APPROVED' | 'REJECTED'; reviewNote?: string }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     return this.clients.request('attendance', `/internal/v1/leave-requests/${leaveRequestId}/review`, { method: 'POST', body: JSON.stringify({ ...body, schoolId: this.schoolId(principal), actorMembershipId: principal.membershipId, correlationId: currentRequestContext()?.correlationId }) });
   }
 
   @Get('attendance/correction-context')
   async correctionContext(@Query('classId') classId: string, @Query('attendanceDate') attendanceDate: string, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     if (!/^\d{4}-\d{2}-\d{2}$/.test(attendanceDate)) throw new BadRequestException({ code: 'ATTENDANCE_DATE_INVALID' });
     const schoolId = this.schoolId(principal);
     const classes = await this.clients.request<Array<{ id: string }>>('school', `/internal/v1/schools/${schoolId}/classes`);
@@ -767,7 +818,6 @@ class AdminController {
 
   @Post('attendance/corrections')
   async adminCorrection(@Body() body: { classId?: string; attendanceDate?: string; expectedVersion?: number; correctionReason?: string; idempotencyKey?: string; rows?: Array<{ studentId: string; status: string }> }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     if (!body.classId || !body.attendanceDate || !/^\d{4}-\d{2}-\d{2}$/.test(body.attendanceDate) || !Number.isInteger(body.expectedVersion) || Number(body.expectedVersion) < 1 || !body.idempotencyKey || !body.correctionReason || body.correctionReason.trim().length < 10) {
       throw new BadRequestException({ code: 'ADMIN_CORRECTION_FIELDS_REQUIRED' });
     }
@@ -787,7 +837,6 @@ class AdminController {
 
   @Get('reports/summary')
   async summary(@Query('fromDate') fromDate: string, @Query('toDate') toDate: string, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     if (!/^\d{4}-\d{2}-\d{2}$/.test(fromDate) || !/^\d{4}-\d{2}-\d{2}$/.test(toDate) || fromDate > toDate) throw new BadRequestException({ code: 'REPORT_DATE_RANGE_INVALID' });
     const schoolId = this.schoolId(principal);
     const [students, teachers, attendance, notifications, audit] = await Promise.all([
@@ -802,13 +851,11 @@ class AdminController {
 
   @Get('attendance/projection-consistency')
   projectionConsistency(@CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     return this.clients.request('attendance', `/internal/v1/attendance/projection-consistency?schoolId=${this.schoolId(principal)}`);
   }
 
   @Post('attendance/rebuild-projection')
   rebuildProjection(@Body() body: { confirmation?: string }, @CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'SCHOOL_ADMIN_ROLE_REQUIRED' });
     if (body.confirmation !== 'REBUILD_FROM_EVENTS') throw new BadRequestException({ code: 'REBUILD_CONFIRMATION_REQUIRED' });
     return this.clients.request('attendance', '/internal/v1/attendance/rebuild-projection', { method: 'POST', body: JSON.stringify({
       schoolId: this.schoolId(principal), actorMembershipId: principal.membershipId, correlationId: currentRequestContext()?.correlationId,
@@ -817,13 +864,11 @@ class AdminController {
 
   @Get('reports/audit')
   audit(@CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'PLATFORM_OWNER' && principal.role !== 'SCHOOL_ADMIN') throw new ForbiddenException({ code: 'ADMIN_ROLE_REQUIRED' });
     return this.clients.request('audit', `/internal/v1/audit-events${principal.schoolId ? `?schoolId=${principal.schoolId}` : ''}`);
   }
 
   @Get('reports/platform-summary')
-  async platformSummary(@CurrentPrincipal() principal: Principal) {
-    if (principal.role !== 'PLATFORM_OWNER') throw new ForbiddenException({ code: 'PLATFORM_OWNER_ROLE_REQUIRED' });
+  async platformSummary() {
     const [schools, memberships] = await Promise.all([
       this.clients.request<Array<{ schoolId: string; schoolCode: string; displayName: string; status: string; activeStudentCount: number; totalStudentCount: number }>>('school', '/internal/v1/reports/platform-summary'),
       this.clients.request<Array<{ schoolId: string; activeTeacherCount: number; activeParentCount: number; activeAdminCount: number }>>('identity', '/internal/v1/reports/platform-memberships'),
@@ -840,13 +885,13 @@ class ContentController {
   constructor(@Inject(ServiceClient) private readonly clients: ServiceClient,
     @Inject('RESOURCE_AUTHORIZATION') private readonly authorization: ResourceAuthorization) {}
   private async guardianAllowed(principal: Principal, studentId: string) {
-    await this.authorization.guardian(principal, studentId);
+    return this.authorization.guardian(principal, studentId);
   }
   @Get('timeline/:studentId')
   async timeline(@Param('studentId') studentId: string, @Query('before') before: string | undefined, @Query('limit') limit: string | undefined, @CurrentPrincipal() principal: Principal) {
     if (principal.role !== 'PARENT') throw new ForbiddenException({ code: 'PARENT_ROLE_REQUIRED' });
-    await this.guardianAllowed(principal, studentId);
-    return this.clients.request('read', `/internal/v1/timeline?schoolId=${principal.schoolId}&guardianUserId=${principal.userId}&studentId=${studentId}&limit=${encodeURIComponent(limit ?? '50')}${before ? `&before=${encodeURIComponent(before)}` : ''}`);
+    const ids=await this.guardianAllowed(principal, studentId);
+    return this.clients.request('read', `/internal/v1/timeline?schoolId=${principal.schoolId}&guardianUserId=${principal.userId}&studentId=${studentId}&limit=${encodeURIComponent(limit ?? '50')}${before ? `&before=${encodeURIComponent(before)}` : ''}${guardianHistoryQuery(ids,principal.userId)}`);
   }
   @Get('teacher-posts')
   teacherPosts(@Query('before') before: string | undefined, @Query('limit') limit: string | undefined, @CurrentPrincipal() principal: Principal) {
@@ -857,12 +902,13 @@ class ContentController {
   async post(@Param('postId') postId: string, @Query('studentId') studentId: string | undefined, @CurrentPrincipal() principal: Principal) {
     if (principal.role === 'PARENT') {
       if (!studentId) throw new BadRequestException({ code: 'STUDENT_CONTEXT_REQUIRED' });
-      await this.guardianAllowed(principal, studentId);
-      return this.clients.request('content', `/internal/v1/posts/${postId}?schoolId=${principal.schoolId}&guardianUserId=${principal.userId}&studentId=${studentId}`);
+      const ids=await this.guardianAllowed(principal, studentId);
+      return this.clients.request('content', `/internal/v1/posts/${postId}?schoolId=${principal.schoolId}&guardianUserId=${principal.userId}&studentId=${studentId}${guardianHistoryQuery(ids,principal.userId)}`);
     }
     if (!['TEACHER','SCHOOL_ADMIN'].includes(principal.role)) throw new ForbiddenException({ code: 'SCHOOL_STAFF_ROLE_REQUIRED' });
-    const post = await this.clients.request<{ classId?: string; postType: string; authorMembershipId: string }>('content', `/internal/v1/posts/${postId}?schoolId=${principal.schoolId}`);
-    if (principal.role === 'TEACHER' && post.authorMembershipId !== principal.membershipId) throw new ForbiddenException({ code: 'POST_ACCESS_DENIED' });
+    const post = await this.clients.request<{ classId?: string; postType: string; audienceType?:string;status?:string;authorMembershipId: string }>('content', `/internal/v1/posts/${postId}?schoolId=${principal.schoolId}`);
+    const schoolNotice=post.postType==='ANNOUNCEMENT' && !post.classId && post.audienceType==='SCHOOL' && ['PUBLISHED','UPDATED'].includes(post.status ?? '');
+    if (principal.role === 'TEACHER' && post.authorMembershipId !== principal.membershipId && !schoolNotice) throw new ForbiddenException({ code: 'POST_ACCESS_DENIED' });
     return post;
   }
   @Post('posts')
@@ -941,8 +987,8 @@ class ContentController {
   @Post('posts/:postId/view')
   async view(@Param('postId') postId: string, @Body() body: { studentId: string }, @CurrentPrincipal() principal: Principal) {
     if (principal.role !== 'PARENT') throw new ForbiddenException({ code: 'PARENT_ROLE_REQUIRED' });
-    await this.guardianAllowed(principal, body.studentId);
-    return this.clients.request('content', `/internal/v1/posts/${postId}/views`, { method: 'POST', body: JSON.stringify({ schoolId: principal.schoolId, guardianUserId: principal.userId, studentId: body.studentId }) });
+    const ids=await this.guardianAllowed(principal, body.studentId);
+    return this.clients.request('content', `/internal/v1/posts/${postId}/views`, { method: 'POST', body: JSON.stringify({ schoolId: principal.schoolId, guardianUserId: principal.userId, studentId: body.studentId, ...(ids.length>1 ? {guardianUserIds:ids} : {}) }) });
   }
 
   @Post('posts/:postId/archive')
@@ -1073,8 +1119,8 @@ class FilesController {
     const context = await this.clients.request<{ postId: string; authorMembershipId: string; classId: string; studentId?: string; privacyClassification: string }>('content', `/internal/v1/files/${fileId}/context?schoolId=${principal.schoolId}`);
     let authorized = false;
     if (principal.role === 'PARENT' && body.studentId && (!context.studentId || context.studentId === body.studentId)) {
-      await this.authorization.guardian(principal, body.studentId);
-      await this.clients.request('content', `/internal/v1/posts/${context.postId}?schoolId=${principal.schoolId}&guardianUserId=${principal.userId}&studentId=${body.studentId}`);
+      const ids=await this.authorization.guardian(principal, body.studentId);
+      await this.clients.request('content', `/internal/v1/posts/${context.postId}?schoolId=${principal.schoolId}&guardianUserId=${principal.userId}&studentId=${body.studentId}${guardianHistoryQuery(ids,principal.userId)}`);
       authorized = true;
     } else if (principal.role === 'TEACHER') authorized = context.authorMembershipId === principal.membershipId;
     if (!authorized) throw new ForbiddenException({ code: 'FILE_ACCESS_DENIED' });

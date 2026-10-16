@@ -77,13 +77,13 @@ export class ReadRepository implements OnModuleDestroy {
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
 
-  async parentTimeline(schoolId: string, guardianUserId: string, studentId: string, before?: string, limit = 50) {
-    const result = await this.pool.query(`SELECT p.post_id AS id,p.post_type AS "postType",p.status,p.published_at AS "publishedAt",p.scheduled_for AS "scheduledFor",
+  async parentTimeline(schoolId: string, guardianUserId: string, studentId: string, before?: string, limit = 50,guardianUserIds?:string[]) {
+    const result = await this.pool.query(`SELECT DISTINCT p.post_id AS id,p.post_type AS "postType",p.status,p.published_at AS "publishedAt",p.scheduled_for AS "scheduledFor",
       p.revision_number AS "revisionNumber",p.title,p.body,p.subject_code AS "subjectCode",p.exam_name AS "examName",p.due_date AS "dueDate",p.urgent,p.attachments
       FROM read_post_recipients r JOIN read_posts p ON p.post_id=r.post_id
-      WHERE r.school_id=$1 AND r.guardian_user_id=$2 AND r.student_id=$3 AND p.status IN ('PUBLISHED','UPDATED')
+      WHERE r.school_id=$1 AND r.guardian_user_id=ANY($2::uuid[]) AND r.student_id=$3 AND p.status IN ('PUBLISHED','UPDATED')
         AND ($4::timestamptz IS NULL OR p.published_at<$4)
-      ORDER BY p.published_at DESC,p.post_id DESC LIMIT $5`, [schoolId,guardianUserId,studentId,before ?? null,Math.min(Math.max(limit,1),100)]);
+      ORDER BY p.published_at DESC,p.post_id DESC LIMIT $5`, [schoolId,guardianUserIds ?? [guardianUserId],studentId,before ?? null,Math.min(Math.max(limit,1),100)]);
     return result.rows.map((row: Record<string, unknown>) => ({ ...row, attachments: (row.attachments as PostSnapshot['attachments'] ?? [])
       .filter((attachment) => !attachment.studentId || attachment.studentId === studentId) }));
   }

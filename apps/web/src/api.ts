@@ -72,10 +72,10 @@ export async function apiRequest<T>(path: string, session: Session | null, onSes
   return payload as T;
 }
 
-export async function requestOtp(phoneE164: string, invitationCode: string, purpose: 'ACTIVATE' | 'RESET' = 'ACTIVATE') {
+export async function requestOtp(phoneE164: string, invitationCode: string, purpose: 'ACTIVATE' | 'RESET' = 'ACTIVATE',role?:Role) {
   const request = async (withInvitation: boolean) => apiRequest<{ challengeId: string; expiresInSeconds: number; resendAfterSeconds: number; developmentCode?: string }>(
     '/auth/otp/request', null, () => undefined, { method: 'POST', body: JSON.stringify({ phoneE164: phoneE164.replace(/\s/g, ''),
-      purpose, ...(withInvitation && invitationCode && purpose === 'ACTIVATE' ? { invitationCode } : {}) }) });
+      purpose,role, ...(withInvitation && invitationCode && purpose === 'ACTIVATE' ? { invitationCode } : {}) }) });
   try { return await request(true); }
   catch (error) {
     if (invitationCode && error instanceof Error && /INVITATION_OR_PHONE_INVALID/.test(error.message)) return request(false);
@@ -92,14 +92,14 @@ export async function setupPasscode(setupToken: string, passcode: string) {
     { method: 'POST', body: JSON.stringify({ setupToken, passcode, deviceId: DEVICE_ID }) });
   return completeSignIn(verified);
 }
-export async function loginPasscode(phoneE164: string, passcode: string) {
+export async function loginPasscode(phoneE164: string, passcode: string,role?:Role) {
   const verified = await apiRequest<Omit<Session, 'deviceId' | 'activeMembershipId'>>('/auth/passcode/login', null, () => undefined,
-    { method: 'POST', body: JSON.stringify({ phoneE164: phoneE164.replace(/\s/g, ''), passcode, deviceId: DEVICE_ID }) });
-  return completeSignIn(verified);
+    { method: 'POST', body: JSON.stringify({ phoneE164: phoneE164.replace(/\s/g, ''), passcode, deviceId: DEVICE_ID,role }) });
+  return completeSignIn(verified,role);
 }
-async function completeSignIn(verified: Omit<Session, 'deviceId' | 'activeMembershipId'>): Promise<Session> {
+async function completeSignIn(verified: Omit<Session, 'deviceId' | 'activeMembershipId'>,role?:Role): Promise<Session> {
   const session: Session = { ...verified, deviceId: DEVICE_ID, activeMembershipId: verified.memberships[0]?.id ?? '' };
-  const adminMembership = portalMemberships(verified.memberships)[0];
+  const adminMembership = role ? portalMemberships(verified.memberships).find((membership)=>membership.role===role) : portalMemberships(verified.memberships)[0];
   if (!adminMembership) {
     await apiRequest('/auth/logout', session, () => undefined, { method: 'POST' }, false).catch(() => undefined);
     throw new Error('This portal is for school administrators and application owners. Please use the mobile app for teacher or parent access.');

@@ -24,7 +24,7 @@ async function bootstrap() {
     origin: (origin: string | undefined, callback: (error: Error | null, allow?: boolean) => void) => callback(null, !origin || configuredOrigins.includes(origin)),
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id'],
+    allowedHeaders: ['authorization', 'content-type', 'idempotency-key', 'x-correlation-id', 'x-schoolconnect-school-id'],
     maxAge: 600,
   });
   const adapter = app.getHttpAdapter().getInstance() as { set: (name: string, value: unknown) => void; use: (handler: (request: { secure?: boolean; headers: Record<string, string | string[] | undefined> }, response: { status: (code: number) => { json: (body: unknown) => void } }, next: () => void) => void) => void };

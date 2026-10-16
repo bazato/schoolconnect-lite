@@ -123,6 +123,99 @@ describe('API gateway authorization and service boundaries', () => {
     expect(response.body.status).toBe('ok');
     expect(response.body.services).toHaveLength(10);
   });
+  it('accepts school creation without a manually entered school code',async()=>{
+    await request(app.getHttpServer()).post('/api/v1/admin/schools').set('Authorization','Bearer owner-token').send({displayName:'New School',timezone:'UTC',adminDisplayName:'Admin',adminPhoneE164:'+919876543210'}).expect(201);
+    const call=serviceClient.request.mock.calls.find((call)=>call[0]==='school' && call[1]==='/internal/v1/schools' && call[2]?.method==='POST');
+    expect(JSON.parse(String(call?.[2]?.body))).not.toHaveProperty('schoolCode');
+  });
+  it.each(['teacher-token','parent-token'])('denies administrator school-wide publishing for %s',async(token)=>{
+    await request(app.getHttpServer()).post('/api/v1/admin/announcements').set('Authorization',`Bearer ${token}`).send({title:'Holiday',body:'Closed',idempotencyKey:'holiday-123'}).expect(403);
+    expect(serviceClient.request.mock.calls.some((call)=>call[0]==='content' && call[2]?.method==='POST')).toBe(false);
+  });
+  it('snapshots all-class parents and active teachers using the session school, ignoring forged fields',async()=>{
+    const fallback=serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit)=>{
+      if(service==='school' && path.endsWith('/announcement-recipients')) return Promise.resolve([{studentId:'kid-a',guardianUserId:'parent-a'},{studentId:'kid-b',guardianUserId:'parent-b'}]);
+      if(service==='identity' && path.endsWith('/members?role=TEACHER')) return Promise.resolve([{userId:'teacher-a',status:'ACTIVE'},{userId:'revoked',status:'REVOKED'}]);
+      return fallback(service,path,init);
+    });
+    await request(app.getHttpServer()).post('/api/v1/admin/announcements').set('Authorization','Bearer admin-token').send({title:'Holiday',body:'Closed',idempotencyKey:'holiday-123',schoolId:'forged',classId:'forged',postType:'RESULT',authorMembershipId:'forged',recipients:[],staffRecipients:['forged']}).expect(201);
+    const call=serviceClient.request.mock.calls.find((call)=>call[0]==='content' && call[1]==='/internal/v1/posts');
+    const body=JSON.parse(String(call?.[2]?.body));expect(body).toMatchObject({schoolId:'school-1',authorMembershipId:'membership-admin',actorUserId:'admin-1',postType:'ANNOUNCEMENT',audienceType:'SCHOOL',staffRecipients:['teacher-a']});expect(body.recipients).toHaveLength(2);expect(body).not.toHaveProperty('classId');
+  });
+  it('allows teachers to read a published school notice but never edit the administrator post',async()=>{
+    const fallback=serviceClient.request.getMockImplementation()!;const id='123e4567-e89b-42d3-a456-426614174000';
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit)=>service==='content' && path.startsWith(`/internal/v1/posts/${id}?`)?Promise.resolve({classId:null,postType:'ANNOUNCEMENT',audienceType:'SCHOOL',status:'PUBLISHED',authorMembershipId:'membership-admin'}):fallback(service,path,init));
+    await request(app.getHttpServer()).get(`/api/v1/posts/${id}`).set('Authorization','Bearer teacher-token').expect(200);
+    await request(app.getHttpServer()).post(`/api/v1/posts/${id}/revisions`).set('Authorization','Bearer teacher-token').send({title:'Tamper',body:'No',expectedRevisionNumber:1}).expect(403);
+    expect(serviceClient.request.mock.calls.some((call)=>call[1]===`/internal/v1/posts/${id}/revisions`)).toBe(false);
+  });
+  it('refuses blank school announcements before resolving recipients',async()=>{
+    await request(app.getHttpServer()).post('/api/v1/admin/announcements').set('Authorization','Bearer admin-token').send({title:' ',body:'Closed',idempotencyKey:'holiday-123'}).expect(400);
+    expect(serviceClient.request.mock.calls.some((call)=>call[1].endsWith('/announcement-recipients'))).toBe(false);
+  });
+  it('does not publish to an inactive school even with administrator privileges',async()=>{
+    const fallback=serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit)=>service==='school' && path==='/internal/v1/schools/school-1'?Promise.resolve({active:false}):fallback(service,path,init));
+    await request(app.getHttpServer()).post('/api/v1/admin/announcements').set('Authorization','Bearer admin-token').send({title:'Holiday',body:'Closed',idempotencyKey:'holiday-123'}).expect(403);
+    expect(serviceClient.request.mock.calls.some((call)=>call[0]==='content' && call[2]?.method==='POST')).toBe(false);
+  });
+  it('does not permit an administrator to impersonate another announcement publisher',async()=>{
+    const fallback=serviceClient.request.getMockImplementation()!;const id='123e4567-e89b-42d3-a456-426614174000';
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit)=>service==='content' && path.startsWith(`/internal/v1/posts/${id}?`)?Promise.resolve({classId:null,postType:'ANNOUNCEMENT',audienceType:'SCHOOL',status:'PUBLISHED',authorMembershipId:'another-admin'}):fallback(service,path,init));
+    await request(app.getHttpServer()).patch(`/api/v1/admin/announcements/${id}`).set('Authorization','Bearer admin-token').send({title:'Changed',body:'Changed',expectedRevisionNumber:1,authorMembershipId:'another-admin'}).expect(403);
+    expect(serviceClient.request.mock.calls.some((call)=>call[1]===`/internal/v1/posts/${id}/revisions`)).toBe(false);
+  });
+  it('denies teacher access to an archived school notice, even from an old notification',async()=>{
+    const fallback=serviceClient.request.getMockImplementation()!;const id='123e4567-e89b-42d3-a456-426614174000';
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit)=>service==='content' && path.startsWith(`/internal/v1/posts/${id}?`)?Promise.resolve({classId:null,postType:'ANNOUNCEMENT',audienceType:'SCHOOL',status:'ARCHIVED',authorMembershipId:'membership-admin'}):fallback(service,path,init));
+    await request(app.getHttpServer()).get(`/api/v1/posts/${id}`).set('Authorization','Bearer teacher-token').expect(403);
+  });
+  it.each(['PARENT','TEACHER','SCHOOL_ADMIN'])('forwards the explicitly chosen login role to Identity: %s',async(role)=>{
+    await request(app.getHttpServer()).post('/api/v1/auth/passcode/login').send({phoneE164:'+919876543210',passcode:'1234',deviceId:'test-device',role}).expect(201);
+    const call=serviceClient.request.mock.calls.find((call)=>call[0]==='identity' && call[1]==='/internal/v1/passcode/login');
+    expect(JSON.parse(String(call?.[2]?.body))).toMatchObject({role});
+  });
+  it('rejects a forged school selector before an administrator can mutate another school',async()=>{
+    const fallback=serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit)=>{
+      if(service==='authorization' && path.endsWith('/decisions/route')) return Promise.resolve({allowed:false,reason:'SCHOOL_SCOPE_DENIED'});
+      return fallback(service,path,init);
+    });
+    await request(app.getHttpServer()).post('/api/v1/admin/classes').set('Authorization','Bearer admin-token').set('x-schoolconnect-school-id','123e4567-e89b-42d3-a456-426614174000').send({displayName:'Grade 1',academicYear:'2026-2027'}).expect(403);
+    expect(serviceClient.request.mock.calls.some((call)=>call[0]==='school' && call[2]?.method==='POST')).toBe(false);
+  });
+  it('binds selected owner scope only after central approval, ignoring body school IDs',async()=>{
+    const fallback=serviceClient.request.getMockImplementation()!;const school='123e4567-e89b-42d3-a456-426614174000';
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit)=>{
+      if(service==='authorization' && path.endsWith('/decisions/route')) {const input=JSON.parse(String(init?.body));return Promise.resolve({allowed:input.principal.role==='PLATFORM_OWNER',schoolId:input.selectedSchoolId});}
+      if(service==='school' && path.endsWith('/management'))return Promise.resolve({id:school,status:'ACTIVE'});
+      return fallback(service,path,init);
+    });
+    await request(app.getHttpServer()).post('/api/v1/admin/classes').set('Authorization','Bearer owner-token').set('x-schoolconnect-school-id',school).send({schoolId:'forged',displayName:'Grade 1',academicYear:'2026-2027'}).expect(201);
+    expect(serviceClient.request.mock.calls.some((call)=>call[1]===`/internal/v1/schools/${school}/classes` && call[2]?.method==='POST')).toBe(true);
+  });
+  it('deletes a teacher by revoking only the selected school role and assignments',async()=>{
+    const fallback=serviceClient.request.getMockImplementation()!;const membership='123e4567-e89b-42d3-a456-426614174000';
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit)=>{
+      if(service==='identity' && path.startsWith('/internal/v1/schools/school-1/members'))return Promise.resolve([{membershipId:membership,userId:'teacher-1',role:'TEACHER',status:'ACTIVE'}]);
+      return fallback(service,path,init);
+    });
+    await request(app.getHttpServer()).delete(`/api/v1/admin/teachers/${membership}`).set('Authorization','Bearer admin-token').expect(200);
+    const mutation=serviceClient.request.mock.calls.find((call)=>call[1]===`/internal/v1/members/${membership}`);
+    expect(JSON.parse(String(mutation?.[2]?.body))).toMatchObject({schoolId:'school-1',status:'REVOKED'});
+    expect(serviceClient.request.mock.calls.some((call)=>call[1]===`/internal/v1/schools/school-1/teachers/${membership}/revoke-assignments`)).toBe(true);
+    expect(serviceClient.request.mock.calls.some((call)=>call[2]?.method==='DELETE')).toBe(false);
+  });
+  it('preserves only server-approved guardian history IDs, not client-supplied aliases',async()=>{
+    const fallback=serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit)=>{
+      if(service==='authorization' && path==='/internal/v1/decisions')return Promise.resolve({allowed:true,guardianUserIds:['parent-1','previous-parent']});
+      return fallback(service,path,init);
+    });
+    await request(app.getHttpServer()).get('/api/v1/timeline/student-1?guardianUserIds=forged').set('Authorization','Bearer parent-token').expect(200);
+    const call=serviceClient.request.mock.calls.find((call)=>call[0]==='read');expect(call?.[1]).toContain('parent-1%2Cprevious-parent');expect(call?.[1]).not.toContain('forged');
+  });
 
   it('returns only file availability/policy via the protected service boundary', async () => {
     const original = serviceClient.request.getMockImplementation()!;

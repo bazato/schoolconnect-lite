@@ -26,7 +26,7 @@ class ReadController {
       throw error;
     }
   }
-  @Get('timeline') timeline(@Query('schoolId') schoolId: string,@Query('guardianUserId') guardianUserId: string,@Query('studentId') studentId: string,@Query('before') before?: string,@Query('limit') limit='50') { return this.repository.parentTimeline(schoolId,guardianUserId,studentId,before,Number(limit)); }
+  @Get('timeline') timeline(@Query('schoolId') schoolId: string,@Query('guardianUserId') guardianUserId: string,@Query('studentId') studentId: string,@Query('before') before?: string,@Query('limit') limit='50',@Query('guardianUserIds') guardianUserIds?:string) { return this.repository.parentTimeline(schoolId,guardianUserId,studentId,before,Number(limit),guardianUserIds?.split(',')); }
   @Get('teacher-posts') posts(@Query('schoolId') schoolId: string,@Query('authorMembershipId') authorMembershipId: string,@Query('before') before?: string,@Query('limit') limit='50') { return this.repository.teacherPosts(schoolId,authorMembershipId,before,Number(limit)); }
   @Get('attendance/summary') summary(@Query('schoolId') schoolId: string,@Query('fromDate') fromDate: string,@Query('toDate') toDate: string) { return this.repository.attendanceSummary(schoolId,fromDate,toDate); }
 }

@@ -1,0 +1,148 @@
+// Real PostgreSQL + Kafka acceptance on disposable LOCAL databases only.
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { MIGRATIONS, parseMigrationSegments } from './render-demo-db.mjs';
+const requireIdentity=createRequire(new URL('../services/identity/package.json',import.meta.url));
+const {Pool}=requireIdentity('pg');
+const run=randomUUID().replaceAll('-','').slice(0,8);
+const base=new URL(process.env.ACCOUNT_TEST_PG_URL ?? 'postgresql://schoolconnect:schoolconnect@127.0.0.1:5432/postgres');
+if(!['127.0.0.1','localhost'].includes(base.hostname) || !['postgres:','postgresql:'].includes(base.protocol)) throw Error('LOCAL_DATABASE_REQUIRED');
+const kinds=['identity','school','content','read','notifications'];
+const names=Object.fromEntries(kinds.map((kind)=>[kind,`sc_account_${run}_${kind}`]));
+const url=(kind)=>{const next=new URL(base);next.pathname=`/${names[kind]}`;return next.toString();};
+const adminDb=new Pool({connectionString:base.toString(),connectionTimeoutMillis:5000});
+const databases={};const created=[];let identity,school,content,read,notifications,consumerStop,kafkaAdmin,producer,server;let checks=0;
+const ok=(message)=>{checks++;console.log(`PASS ${message}`);};
+const topic=`nexqon-account-regression-${run}`;
+const waitUntil=async(check)=>{const end=Date.now()+20000;while(Date.now()<end){if(await check())return;await new Promise((resolve)=>setTimeout(resolve,100));}throw Error('ACCOUNT_EVENT_CONSUMPTION_TIMEOUT');};
+try {
+  for(const kind of kinds){await adminDb.query(`CREATE DATABASE "${names[kind]}"`);created.push(names[kind]);databases[kind]=new Pool({connectionString:url(kind),connectionTimeoutMillis:5000});}
+  for(const file of MIGRATIONS){const source=await readFile(new URL(`../infra/postgres/init/${file}`,import.meta.url),'utf8');for(const segment of parseMigrationSegments(source,file)){const kind=segment.databaseName.replace('schoolconnect_','');if(databases[kind])await databases[kind].query(segment.sql);}}
+  Object.assign(process.env,{NODE_ENV:'test',IDENTITY_SKIP_BOOTSTRAP:'true',SCHOOL_SKIP_BOOTSTRAP:'true',CONTENT_SKIP_BOOTSTRAP:'true',NOTIFICATION_SKIP_BOOTSTRAP:'true',
+    IDENTITY_DATABASE_URL:url('identity'),SCHOOL_DATABASE_URL:url('school'),CONTENT_DATABASE_URL:url('content'),READ_DATABASE_URL:url('read'),NOTIFICATION_DATABASE_URL:url('notifications'),
+    INVITATION_CODE_KEY:'synthetic-invitation-key-01234567890123456789',PASSCODE_PEPPER:'synthetic-passcode-pepper-01234567890123456789',
+    OTP_PROVIDER:'development',DEVELOPMENT_OTP_CODE:'123456',AUTH_JWT_SECRET:'synthetic-jwt-secret-012345678901234567890',
+    KAFKA_BROKERS:process.env.ACCOUNT_TEST_KAFKA_BROKERS ?? '127.0.0.1:9092',KAFKA_SSL:'false',KAFKA_SASL_MECHANISM:'',KAFKA_SASL_USERNAME:'',KAFKA_SASL_PASSWORD:'',KAFKA_CA_CERT_BASE64:'',KAFKA_EVENT_TOPIC:topic,KAFKA_CREATE_TOPIC:'false'});
+  const {IdentityRepository}=await import('../services/identity/dist/main.js');
+  const {LocalJwtAuthorizationProvider}=await import('../services/identity/dist/authorization.js');
+  const {SchoolRepository}=await import('../services/school/dist/main.js');
+  const {ContentRepository}=await import('../services/content/dist/main.js');
+  const {ReadRepository}=await import('../services/read-model/dist/repository.js');
+  const {NotificationRepository}=await import('../services/notifications/dist/main.js');
+  const {applyNotificationEvent}=await import('../services/notifications/dist/event-consumer.js');
+  identity=new IdentityRepository(new LocalJwtAuthorizationProvider());school=new SchoolRepository();content=new ContentRepository();read=new ReadRepository();notifications=new NotificationRepository();
+  const first=await school.createSchool({displayName:'Synthetic School One',timezone:'UTC'});
+  const second=await school.createSchool({displayName:'Synthetic School Two',timezone:'UTC'});
+  assert.match(first.schoolCode,/^SCH-[A-F0-9]{32}$/);assert.notEqual(first.schoolCode,second.schoolCode);
+  const classroom=await school.createClass({schoolId:first.id,displayName:'Grade 3 A',academicYear:'2026-2027',gradeCode:'G3'});
+  assert.match(classroom.classCode,/^CLS-[A-F0-9]{32}$/);ok('school/class codes generated without user input');
+  const provision=(phone,role,schoolId=first.id)=>identity.provisionAccount({phoneE164:phone,displayName:`Synthetic ${role}`,role,schoolId});
+  const activate=async(phone,code,pin)=>{const challenge=await identity.requestOtp(phone,code);const grant=await identity.verifyOtp(challenge.challengeId,'123456','account-regression');return identity.setupPasscode(grant.setupToken,pin,'account-regression');};
+  const phoneA='+991230000001';const phoneB='+991230000002';
+  const teacher=await provision(phoneA,'TEACHER');
+  const visible1=(await identity.schoolMembers(first.id,'TEACHER'))[0];const visible2=(await identity.schoolMembers(first.id,'TEACHER'))[0];
+  assert.equal(visible1.activation.code,teacher.invitationCode);assert.equal(visible2.activation.code,teacher.invitationCode);
+  const stored=(await databases.identity.query('SELECT code_ciphertext FROM invitations WHERE id=$1',[teacher.invitationId])).rows[0];assert(!stored.code_ciphertext.includes(teacher.invitationCode));
+  assert(!JSON.stringify(visible1).includes('code_ciphertext'));ok('activation code redisplays on repeat reads, encrypted at rest');
+  const parent=await provision(phoneA,'PARENT');assert.equal(parent.userId,teacher.userId);
+  await activate(phoneA,teacher.invitationCode,'0123');
+  const before=(await databases.identity.query('SELECT count(*)::int AS count FROM invitations')).rows[0].count;
+  const administrator=await provision(phoneA,'SCHOOL_ADMIN');assert.equal(administrator.userId,teacher.userId);assert.equal(administrator.invitationStatus,'ALREADY_ACTIVE');assert.equal(administrator.invitationCode,null);
+  const repeated=await Promise.all(Array.from({length:10},()=>provision(phoneA,'TEACHER')));assert(repeated.every((row)=>row.membershipId===teacher.membershipId));
+  assert.equal((await databases.identity.query('SELECT count(*)::int AS count FROM invitations')).rows[0].count,before);
+  const signed=await identity.loginPasscode(phoneA,'0123','mobile');assert.deepEqual(signed.memberships.map((m)=>m.role).sort(),['PARENT','SCHOOL_ADMIN','TEACHER']);
+  for(const role of ['TEACHER','PARENT','SCHOOL_ADMIN']){const session=await identity.loginPasscode(phoneA,'0123',`test-${role}`,role);assert.equal((await identity.context(session.accessToken)).role,role);assert.equal(session.memberships[0].role,role);}
+  await assert.rejects(identity.loginPasscode(phoneA,'0123','mobile','PLATFORM_OWNER'));
+  ok('one phone reuses one identity across web/mobile roles; ten concurrent retries issue no duplicate memberships/invites');
+  const pendingTeacher=await provision('+991230000006','TEACHER');const pendingParent=await provision('+991230000006','PARENT');await identity.updateMember(pendingTeacher.membershipId,first.id,{status:'REVOKED'});
+  await identity.requestOtp('+991230000006',pendingParent.invitationCode,'ACTIVATE','PARENT');
+  await assert.rejects(identity.requestOtp('+991230000006',pendingParent.invitationCode,'ACTIVATE','TEACHER'));ok('revoking one role preserves another role’s separate pending registration and activation code');
+  const assignment=await school.assignTeacher({schoolId:first.id,teacherMembershipId:teacher.membershipId,classId:classroom.id,subjectName:'Mathematics',canPublishResults:true,canPublishAnnouncements:true,canRecordAttendance:true});
+  assert.match(assignment.subjectCode,/^SUB-[A-F0-9]{20}$/);
+  const child=await school.createStudentAndGuardian({schoolId:first.id,classId:classroom.id,guardianUserId:parent.userId,studentDisplayName:'Synthetic Child One'});
+  const sibling=await school.createStudentAndGuardian({schoolId:first.id,classId:classroom.id,guardianUserId:parent.userId,studentDisplayName:'Synthetic Child Two',admissionNumber:'PREDEFINED-001'});
+  assert.match(child.admissionNumber,/^STU-[A-F0-9]{32}$/);assert.equal(sibling.admissionNumber,'PREDEFINED-001');assert.equal((await school.children(first.id,parent.userId)).length,2);
+  ok('generated student/subject codes, predefined admission and both siblings preserved');
+  await school.updateClass(first.id,classroom.id,{displayName:'Grade 3 B',academicYear:'2027-2028'});
+  await school.updateStudent(first.id,child.studentId,{displayName:'Synthetic Child Updated',admissionNumber:'OFFICIAL-ONE'});
+  await school.updateAssignment(first.id,assignment.assignmentId,{subjectName:'Mathematics renamed'});
+  await assert.rejects(school.updateStudent(second.id,child.studentId,{displayName:'forged'}));ok('business fields editable, cross-school student edits denied');
+  const originalPost=await content.create({schoolId:first.id,actorUserId:teacher.userId,authorMembershipId:teacher.membershipId,classId:classroom.id,postType:'RESULT',title:'Synthetic private result',body:'Synthetic only',subjectCode:assignment.subjectCode,examName:'Test',audienceType:'STUDENT',idempotencyKey:randomUUID(),recipients:[{studentId:child.studentId,guardianUserId:parent.userId}],attachments:[{fileId:randomUUID(),studentId:child.studentId,privacyClassification:'STUDENT_PRIVATE'}]});
+  const contentRow=(await databases.content.query('SELECT id,event_type,aggregate_id,payload,occurred_at FROM outbox_events WHERE aggregate_id=$1',[originalPost.id])).rows[0];
+  await read.consume({source:'content',event:{id:contentRow.id,eventType:contentRow.event_type,aggregateId:contentRow.aggregate_id,payload:contentRow.payload,occurredAt:contentRow.occurred_at.toISOString()}});
+  const otherAdmin=await provision(phoneB,'SCHOOL_ADMIN',second.id);await activate(phoneB,otherAdmin.invitationCode,'9876');
+  const moved=await identity.updateMember(parent.membershipId,first.id,{phoneE164:phoneB,guardianStudentIds:[child.studentId,sibling.studentId]});assert.equal(moved.userId,otherAdmin.userId);
+  const oldParentAgain=await provision(phoneA,'PARENT');
+  const lateChild=await school.createStudentAndGuardian({schoolId:first.id,classId:classroom.id,guardianUserId:oldParentAgain.userId,studentDisplayName:'Unrelated later child'});
+  const row=(await databases.identity.query('SELECT id,event_type,aggregate_id,payload,occurred_at FROM outbox_events WHERE aggregate_id=$1 AND event_type=$2 ORDER BY occurred_at DESC LIMIT 1',[parent.membershipId,'identity.membership-updated.v1'])).rows[0];
+  assert(row,'phone-update transactional outbox event required');
+  server=createServer(async(req,res)=>{if(req.headers['x-internal-service-token']!=='synthetic-internal-token'){res.writeHead(401).end();return;}try{const id=new URL(req.url,'http://localhost').pathname.split('/').at(-1);res.setHeader('content-type','application/json');res.end(JSON.stringify(await identity.membership(id)));}catch{res.writeHead(404).end();}});
+  await new Promise((resolve)=>server.listen(0,'127.0.0.1',resolve));process.env.IDENTITY_SERVICE_URL=`http://127.0.0.1:${server.address().port}`;process.env.INTERNAL_SERVICE_TOKEN='synthetic-internal-token';
+  const eventRequire=createRequire(new URL('../packages/eventing/package.json',import.meta.url));const {Kafka,logLevel}=eventRequire('kafkajs');
+  const kafka=new Kafka({clientId:`account-test-${run}`,brokers:process.env.KAFKA_BROKERS.split(','),logLevel:logLevel.NOTHING});kafkaAdmin=kafka.admin();await kafkaAdmin.connect();await kafkaAdmin.createTopics({topics:[{topic,numPartitions:1,replicationFactor:1,configEntries:[{name:'retention.ms',value:'60000'}]}]});
+  const {startEventConsumer}=await import('../packages/eventing/dist/index.js');
+  consumerStop=await startEventConsumer(`account-test-${run}`,async(envelope)=>{try{if(envelope.source==='content'){await read.consume(envelope);await applyNotificationEvent(envelope,(input,correlationId)=>notifications.enqueue(input,correlationId));}else await school.consumeIdentity(envelope);}catch(error){console.error('Synthetic consumer failure:',error.code ?? error.message);throw error;}},{failureStore:school.failures,retryDelayMs:10});
+  producer=kafka.producer();await producer.connect();
+  const send=async(row,source='identity')=>{const envelope={source,event:{id:row.id,eventType:row.event_type,aggregateId:row.aggregate_id,payload:row.payload,occurredAt:row.occurred_at.toISOString()}};await producer.send({topic,messages:[{key:row.aggregate_id,value:JSON.stringify(envelope)},{key:row.aggregate_id,value:JSON.stringify(envelope)}]});};
+  await send(row);await waitUntil(()=>school.guardianAuthorized(first.id,moved.userId,child.studentId));
+  assert.equal(await school.guardianAuthorized(first.id,parent.userId,child.studentId),false);
+  assert.equal(await school.guardianAuthorized(first.id,moved.userId,lateChild.studentId),false);
+  assert.equal(await school.guardianAuthorized(first.id,parent.userId,lateChild.studentId),true);
+  assert.equal((await databases.school.query('SELECT count(*)::int AS count FROM identity_membership_events WHERE event_id=$1',[row.id])).rows[0].count,1);
+  ok('real Kafka consumes duplicate outbox event once; phone transfer affects only captured children, not later children');
+  const identities=await school.guardianIdentities(first.id,moved.userId,child.studentId);assert(identities.guardianUserIds.includes(parent.userId));
+  await assert.rejects(content.findPost(first.id,originalPost.id,moved.userId,child.studentId));
+  assert.equal((await content.findPost(first.id,originalPost.id,moved.userId,child.studentId,identities.guardianUserIds)).id,originalPost.id);
+  assert.equal((await read.parentTimeline(first.id,moved.userId,child.studentId,undefined,50,identities.guardianUserIds)).length,1);
+  await assert.rejects(content.findPost(first.id,originalPost.id,moved.userId,sibling.studentId,identities.guardianUserIds));assert.equal((await school.guardianIdentities(second.id,moved.userId,child.studentId)).allowed,false);
+  ok('moved parent retains historical private result/timeline, sibling and other-school access remain denied');
+  const targetLogin=await identity.loginPasscode(phoneB,'9876','mobile');assert.deepEqual(targetLogin.memberships.map((m)=>m.role).sort(),['PARENT','SCHOOL_ADMIN']);
+  await assert.rejects(identity.loginPasscode(phoneB,'0123','mobile'));assert((await identity.loginPasscode(phoneA,'0123','mobile')).memberships.some((m)=>m.id===teacher.membershipId));
+  await assert.rejects(identity.updateMember(oldParentAgain.membershipId,first.id,{phoneE164:phoneB,guardianStudentIds:[lateChild.studentId]}));
+  ok('existing target passcode preserved; unrelated roles unaffected; duplicate same-role edit never silently merges users');
+  await identity.updateMember(teacher.membershipId,first.id,{phoneE164:'+991230000003'});
+  const newTeacher=(await identity.schoolMembers(first.id,'TEACHER')).find((row)=>row.membershipId===teacher.membershipId);assert(newTeacher.activation.code);const newSigned=await activate('+991230000003',newTeacher.activation.code,'5555');assert.equal(newSigned.memberships.length,1);assert.equal(newSigned.memberships[0].id,teacher.membershipId);
+  ok('new-number phone edit requires fresh activation and does not copy the previous account passcode');
+  await identity.updateMember(teacher.membershipId,first.id,{status:'REVOKED'});
+  const revoked=(await databases.identity.query('SELECT id,event_type,aggregate_id,payload,occurred_at FROM outbox_events WHERE aggregate_id=$1 AND event_type=$2 ORDER BY occurred_at DESC LIMIT 1',[teacher.membershipId,'identity.membership-updated.v1'])).rows[0];await send(revoked);await waitUntil(async()=>!(await school.assignments(first.id,teacher.membershipId)).some((a)=>a.status==='ACTIVE'));
+  assert((await identity.loginPasscode(phoneB,'9876','mobile')).memberships.some((m)=>m.id===parent.membershipId));ok('teacher delete/revoke removes assignments without disabling parent login');
+  const ownerA=await provision('+991230000004','PLATFORM_OWNER',null);const ownerB=await provision('+991230000005','PLATFORM_OWNER',null);
+  const removals=await Promise.allSettled([ownerA,ownerB].map((owner)=>identity.updateMember(owner.membershipId,null,{status:'REVOKED'})));assert.equal(removals.filter((r)=>r.status==='fulfilled').length,1);assert.equal((await identity.platformMembers()).filter((m)=>m.status==='ACTIVE').length,1);ok('concurrent owner deletions cannot remove the final owner');
+  await school.updateSchool(first.id,{status:'CLOSED'});assert.equal((await school.school(first.id)).active,false);assert.equal((await school.managementSchool(first.id)).status,'CLOSED');await school.updateSchool(first.id,{status:'ACTIVE'});assert.equal((await school.school(first.id)).active,true);ok('school deletion disables access while retaining recoverable history');
+  const secondClass=await school.createClass({schoolId:first.id,displayName:'Grade 4',academicYear:'2027-2028'});
+  const secondClassChild=await school.createStudentAndGuardian({schoolId:first.id,classId:secondClass.id,guardianUserId:moved.userId,studentDisplayName:'Different class child'});
+  const staff=await provision('+991230000006','TEACHER');
+  const noticeRecipients=await school.schoolAnnouncementRecipients(first.id);
+  assert(noticeRecipients.some((recipient)=>recipient.studentId===child.studentId));assert(noticeRecipients.some((recipient)=>recipient.studentId===secondClassChild.studentId));
+  const noticeInput={schoolId:first.id,actorUserId:administrator.userId,authorMembershipId:administrator.membershipId,postType:'ANNOUNCEMENT',audienceType:'SCHOOL',title:'Holiday notice',body:'Synthetic holiday. All classes closed.',idempotencyKey:randomUUID(),recipients:noticeRecipients,staffRecipients:[staff.userId]};
+  const concurrent=await Promise.all([content.create(noticeInput),content.create(noticeInput)]);assert.equal(concurrent[0].id,concurrent[1].id);const notice=concurrent[0];
+  const publishEvent=(await databases.content.query('SELECT id,event_type,aggregate_id,payload,occurred_at FROM outbox_events WHERE aggregate_id=$1',[notice.id])).rows[0];await send(publishEvent,'content');
+  await waitUntil(async()=> (await notifications.inbox(first.id,staff.userId)).some((item)=>item.resourceId===notice.id));
+  assert((await read.parentTimeline(first.id,moved.userId,child.studentId)).some((item)=>item.id===notice.id));assert((await read.parentTimeline(first.id,moved.userId,secondClassChild.studentId)).some((item)=>item.id===notice.id));
+  assert.equal((await notifications.inbox(first.id,staff.userId)).filter((item)=>item.resourceId===notice.id).length,1);assert.equal((await notifications.inbox(second.id,staff.userId)).length,0);
+  assert.equal((await content.schoolAnnouncements(second.id)).length,0);await assert.rejects(content.findPost(second.id,notice.id));
+  ok('school notice reaches parents across classes and teachers through real Kafka, with duplicate delivery and cross-school isolation');
+  await content.createRevision(notice.id,{schoolId:first.id,actorUserId:administrator.userId,authorMembershipId:administrator.membershipId,expectedRevisionNumber:1,title:'Holiday updated',body:'Synthetic new date'});
+  const updateEvent=(await databases.content.query('SELECT id,event_type,aggregate_id,payload,occurred_at FROM outbox_events WHERE aggregate_id=$1 AND event_type=$2',[notice.id,'content.post-updated.v1'])).rows[0];await send(updateEvent,'content');
+  await waitUntil(async()=> (await notifications.inbox(first.id,staff.userId)).filter((item)=>item.resourceId===notice.id).length===2);
+  assert.equal((await content.schoolAnnouncements(first.id)).find((item)=>item.id===notice.id).revisionNumber,2);
+  await assert.rejects(content.createRevision(notice.id,{schoolId:first.id,actorUserId:administrator.userId,authorMembershipId:administrator.membershipId,expectedRevisionNumber:1,title:'Stale edit',body:'Should not overwrite'}));
+  ok('administrator revision preserves the teacher notification snapshot and rejects concurrent stale edits');
+  await content.archive(first.id,notice.id,administrator.membershipId,2,administrator.userId);
+  const archiveEvent=(await databases.content.query('SELECT id,event_type,aggregate_id,payload,occurred_at FROM outbox_events WHERE aggregate_id=$1 AND event_type=$2',[notice.id,'content.post-archived.v1'])).rows[0];await send(archiveEvent,'content');
+  await waitUntil(async()=> !(await read.parentTimeline(first.id,moved.userId,child.studentId)).some((item)=>item.id===notice.id));
+  assert(!(await content.schoolAnnouncements(first.id)).some((item)=>item.id===notice.id));assert((await content.schoolAnnouncements(first.id,true)).some((item)=>item.id===notice.id));
+  ok('archived school notice disappears from active feeds without deleting history or delivered notifications');
+  console.log(`ACCOUNT AND ANNOUNCEMENT ACCEPTANCE PASSED: ${checks} scenarios (PostgreSQL + real Kafka; no real file upload/device test).`);
+} finally {
+  if(consumerStop)await consumerStop();if(producer)await producer.disconnect();
+  if(kafkaAdmin){if(/^nexqon-account-regression-[a-f0-9]{8}$/.test(topic))await kafkaAdmin.deleteTopics({topics:[topic]}).catch(()=>{});await kafkaAdmin.disconnect();}
+  if(server)await new Promise((resolve)=>server.close(resolve));
+  for(const repository of [identity,school,content,read,notifications])if(repository)await repository.onModuleDestroy();
+  for(const pool of Object.values(databases))await pool.end();
+  for(const name of created){if(!/^sc_account_[a-f0-9]{8}_(identity|school|content|read|notifications)$/.test(name))throw Error('UNSAFE_CLEANUP_TARGET');await adminDb.query(`DROP DATABASE "${name}"`);}
+  await adminDb.end();console.log('Removed only this run’s disposable test databases and topic; existing Docker/production data unchanged.');
+}

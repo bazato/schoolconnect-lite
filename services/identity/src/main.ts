@@ -10,6 +10,7 @@ import { Pool, type PoolClient } from 'pg';
 import { domainEventTypes, validateManagedRuntime } from '@schoolconnect/contracts';
 import { AccessTokenValidationError, AuthorizationProvider, createAuthorizationProvider } from './authorization';
 import { parentInvitationStatus } from './provisioning';
+import { encryptInvitationCode, decryptInvitationCode } from './invitation-code';
 import { PgOutbox, eventingStatus, eventingHealth, bindEventingShutdown, registerApplicationShutdown, startOutboxPublisher } from '@schoolconnect/eventing';
 import { hashPasscode, matchesPasscode, validPasscode } from './passcode';
 import { developmentOtpCode } from './otp';
@@ -57,7 +58,8 @@ export class IdentityRepository implements OnModuleDestroy {
     }
   }
 
-  async requestOtp(phoneE164: string, invitationCode?: string, purpose: 'ACTIVATE' | 'RESET' = 'ACTIVATE') {
+  async requestOtp(phoneE164: string, invitationCode?: string, purpose: 'ACTIVATE' | 'RESET' = 'ACTIVATE',role?:MembershipRole) {
+    if(role!==undefined && !['PLATFORM_OWNER','SCHOOL_ADMIN','TEACHER','PARENT'].includes(role)) throw new BadRequestException({code:'LOGIN_ROLE_INVALID'});
     if (typeof phoneE164 !== 'string' || (invitationCode !== undefined && typeof invitationCode !== 'string')) throw new BadRequestException({ code: 'PHONE_INVALID' });
     if (!['ACTIVATE', 'RESET'].includes(purpose)) throw new BadRequestException({ code: 'OTP_PURPOSE_INVALID' });
     if (purpose === 'RESET') invitationCode = undefined;
@@ -75,14 +77,14 @@ export class IdentityRepository implements OnModuleDestroy {
          JOIN users u ON u.phone_e164=$1 AND u.status='ACTIVE'
          JOIN memberships m ON m.user_id=u.id AND m.school_id IS NOT DISTINCT FROM i.school_id AND m.role=i.role AND m.status='ACTIVE'
          WHERE i.invitation_code_hash=$2 AND (i.phone_hash IS NULL OR i.phone_hash=$3)
-           AND i.expires_at>now() AND i.accepted_at IS NULL AND i.revoked_at IS NULL`,
-        [normalizedPhone, hash(invitationCode.trim()), phoneHash])
+           AND i.expires_at>now() AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND ($4::text IS NULL OR i.role=$4)`,
+        [normalizedPhone, hash(invitationCode.trim()), phoneHash,role ?? null])
       : await this.pool.query<{ membership_id: string; invitation_id: string | null }>(
         `SELECT m.id AS membership_id, NULL::uuid AS invitation_id
          FROM users u JOIN memberships m ON m.user_id=u.id AND m.status='ACTIVE'
-         WHERE u.phone_e164=$1 AND u.status='ACTIVE'
+         WHERE u.phone_e164=$1 AND u.status='ACTIVE' AND ($2::text IS NULL OR m.role=$2)
            AND EXISTS (SELECT 1 FROM invitations i WHERE i.accepted_by_user_id=u.id AND i.accepted_at IS NOT NULL AND i.revoked_at IS NULL)
-         ORDER BY m.created_at LIMIT 1`, [normalizedPhone]);
+         ORDER BY m.created_at LIMIT 1`, [normalizedPhone,role ?? null]);
     if (!account.rowCount) throw new BadRequestException({ code: invitationCode ? 'INVITATION_OR_PHONE_INVALID' : 'ACCOUNT_NOT_ACTIVATED' });
     const code = otpCode();
     const result = await this.pool.query<{ id: string }>(
@@ -160,7 +162,8 @@ export class IdentityRepository implements OnModuleDestroy {
     } finally { client.release(); }
   }
 
-  async loginPasscode(phoneE164: string, passcode: string, deviceId: string) {
+  async loginPasscode(phoneE164: string, passcode: string, deviceId: string,role?:MembershipRole) {
+    if(role!==undefined && !['PLATFORM_OWNER','SCHOOL_ADMIN','TEACHER','PARENT'].includes(role)) throw new BadRequestException({code:'LOGIN_ROLE_INVALID'});
     const phone = typeof phoneE164 === 'string' ? phoneE164.replace(/\s/g, '') : '';
     if (!/^\+[1-9]\d{7,14}$/.test(phone) || !validPasscode(passcode) || typeof deviceId !== 'string' || !deviceId || deviceId.length>200) throw new BadRequestException({ code: 'LOGIN_FIELDS_INVALID' });
     await this.enforceRateLimit('PASSCODE_LOGIN_PHONE', phone, positiveInteger('PASSCODE_LOGIN_LIMIT', 30, 100), 900);
@@ -180,6 +183,8 @@ export class IdentityRepository implements OnModuleDestroy {
       }
       const account = await client.query<{ user_id: string; display_name: string; membership_id: string; school_id: string | null; role: MembershipRole }>(`SELECT u.id AS user_id,COALESCE(m.display_name_override,u.display_name) AS display_name,m.id AS membership_id,m.school_id,m.role FROM users u JOIN memberships m ON m.user_id=u.id WHERE u.id=$1 AND m.status='ACTIVE' ORDER BY m.created_at,m.id`, [user.id]);
       if (!account.rowCount) throw new UnauthorizedException({ code: 'PHONE_OR_PASSCODE_INVALID' });
+      if(role && !account.rows.some((membership)=>membership.role===role)) throw new UnauthorizedException({code:'ROLE_NOT_REGISTERED_FOR_THIS_NUMBER'});
+      if(role) account.rows.sort((a,b)=>Number(b.role===role)-Number(a.role===role));
       await client.query('UPDATE users SET passcode_failed_attempts=0,passcode_locked_until=NULL WHERE id=$1', [user.id]);
       const session = await this.createSession(client, account.rows, deviceId);
       await client.query('COMMIT');
@@ -334,16 +339,17 @@ export class IdentityRepository implements OnModuleDestroy {
   }
 
   async provisionAccount(input: { schoolId: string | null; role: MembershipRole; phoneE164: string; displayName: string }, actorUserId?: string, correlationId?: string) {
-    if (!/^\+[1-9]\d{7,14}$/.test(input.phoneE164) || !input.displayName?.trim() || ((input.role === 'PLATFORM_OWNER') !== (input.schoolId === null))) {
+    if (typeof input.phoneE164!=='string' || !/^\+[1-9]\d{7,14}$/.test(input.phoneE164) || typeof input.displayName!=='string' || !input.displayName.trim() || input.displayName.trim().length>150 || ((input.role === 'PLATFORM_OWNER') !== (input.schoolId === null))) {
       throw new BadRequestException({ code: 'ACCOUNT_PROVISIONING_VALIDATION_FAILED' });
     }
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      const user = await client.query<{ id: string }>(
+      const user = await client.query<{ id: string; passcode_hash: string | null; status: string }>(
         `INSERT INTO users (phone_e164, display_name) VALUES ($1,$2)
-         ON CONFLICT (phone_e164) DO UPDATE SET display_name=users.display_name RETURNING id`,
+         ON CONFLICT (phone_e164) DO UPDATE SET display_name=users.display_name RETURNING id,passcode_hash,status`,
         [input.phoneE164, input.displayName.trim()]);
+      if (user.rows[0]!.status !== 'ACTIVE') throw new ConflictException({ code: 'ACCOUNT_INACTIVE_REQUIRES_OWNER_REVIEW' });
       const userId = user.rows[0]!.id;
       const existingMembership = await client.query<{ id: string; status: string }>(
         `SELECT id,status FROM memberships
@@ -367,23 +373,19 @@ export class IdentityRepository implements OnModuleDestroy {
       let invitationId: string | null = null;
       let expiresAt: Date | null = null;
       let invitationStatus: ReturnType<typeof parentInvitationStatus> = 'ISSUED';
-      if (input.role === 'PARENT' && wasActive) {
+      if (user.rows[0]!.passcode_hash) invitationStatus = 'ALREADY_ACTIVE';
+      else if (wasActive) {
         const phoneHash = hash(input.phoneE164);
-        const accepted = await client.query(`SELECT id FROM invitations WHERE school_id IS NOT DISTINCT FROM $1 AND role='PARENT' AND phone_hash=$2
-          AND accepted_by_user_id=$3 AND accepted_at IS NOT NULL AND revoked_at IS NULL LIMIT 1`, [input.schoolId, phoneHash, userId]);
-        const pending = await client.query(`SELECT id FROM invitations WHERE school_id IS NOT DISTINCT FROM $1 AND role='PARENT' AND phone_hash=$2
-          AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>now() ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, [input.schoolId, phoneHash]);
+        const accepted = await client.query(`SELECT id FROM invitations WHERE school_id IS NOT DISTINCT FROM $1 AND role=$4 AND phone_hash=$2
+          AND accepted_by_user_id=$3 AND accepted_at IS NOT NULL AND revoked_at IS NULL LIMIT 1`, [input.schoolId, phoneHash, userId, input.role]);
+        const pending = await client.query(`SELECT id FROM invitations WHERE school_id IS NOT DISTINCT FROM $1 AND role=$3 AND phone_hash=$2
+          AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>now() ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, [input.schoolId, phoneHash, input.role]);
         invitationStatus = parentInvitationStatus({ hasAcceptedInvitation: Boolean(accepted.rowCount), hasUnexpiredInvitation: Boolean(pending.rowCount) });
       }
 
       if (invitationStatus === 'ISSUED') {
-        invitationCode = `SC-${randomBytes(9).toString('base64url').toUpperCase()}`;
-        const invitation = await client.query<{ id: string; expires_at: Date }>(
-          `INSERT INTO invitations (school_id, invitation_code_hash, phone_hash, role, expires_at)
-           VALUES ($1,$2,$3,$4,now()+interval '30 days') RETURNING id, expires_at`,
-          [input.schoolId, hash(invitationCode), hash(input.phoneE164), input.role]);
-        invitationId = invitation.rows[0]!.id;
-        expiresAt = invitation.rows[0]!.expires_at;
+        const invitation = await this.issueInvitation(client, input.schoolId, input.role, input.phoneE164, actorUserId);
+        invitationCode = invitation.invitationCode; invitationId = invitation.invitationId; expiresAt = invitation.expiresAt;
       }
 
       if (membershipProvisioned || invitationStatus === 'ISSUED') {
@@ -411,16 +413,51 @@ export class IdentityRepository implements OnModuleDestroy {
     } finally { client.release(); }
   }
 
-  async schoolMembers(schoolId: string, role?: MembershipRole) {
+  async schoolMembers(schoolId: string | null, role?: MembershipRole) {
     const values: unknown[] = [schoolId];
     const roleFilter = role ? 'AND m.role=$2' : '';
     if (role) values.push(role);
     const result = await this.pool.query(
-      `SELECT u.id AS "userId", COALESCE(m.display_name_override,u.display_name) AS "displayName",u.phone_e164 AS "phoneE164", m.id AS "membershipId", m.role, m.status
+      `SELECT u.id AS "userId", COALESCE(m.display_name_override,u.display_name) AS "displayName",u.phone_e164 AS "phoneE164", m.id AS "membershipId", m.role, m.status,
+        u.passcode_hash IS NOT NULL AS activated,i.id AS invitation_id,i.code_ciphertext,i.expires_at,i.accepted_at,i.revoked_at
        FROM memberships m JOIN users u ON u.id=m.user_id
-       WHERE m.school_id=$1 ${roleFilter} ORDER BY u.display_name`,
+       LEFT JOIN LATERAL (SELECT id,code_ciphertext,expires_at,accepted_at,revoked_at FROM invitations
+         WHERE school_id IS NOT DISTINCT FROM m.school_id AND role=m.role AND phone_hash=encode(digest(u.phone_e164,'sha256'),'hex')
+         ORDER BY created_at DESC,id DESC LIMIT 1) i ON true
+       WHERE m.school_id IS NOT DISTINCT FROM $1 ${roleFilter} ORDER BY u.display_name`,
       values);
-    return result.rows;
+    return result.rows.map(({activated,invitation_id,code_ciphertext,expires_at,accepted_at,revoked_at,...row}) => ({...row,activation:{
+      code:decryptInvitationCode(code_ciphertext ?? null,invitation_id ?? ''),
+      state:row.status!=='ACTIVE' ? 'REVOKED' : activated ? 'ACTIVE' : revoked_at ? 'REVOKED' : accepted_at ? 'ACCEPTED' : expires_at && expires_at<new Date() ? 'EXPIRED' : 'PENDING',
+      expiresAt:expires_at ?? null,requiresActivation:!activated,legacyCodeUnavailable:Boolean(invitation_id && !code_ciphertext),
+    }}));
+  }
+
+  private async issueInvitation(client: PoolClient, schoolId: string | null, role: MembershipRole, phone: string, actorUserId?: string) {
+    const invitationId = randomUUID(); const invitationCode = `SC-${randomBytes(12).toString('base64url').toUpperCase()}`;
+    const row = await client.query<{ expires_at: Date }>(`INSERT INTO invitations
+      (id,school_id,invitation_code_hash,phone_hash,role,expires_at,created_by_user_id,code_ciphertext,created_at)
+      VALUES($1,$2,$3,$4,$5,now()+interval '30 days',$6,$7,clock_timestamp()) RETURNING expires_at`,
+      [invitationId,schoolId,hash(invitationCode),hash(phone),role,actorUserId ?? null,encryptInvitationCode(invitationCode,invitationId)]);
+    return { invitationId, invitationCode, expiresAt: row.rows[0]!.expires_at };
+  }
+
+  async activation(membershipId: string, schoolId: string | null) {
+    const result = await this.pool.query(`SELECT u.passcode_hash IS NOT NULL AS activated,m.status,i.id,i.code_ciphertext,
+      i.expires_at,i.accepted_at,i.revoked_at FROM memberships m JOIN users u ON u.id=m.user_id
+      LEFT JOIN LATERAL (SELECT * FROM invitations WHERE school_id IS NOT DISTINCT FROM m.school_id AND role=m.role
+        AND phone_hash=encode(digest(u.phone_e164,'sha256'),'hex') ORDER BY created_at DESC,id DESC LIMIT 1) i ON true
+      WHERE m.id=$1 AND m.school_id IS NOT DISTINCT FROM $2`,[membershipId,schoolId]);
+    const row = result.rows[0]; if (!row) throw new NotFoundException({ code: 'MEMBERSHIP_NOT_FOUND' });
+    const state = row.status !== 'ACTIVE' ? 'REVOKED' : row.activated ? 'ACTIVE' : row.revoked_at ? 'REVOKED' : row.accepted_at ? 'ACCEPTED' : row.expires_at && row.expires_at < new Date() ? 'EXPIRED' : 'PENDING';
+    return { code: decryptInvitationCode(row.code_ciphertext ?? null,row.id ?? ''), state, expiresAt: row.expires_at ?? null,
+      requiresActivation: !row.activated, legacyCodeUnavailable: Boolean(row.id && !row.code_ciphertext) };
+  }
+
+  async membership(membershipId: string) {
+    const result = await this.pool.query(`SELECT id AS "membershipId",user_id AS "userId",school_id AS "schoolId",role,status FROM memberships WHERE id=$1`, [membershipId]);
+    if (!result.rowCount) throw new NotFoundException({ code: 'MEMBERSHIP_NOT_FOUND' });
+    return result.rows[0];
   }
 
   async revokeMembership(membershipId: string, actorUserId?: string, correlationId?: string) {
@@ -442,40 +479,55 @@ export class IdentityRepository implements OnModuleDestroy {
   }
 
   async platformMembers() {
-    const result = await this.pool.query(`SELECT u.id AS "userId",COALESCE(m.display_name_override,u.display_name) AS "displayName",u.phone_e164 AS "phoneE164",m.id AS "membershipId",m.role,m.status
-      FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.role='PLATFORM_OWNER' AND m.school_id IS NULL ORDER BY u.display_name`);
-    return result.rows;
+    return this.schoolMembers(null,'PLATFORM_OWNER');
   }
 
-  async updateMember(membershipId: string, schoolId: string | null, input: { displayName?: string; phoneE164?: string; status?: 'ACTIVE' | 'REVOKED' }, actorUserId?: string, correlationId?: string) {
-    if (input.displayName !== undefined && (!input.displayName.trim() || input.displayName.trim().length > 160)) throw new BadRequestException({ code: 'MEMBER_NAME_INVALID' });
-    if (input.phoneE164 !== undefined && !/^\+[1-9]\d{7,14}$/.test(input.phoneE164)) throw new BadRequestException({ code: 'PHONE_INVALID' });
+  async updateMember(membershipId: string, schoolId: string | null, input: { displayName?: string; phoneE164?: string; guardianStudentIds?:string[]; status?: 'ACTIVE' | 'REVOKED' }, actorUserId?: string, correlationId?: string) {
+    if (input.displayName !== undefined && (typeof input.displayName!=='string' || !input.displayName.trim() || input.displayName.trim().length > 150)) throw new BadRequestException({ code: 'MEMBER_NAME_INVALID' });
+    if (input.phoneE164 !== undefined && (typeof input.phoneE164!=='string' || !/^\+[1-9]\d{7,14}$/.test(input.phoneE164))) throw new BadRequestException({ code: 'PHONE_INVALID' });
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      const current = await client.query<{ user_id: string; phone_e164: string }>(`SELECT m.user_id,u.phone_e164 FROM memberships m JOIN users u ON u.id=m.user_id
+      const current = await client.query<{ user_id: string; phone_e164: string; role: MembershipRole; display_name: string }>(`SELECT m.user_id,u.phone_e164,m.role,COALESCE(m.display_name_override,u.display_name) AS display_name FROM memberships m JOIN users u ON u.id=m.user_id
         WHERE m.id=$1 AND m.school_id IS NOT DISTINCT FROM $2 FOR UPDATE OF m,u`, [membershipId, schoolId]);
       if (!current.rowCount) throw new NotFoundException({ code: 'MEMBERSHIP_NOT_FOUND' });
       const user = current.rows[0]!;
+      if (input.status !== undefined && !['ACTIVE','REVOKED'].includes(input.status)) throw new BadRequestException({ code:'MEMBER_STATUS_INVALID' });
+      if (input.status === 'REVOKED' && user.role === 'PLATFORM_OWNER') {
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext('platform-owner-management'))`);
+        const owners = await client.query(`SELECT id FROM memberships WHERE role='PLATFORM_OWNER' AND status='ACTIVE' AND id<>$1`,[membershipId]);
+        if (!owners.rowCount) throw new ConflictException({ code:'LAST_OWNER_CANNOT_BE_REVOKED' });
+      }
+      let nextUserId = user.user_id;
+      let invitation: Awaited<ReturnType<IdentityRepository['issueInvitation']>> | null = null;
       if (input.phoneE164 && input.phoneE164 !== user.phone_e164) {
-        const count = await client.query<{ count: number }>(`SELECT COUNT(*)::int AS count FROM memberships WHERE user_id=$1 AND status='ACTIVE'`, [user.user_id]);
-        if (count.rows[0]!.count > 1) throw new ConflictException({ code: 'SHARED_ACCOUNT_PHONE_CHANGE_REQUIRES_OWNER_REVIEW' });
-        await client.query(`UPDATE users SET phone_e164=$2,updated_at=now() WHERE id=$1`, [user.user_id, input.phoneE164]);
-        await client.query(`UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE user_id=$1`, [user.user_id]);
-        await client.query(`UPDATE invitations SET revoked_at=COALESCE(revoked_at,now()) WHERE phone_hash=$1 AND accepted_at IS NULL`, [hash(user.phone_e164)]);
+        if(user.role==='PARENT' && (!Array.isArray(input.guardianStudentIds) || input.guardianStudentIds.some((id)=>typeof id!=='string' || !/^[0-9a-f-]{36}$/i.test(id)))) throw new BadRequestException({code:'GUARDIAN_TRANSFER_CONTEXT_REQUIRED'});
+        const target = await client.query<{ id:string; status:string; passcode_hash:string | null }>(`INSERT INTO users(phone_e164,display_name) VALUES($1,$2)
+          ON CONFLICT(phone_e164) DO UPDATE SET display_name=users.display_name RETURNING id,status,passcode_hash`,[input.phoneE164,input.displayName?.trim() ?? user.display_name]);
+        if (target.rows[0]!.status !== 'ACTIVE') throw new ConflictException({ code:'ACCOUNT_INACTIVE_REQUIRES_OWNER_REVIEW' });
+        nextUserId = target.rows[0]!.id;
+        const duplicate = await client.query(`SELECT id FROM memberships WHERE user_id=$1 AND school_id IS NOT DISTINCT FROM $2 AND role=$3 AND id<>$4`,[nextUserId,schoolId,user.role,membershipId]);
+        if (duplicate.rowCount) throw new ConflictException({ code:'PHONE_ALREADY_HAS_THIS_SCHOOL_ROLE_USE_EXISTING_ACCOUNT' });
+        // Rebind this membership only. Never copy a passcode or change other schools/roles.
+        await client.query(`UPDATE memberships SET user_id=$2 WHERE id=$1`,[membershipId,nextUserId]);
+        await client.query(`UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE active_membership_id=$1`, [membershipId]);
+        await client.query(`UPDATE invitations SET revoked_at=COALESCE(revoked_at,now()) WHERE school_id IS NOT DISTINCT FROM $1 AND role=$2 AND phone_hash=$3 AND accepted_at IS NULL`, [schoolId,user.role,hash(user.phone_e164)]);
+        if (!target.rows[0]!.passcode_hash) invitation = await this.issueInvitation(client,schoolId,user.role,input.phoneE164,actorUserId);
       }
       const result = await client.query(`UPDATE memberships SET display_name_override=COALESCE($3,display_name_override),status=COALESCE($4,status),updated_at=now()
         WHERE id=$1 AND school_id IS NOT DISTINCT FROM $2 RETURNING id AS "membershipId",role,status,display_name_override AS "displayName"`,
         [membershipId, schoolId, input.displayName?.trim() ?? null, input.status ?? null]);
       if (input.status === 'REVOKED') {
         await client.query(`UPDATE auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE active_membership_id=$1`, [membershipId]);
-        await client.query(`UPDATE invitations SET revoked_at=COALESCE(revoked_at,now()) WHERE school_id IS NOT DISTINCT FROM $1 AND phone_hash=$2 AND accepted_at IS NULL`, [schoolId, hash(input.phoneE164 ?? user.phone_e164)]);
+        await client.query(`UPDATE invitations SET revoked_at=COALESCE(revoked_at,now()) WHERE school_id IS NOT DISTINCT FROM $1 AND phone_hash=$2 AND role=$3 AND accepted_at IS NULL`, [schoolId, hash(input.phoneE164 ?? user.phone_e164),user.role]);
       }
       await client.query(`INSERT INTO outbox_events (event_type,aggregate_id,payload) VALUES ($1,$2,$3)`,
-        [domainEventTypes.membershipUpdated, membershipId, { schoolId, userId: user.user_id, membershipId, role: result.rows[0].role,
+        [domainEventTypes.membershipUpdated, membershipId, { schoolId, membershipId, role: result.rows[0].role,
+          userId: nextUserId, previousUserId: nextUserId !== user.user_id ? user.user_id : undefined,
+          guardianStudentIds: input.guardianStudentIds,
           status: result.rows[0].status, changedFields: Object.keys(input).filter((key) => ['displayName', 'phoneE164', 'status'].includes(key)), actorUserId, correlationId }]);
       await client.query('COMMIT');
-      return result.rows[0];
+      return { ...result.rows[0],userId:nextUserId,invitationCode:invitation?.invitationCode ?? null,expiresAt:invitation?.expiresAt ?? null };
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
 
@@ -489,16 +541,12 @@ export class IdentityRepository implements OnModuleDestroy {
       if (!account.rowCount) throw new NotFoundException({ code: 'MEMBERSHIP_NOT_FOUND' });
       const row = account.rows[0]!;
       await client.query(`UPDATE invitations SET revoked_at=now() WHERE school_id IS NOT DISTINCT FROM $1 AND role=$2 AND phone_hash=$3 AND accepted_at IS NULL AND revoked_at IS NULL`, [row.school_id, row.role, hash(row.phone_e164)]);
-      const invitationCode = `SC-${randomBytes(9).toString('base64url').toUpperCase()}`;
-      const invitation = await client.query<{ id: string; expires_at: Date }>(
-        `INSERT INTO invitations (school_id,invitation_code_hash,phone_hash,role,expires_at,created_by_user_id)
-         VALUES ($1,$2,$3,$4,now()+interval '30 days',$5) RETURNING id,expires_at`,
-        [row.school_id, hash(invitationCode), hash(row.phone_e164), row.role, actorUserId ?? null]);
+      const invitation = await this.issueInvitation(client,row.school_id,row.role,row.phone_e164,actorUserId);
       await client.query(`INSERT INTO outbox_events (event_type,aggregate_id,payload) VALUES ($1,$2,$3)`,
         [domainEventTypes.invitationReissued, membershipId, { schoolId: row.school_id, userId: row.user_id,
-          membershipId, invitationId: invitation.rows[0]!.id, role: row.role, actorUserId, correlationId }]);
+          membershipId, invitationId: invitation.invitationId, role: row.role, actorUserId, correlationId }]);
       await client.query('COMMIT');
-      return { invitationId: invitation.rows[0]!.id, invitationCode, expiresAt: invitation.rows[0]!.expires_at };
+      return invitation;
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
 
@@ -528,9 +576,9 @@ class IdentityController {
   @Get('events/status') eventsStatus() { return this.repository.eventingDiagnostics(); }
 
   @Post('otp/request')
-  async request(@Body() body: { phoneE164?: string; invitationCode?: string; purpose?: 'ACTIVATE' | 'RESET' }) {
+  async request(@Body() body: { phoneE164?: string; invitationCode?: string; purpose?: 'ACTIVATE' | 'RESET';role?:MembershipRole }) {
     if (!body.phoneE164) throw new BadRequestException({ code: 'PHONE_REQUIRED' });
-    const result = await this.repository.requestOtp(body.phoneE164, body.invitationCode, body.purpose);
+    const result = await this.repository.requestOtp(body.phoneE164, body.invitationCode, body.purpose,body.role);
     return {
       challengeId: result.challengeId,
       expiresInSeconds: positiveInteger('OTP_TTL_SECONDS', 300, 900),
@@ -552,9 +600,9 @@ class IdentityController {
   }
 
   @Post('passcode/login')
-  loginPasscode(@Body() body: { phoneE164?: string; passcode?: string; deviceId?: string }) {
+  loginPasscode(@Body() body: { phoneE164?: string; passcode?: string; deviceId?: string;role?:MembershipRole }) {
     if (!body.phoneE164 || !body.passcode || !body.deviceId) throw new BadRequestException({ code: 'LOGIN_FIELDS_REQUIRED' });
-    return this.repository.loginPasscode(body.phoneE164, body.passcode, body.deviceId);
+    return this.repository.loginPasscode(body.phoneE164, body.passcode, body.deviceId,body.role);
   }
 
   @Post('sessions/context')
@@ -602,8 +650,9 @@ class IdentityController {
   @Get('schools/:schoolId/members')
   schoolMembers(@Param('schoolId') schoolId: string, @Query('role') role?: MembershipRole) { return this.repository.schoolMembers(schoolId, role); }
   @Get('platform/members') platformMembers() { return this.repository.platformMembers(); }
+  @Get('members/:membershipId') membership(@Param('membershipId') membershipId: string) { return this.repository.membership(membershipId); }
   @Get('reports/platform-memberships') platformMembershipSummary() { return this.repository.platformMembershipSummary(); }
-  @Patch('members/:membershipId') updateMember(@Param('membershipId') membershipId: string, @Body() body: { schoolId: string | null; displayName?: string; phoneE164?: string; status?: 'ACTIVE' | 'REVOKED' }, @Headers('x-schoolconnect-user-id') actorUserId?: string, @Headers('x-correlation-id') correlationId?: string) { return this.repository.updateMember(membershipId, body.schoolId, body, actorUserId, correlationId); }
+  @Patch('members/:membershipId') updateMember(@Param('membershipId') membershipId: string, @Body() body: Parameters<IdentityRepository['updateMember']>[2] & {schoolId:string | null}, @Headers('x-schoolconnect-user-id') actorUserId?: string, @Headers('x-correlation-id') correlationId?: string) { return this.repository.updateMember(membershipId, body.schoolId, body, actorUserId, correlationId); }
   @Get('outbox') outbox(@Query('limit') limit = '25') { return this.repository.claimOutbox(Number(limit)); }
   @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean; claimToken?: string }) { return this.repository.completeOutbox(eventId, body.success === true,body.claimToken); }
 }

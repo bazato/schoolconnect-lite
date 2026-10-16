@@ -16,10 +16,10 @@ class AuthorizationPolicy {
       headers: process.env.INTERNAL_SERVICE_TOKEN ? { 'x-internal-service-token': process.env.INTERNAL_SERVICE_TOKEN } : {}, signal: AbortSignal.timeout(5000),
     });
     if (!response.ok) throw new Error(`SCHOOL_RELATIONSHIP_UNAVAILABLE_${response.status}`);
-    return response.json() as Promise<{ allowed: boolean }>;
+    return response.json() as Promise<{ allowed: boolean; guardianUserIds?:string[] }>;
   });
   decide(input: ResourceDecision) { return this.engine.decide(input); }
-  decideRoute(input: { method: string; path: string; principal: Principal }) { return this.routes.decide(input.method, input.path, input.principal?.role); }
+  decideRoute(input: { method: string; path: string; principal: Principal; selectedSchoolId?: string }) { return this.routes.decide(input.method, input.path, input.principal?.role,input.selectedSchoolId,input.principal?.schoolId); }
 }
 
 @Controller('internal/v1')
@@ -27,7 +27,7 @@ class AuthorizationController {
   constructor(@Inject(AuthorizationPolicy) private readonly policy: AuthorizationPolicy) {}
   @Get('health') health() { return { status: 'ok', service: 'authorization' }; }
   @Post('decisions') decide(@Body() body: ResourceDecision) { return this.policy.decide(body); }
-  @Post('decisions/route') decideRoute(@Body() body: { method: string; path: string; principal: Principal }) { return this.policy.decideRoute(body); }
+  @Post('decisions/route') decideRoute(@Body() body: { method: string; path: string; principal: Principal; selectedSchoolId?: string }) { return this.policy.decideRoute(body); }
 }
 @Module({ controllers: [AuthorizationController], providers: [AuthorizationPolicy] }) class AuthorizationModule {}
 async function bootstrap() {

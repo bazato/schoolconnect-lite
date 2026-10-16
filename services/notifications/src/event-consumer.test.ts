@@ -2,6 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { applyNotificationEvent } from './event-consumer';
 
 describe('notification event consumer', () => {
+  it('notifies teachers once per event without a student ID and keeps parent-child deliveries',async()=>{
+    const enqueue=vi.fn().mockResolvedValue({id:'n'});
+    await applyNotificationEvent({source:'content',event:{id:'e',eventType:'content.post-published.v1',aggregateId:'holiday',occurredAt:new Date().toISOString(),payload:{schoolId:'s1',notification:{title:'Holiday',body:'School is closed'},recipients:[{guardianUserId:'parent',studentId:'kid'}],staffRecipients:['teacher','teacher']}}},enqueue);
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({recipientUserId:'parent',studentId:'kid',deepLink:'schoolconnect://posts/holiday?studentId=kid'}),'e');
+    const staff=enqueue.mock.calls.find(([input])=>input.recipientUserId==='teacher')![0];expect(staff.notificationType).toBe('SCHOOL_ANNOUNCEMENT');expect(staff).not.toHaveProperty('studentId');expect(staff.deepLink).toBe('schoolconnect://posts/holiday');
+  });
   it('waits for all recipient writes before propagating a partial fanout failure',async () => {
     let finish!: () => void;let completed=false;
     const enqueue=vi.fn().mockRejectedValueOnce(new Error('write failed')).mockImplementationOnce(() => new Promise<void>((resolve) => {finish=() => {completed=true;resolve();};}));
