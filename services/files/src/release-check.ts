@@ -12,28 +12,28 @@ export async function runFileReleaseCheck(storage:PrivateObjectStorage,scanner:M
   const input=Buffer.from(await document.save()),checksum=createHash('sha256').update(input).digest('hex');
   const attempted=new Set<string>(),checks:string[]=[];
   const request=(url:string,init:RequestInit={})=>http(url,{...init,redirect:'error',signal:AbortSignal.timeout(20000)});
-  let failure:unknown;
+  let failure:unknown;let step='scanner_health';
   try{
     await scanner.health();checks.push('clean_and_eicar_scanner_health');
-    const url=await storage.createUploadUrl(quarantine,'application/pdf',input.length,checksum);
+    step='presigned_upload';const url=await storage.createUploadUrl(quarantine,'application/pdf',input.length,checksum);
     const headers={'content-type':'application/pdf','if-none-match':'*','x-amz-meta-checksumsha256':checksum};
     attempted.add(quarantine);
     const uploaded=await request(url,{method:'PUT',headers,body:new Uint8Array(input)});
     await uploaded.body?.cancel();if(!uploaded.ok)throw Error('RELEASE_PRESIGNED_UPLOAD_FAILED');checks.push('presigned_upload');
-    const duplicate=await request(url,{method:'PUT',headers,body:new Uint8Array(input)});
+    step='create_only_upload';const duplicate=await request(url,{method:'PUT',headers,body:new Uint8Array(input)});
     await duplicate.body?.cancel();if(duplicate.status!==412)throw Error('RELEASE_CREATE_ONLY_NOT_ENFORCED');checks.push('create_only_upload');
-    const bytes=await storage.read(quarantine,input.length);
+    step='read_and_validate';const bytes=await storage.read(quarantine,input.length);
     validateFileBytes(bytes,{byteSize:input.length,checksum,mediaType:'application/pdf'});
     const prepared=await compressForStorage(bytes,'application/pdf'),storedHash=createHash('sha256').update(prepared.bytes).digest('hex');
-    await scanner.assertClean(prepared.bytes);checks.push('actual_final_bytes_scanned');
-    attempted.add(ready);await storage.putChecked(ready,prepared.bytes,prepared.mediaType,storedHash);
+    step='scan_final_bytes';await scanner.assertClean(prepared.bytes);checks.push('actual_final_bytes_scanned');
+    step='immutable_storage';attempted.add(ready);await storage.putChecked(ready,prepared.bytes,prepared.mediaType,storedHash);
     if(!(await storage.read(ready,prepared.bytes.length)).equals(prepared.bytes))throw Error('RELEASE_STORED_BYTES_MISMATCH');checks.push('immutable_checked_storage');
-    const downloadUrl=await storage.createDownloadUrl(ready),download=await request(downloadUrl);
+    step='signed_download';const downloadUrl=await storage.createDownloadUrl(ready),download=await request(downloadUrl);
     if(!download.ok||!Buffer.from(await download.arrayBuffer()).equals(prepared.bytes))throw Error('RELEASE_DOWNLOAD_FAILED');checks.push('signed_private_download');
-    const unsigned=new URL(downloadUrl);unsigned.search='';
+    step='anonymous_denial';const unsigned=new URL(downloadUrl);unsigned.search='';
     const denied=await request(unsigned.toString());await denied.body?.cancel();
     if(![400,401,403,404].includes(denied.status))throw Error('RELEASE_ANONYMOUS_ACCESS_NOT_DENIED');checks.push('unsigned_s3_access_denied');
-  }catch(error){failure=error;}
+  }catch(error){failure=error instanceof Error?Object.assign(error,{releaseStep:step}):Error('FILE_RELEASE_CHECK_FAILED');}
   finally{for(const key of attempted){try{await storage.remove(key);}catch{failure=Error('RELEASE_SYNTHETIC_CLEANUP_FAILED');}}}
   if(failure)throw failure;
   checks.push('synthetic_objects_removed');return {status:'passed',checks};
