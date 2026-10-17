@@ -2,6 +2,7 @@ import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } fro
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { ServiceUnavailableException } from '@nestjs/common';
 import { ClamdScanner, HttpClamAvScanner, type MalwareScanner } from './clamav';
+import { CloudmersiveScanner } from './cloudmersive';
 export type { MalwareScanner } from './clamav';
 
 export interface PrivateObjectStorage {
@@ -76,5 +77,6 @@ export const createMalwareScanner = (): MalwareScanner => {
   if (provider === 'development-clean') return new DevelopmentCleanScanner();
   if(provider==='clamd')return new ClamdScanner();
   if(provider==='clamav-http')return new HttpClamAvScanner();
+  if(provider==='cloudmersive')return new CloudmersiveScanner();
   throw new Error(`FILE_SCANNER_PROVIDER_UNAVAILABLE:${provider}`);
 };

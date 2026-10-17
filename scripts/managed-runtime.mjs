@@ -11,7 +11,7 @@ export const requiredTables = {
   school: ['schools', 'school_classes', 'students', 'guardian_links', 'teacher_assignments'],
   content: ['posts', 'post_revisions', 'post_recipients', 'post_attachments', 'post_drafts', 'class_timetables', 'result_scores'],
   attendance: ['attendance_batches', 'attendance_events', 'attendance_current', 'absence_responses', 'parent_leave_applications'],
-  files: ['file_objects', 'upload_sessions', 'file_access_events'],
+  files: ['file_objects', 'upload_sessions', 'file_access_events', 'scanner_provider_state', 'scanner_requests'],
   notifications: ['notifications', 'outbox_events', 'consumer_failures'], audit: ['audit_events', 'consumer_failures'],
   'read-model': ['consumed_events', 'read_posts', 'read_post_recipients', 'read_attendance', 'consumer_failures'],
   fees: ['fee_ledger_state', 'fee_invoices', 'fee_collections', 'fee_import_batches'],

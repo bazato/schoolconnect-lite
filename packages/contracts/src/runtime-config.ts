@@ -136,11 +136,15 @@ export function validateManagedRuntime(env: RuntimeEnvironment, service: Runtime
     if (env.FILE_STORAGE_PROVIDER === 's3') {
       if (!env.S3_BUCKET || !env.S3_REGION) fail('S3_BUCKET', 'BUCKET_AND_REGION_REQUIRED');
       if (env.S3_ENDPOINT && !env.S3_ENDPOINT.startsWith('https://')) fail('S3_ENDPOINT', 'HTTPS_REQUIRED');
-      if (!['clamd','clamav-http'].includes(env.FILE_SCANNER_PROVIDER ?? '')) fail('FILE_SCANNER_PROVIDER', 'REAL_SCANNER_REQUIRED');
+      if (!['clamd','clamav-http','cloudmersive'].includes(env.FILE_SCANNER_PROVIDER ?? '')) fail('FILE_SCANNER_PROVIDER', 'REAL_SCANNER_REQUIRED');
       if(env.FILE_SCANNER_PROVIDER==='clamav-http'){
         let scannerUrl:URL;try{scannerUrl=new URL(env.FILE_SCANNER_URL??'');}catch{fail('FILE_SCANNER_URL','HTTPS_REQUIRED');}
         if(scannerUrl!.protocol!=='https:'||scannerUrl!.username||scannerUrl!.password||scannerUrl!.search||scannerUrl!.hash)fail('FILE_SCANNER_URL','HTTPS_REQUIRED');
         secret(env,'FILE_SCANNER_TOKEN');
+      }else if(env.FILE_SCANNER_PROVIDER==='cloudmersive'){
+        if((env.CLOUDMERSIVE_API_KEY?.trim().length??0)<20)fail('CLOUDMERSIVE_API_KEY','PROTECTED_SECRET_REQUIRED');
+        if(env.FILE_SCANNER_ALLOW_EXTERNAL_PROCESSING!=='true')fail('FILE_SCANNER_ALLOW_EXTERNAL_PROCESSING','EXPLICIT_APPROVAL_REQUIRED');
+        positive(env,'FILE_SCANNER_REQUEST_LIMIT',550,550);
       }else if(!['localhost','127.0.0.1','::1','clamav'].includes(env.CLAMAV_HOST??'127.0.0.1'))fail('CLAMAV_HOST','REMOTE_CLAMD_REQUIRES_AUTHENTICATED_HTTPS_GATEWAY');
       positive(env,'FILE_SIGNATURE_MAX_AGE_HOURS',72,168);
       positive(env,'FILE_SCAN_TIMEOUT_MS',40000,60000);

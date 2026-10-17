@@ -10,6 +10,7 @@ import { eventingHealth, bindEventingShutdown, registerApplicationShutdown, star
 import { createMalwareScanner, createPrivateObjectStorage, type MalwareScanner, type PrivateObjectStorage } from './storage';
 import { FileRepository } from './repository';
 import { fileCapabilities } from './file-policy';
+import { runFileReleaseCheck } from './release-check';
 export { FileRepository } from './repository';
 
 @Controller('internal/v1')
@@ -35,8 +36,18 @@ async function bootstrap(){
   const app=await NestFactory.create(FileModule),token=process.env.INTERNAL_SERVICE_TOKEN;
   if(process.env.NODE_ENV==='production'&&(!token||token.length<32))throw Error('INTERNAL_SERVICE_TOKEN_REQUIRED');
   if(token)app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'}));
-  await app.listen(Number(process.env.FILE_PORT??3105),process.env.SERVICE_BIND_HOST??'127.0.0.1');
   const repository=app.get(FileRepository);
+  if(process.env.FILE_RELEASE_SELF_TEST==='true'){
+    try{
+      const result=await runFileReleaseCheck(app.get<PrivateObjectStorage>('PRIVATE_OBJECT_STORAGE'),app.get<MalwareScanner>('MALWARE_SCANNER'));
+      console.info(JSON.stringify({event:'file-release-check',...result}));
+    }catch(error){
+      const code=error instanceof Error&&/^(RELEASE_[A-Z_]+|FILE_SCANNER_[A-Z_]+)$/.test(error.message)?error.message:'FILE_RELEASE_CHECK_FAILED';
+      console.error(JSON.stringify({event:'file-release-check',status:'failed',code}));
+      throw Error('FILE_RELEASE_CHECK_FAILED');
+    }
+  }
+  await app.listen(Number(process.env.FILE_PORT??3105),process.env.SERVICE_BIND_HOST??'127.0.0.1');
   const publisher=await startOutboxPublisher('files',repository);
   let cleaning=false;
   const timer=setInterval(()=>{

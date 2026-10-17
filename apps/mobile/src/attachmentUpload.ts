@@ -21,6 +21,7 @@ export function attachmentErrorMessage(error: unknown): string {
   if(/FILE_COMPRESSION_FAILED|FILE_IMAGE_DIMENSIONS_EXCEEDED|FILE_PDF_TOO_MANY_PAGES/.test(code))return 'This document could not be safely optimized. Choose a smaller PDF or image. Your draft is kept.';
   if (code === 'FILE_REJECTED') return 'This file failed the security or file-content checks. Choose another PDF, JPEG or PNG.';
   if (code === 'FILE_STORAGE_QUOTA_EXCEEDED') return 'The school document-storage limit has been reached. Contact your administrator.';
+  if(code==='FILE_SCANNER_QUOTA_EXCEEDED')return 'The trial document-scanning allowance has been reached. Uploads will resume when the allowance is available again. Your draft is kept.';
   if (/FILE_PROCESSING_BUSY|FILE_PROCESSING_UNAVAILABLE|FILE_SCANNER_UNAVAILABLE/.test(code)) return 'Secure file checking is busy or unavailable. Your draft is safe. Tap retry to finish checking the upload.';
   if (/Network request failed|Failed to fetch|SERVICE_UNAVAILABLE|AbortError/.test(code)) return 'Unable to reach the upload service. Your draft is safe; please retry when connected.';
   return 'The file could not be uploaded. Your draft is safe. Please retry or choose another file.';

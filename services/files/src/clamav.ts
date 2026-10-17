@@ -1,7 +1,7 @@
 import { createConnection } from 'node:net';
 import { createHash } from 'node:crypto';
 export class FileValidationError extends Error {}
-export interface MalwareScanner { assertClean(bytes:Buffer):Promise<string>; health():Promise<string> }
+export interface MalwareScanner { assertClean(bytes:Buffer):Promise<string>; health():Promise<string>;close?():Promise<void> }
 export const eicar=()=>Buffer.from('X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*');
 export function freshVersion(version:string,maxAgeHours=72) {
   if(!Number.isSafeInteger(maxAgeHours)||maxAgeHours<1||maxAgeHours>168)throw Error('SCANNER_CONFIG_INVALID');

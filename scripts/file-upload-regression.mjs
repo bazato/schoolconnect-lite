@@ -8,6 +8,7 @@ const requireFiles=createRequire(new URL('../services/files/package.json',import
 const {Pool}=requireFiles('pg');
 const {FileRepository}=requireFiles('./dist/repository.js');
 const {FileValidationError}=requireFiles('./dist/clamav.js');
+const {PgScannerBudget}=requireFiles('./dist/scanner-budget.js');
 const {PDFDocument,PDFName,PDFString}=requireFiles('pdf-lib');
 const base=new URL(process.env.FILE_TEST_POSTGRES_URL??'postgresql://schoolconnect:schoolconnect@127.0.0.1:5432/postgres');
 if(!['localhost','127.0.0.1','[::1]'].includes(base.hostname))throw Error('LOCAL_DISPOSABLE_DATABASE_ONLY');
@@ -38,7 +39,7 @@ async function check(label,run){await run();tests++;console.log(`PASS ${label}`)
 try{
   await admin.query(`CREATE DATABASE "${name}"`);base.pathname=`/${name}`;
   pool=new Pool({connectionString:base.toString(),max:8,connectionTimeoutMillis:3000});
-  for(const file of ['050-files.sql','108-secure-file-processing.sql','109-compressed-private-files.sql']){
+  for(const file of ['050-files.sql','108-secure-file-processing.sql','109-compressed-private-files.sql','110-hosted-scanner-budget.sql']){
     const sql=await readFile(new URL(`../infra/postgres/init/${file}`,import.meta.url),'utf8');
     await pool.query(sql.replace(/^\\connect[^\r\n]+[\r\n]+/,''));
   }
@@ -140,6 +141,15 @@ try{
     report.catalog.set(PDFName.of('ReportNote'),PDFString.of('Already compressed report'));report.context.assign(reportData,report.context.flateStream(randomBytes(3_600_000)));
     const bytes=Buffer.from(await report.save({useObjectStreams:false,updateFieldAppearances:false}));assert.ok(bytes.length<5_000_000);const item=await upload(bytes);let called=false;scan=async()=>{called=true;};
     try{await assert.rejects(complete(item),error=>error.getResponse().code==='FILE_CANNOT_COMPRESS_TO_LIMIT');assert.equal(called,false);assert.equal((await state(item)).processing_status,'REJECTED');assert.equal(await events(item),0);}finally{scan=async()=>{};}
+  });
+  await check('durable scanner quota admits only one concurrent reservation',async()=>{
+    const first=new PgScannerBudget(pool,2),second=new PgScannerBudget(pool,2);const results=await Promise.allSettled([first.acquire(),second.acquire()]);assert.equal(results.filter(result=>result.status==='fulfilled').length,1);
+    assert.equal((await second.status()).remaining,1);const ticket=results.find(result=>result.status==='fulfilled').value;await first.release(ticket);
+    await assert.rejects(second.acquire(),/FILE_SCANNER_BUSY/);
+    await pool.query(`UPDATE scanner_provider_state SET last_request_at=now()-interval '2 seconds'`);await second.acquire();assert.equal((await first.status()).remaining,0);await assert.rejects(first.acquire(),/FILE_SCANNER_QUOTA_EXCEEDED/);
+  });
+  await check('scanner health attestation persists without storing provider credentials',async()=>{
+    const budget=new PgScannerBudget(pool);const fingerprint=sha(Buffer.from('synthetic-key'));await budget.verified(fingerprint);const state=await budget.status();assert.equal(state.fingerprint,fingerprint);assert.ok(state.checkedAt instanceof Date);
   });
   console.log(JSON.stringify({passed:tests,database:'disposable local PostgreSQL',storage:'test double',scanner:'test double',liveR2Tested:false,realClamAvTested:false}));
 }finally{

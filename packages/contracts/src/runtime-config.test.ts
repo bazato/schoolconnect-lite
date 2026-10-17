@@ -83,6 +83,13 @@ describe('managed runtime production settings', () => {
     expect(()=>validateManagedRuntime({...env,FILE_SCHOOL_BUDGET_BYTES:'9000000000'})).toThrow('EXCEEDS_GLOBAL_BUDGET');
     expect(()=>validateManagedRuntime({...env,FILE_SIGNATURE_MAX_AGE_HOURS:'NaN'})).toThrow('POSITIVE_INTEGER_REQUIRED');
   });
+  it('permits the hosted scanner only with a protected key, explicit processing approval and bounded free-trial allowance',()=>{
+    const env={...environment(),FILE_STORAGE_PROVIDER:'s3',S3_BUCKET:'private',S3_REGION:'auto',FILE_SCANNER_PROVIDER:'cloudmersive',CLOUDMERSIVE_API_KEY:'fixture-cloudmersive-key-not-real',FILE_SCANNER_ALLOW_EXTERNAL_PROCESSING:'true',FILE_STORAGE_BUDGET_BYTES:'8000000000',FILE_SCHOOL_BUDGET_BYTES:'2000000000'};
+    expect(validateManagedRuntime(env).attachmentsEnabled).toBe(true);
+    expect(()=>validateManagedRuntime({...env,CLOUDMERSIVE_API_KEY:undefined})).toThrow('PROTECTED_SECRET_REQUIRED');
+    expect(()=>validateManagedRuntime({...env,FILE_SCANNER_ALLOW_EXTERNAL_PROCESSING:undefined})).toThrow('EXPLICIT_APPROVAL_REQUIRED');
+    expect(()=>validateManagedRuntime({...env,FILE_SCANNER_REQUEST_LIMIT:'601'})).toThrow('POSITIVE_INTEGER_REQUIRED');
+  });
   it('rejects invalid rate, timeout and token lifetime settings', () => {
     expect(() => validateManagedRuntime({ ...environment(), DB_STATEMENT_TIMEOUT_MS: 'NaN' })).toThrow('POSITIVE_INTEGER_REQUIRED');
     expect(() => validateManagedRuntime({ ...environment(), AUTH_ACCESS_TOKEN_TTL_SECONDS: '3600' })).toThrow('POSITIVE_INTEGER_REQUIRED');

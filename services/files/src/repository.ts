@@ -26,13 +26,13 @@ export class FileRepository {
   async capabilities(){
     const result=fileCapabilities();
     if(!result.attachmentsEnabled)return result;
-    try{await this.scanner.health();return result;}catch{return {...result,attachmentsEnabled:false,reason:'FILE_SCANNER_UNAVAILABLE'};}
+    try{await this.scanner.health();return result;}catch(error){return {...result,attachmentsEnabled:false,reason:error instanceof Error&&error.message==='FILE_SCANNER_QUOTA_EXCEEDED'?error.message:'FILE_SCANNER_UNAVAILABLE'};}
   }
   private enabled(){if(!fileCapabilities().attachmentsEnabled)throw new ServiceUnavailableException({code:'FILE_ATTACHMENTS_DISABLED'});}
   async createUpload(input:UploadInput){
     this.enabled();
     if(!input || ![input.schoolId,input.actorUserId,input.ownerId].every(id=>typeof id==='string'&&uuid.test(id)) || !['POST','LEAVE_REQUEST'].includes(input.ownerType) || typeof input.fileName!=='string' || !input.fileName.trim() || input.fileName.length>255 || [...input.fileName].some(char=>char.charCodeAt(0)<32) || !fileUploadPolicy.mediaTypes.includes(input.mediaType) || !Number.isSafeInteger(input.byteSize) || input.byteSize<=0 || input.byteSize>fileUploadPolicy.maxByteSize || typeof input.checksumSha256!=='string' || !/^[a-f0-9]{64}$/i.test(input.checksumSha256))throw new BadRequestException({code:'FILE_POLICY_REJECTED'});
-    try{await this.scanner.health();}catch{throw new ServiceUnavailableException({code:'FILE_SCANNER_UNAVAILABLE'});}
+    try{await this.scanner.health();}catch(error){throw new ServiceUnavailableException({code:error instanceof Error&&error.message==='FILE_SCANNER_QUOTA_EXCEEDED'?error.message:'FILE_SCANNER_UNAVAILABLE'});}
     const fileId=randomUUID(),uploadSessionId=randomUUID(),key=`${input.schoolId}/quarantine/${fileId}`,checksum=input.checksumSha256.toLowerCase();
     // Signing does not create an object; never return this URL before quota reservation commits.
     const url=await this.storage.createUploadUrl(key,input.mediaType,input.byteSize,checksum);
@@ -91,7 +91,7 @@ export class FileRepository {
       const permanent=error instanceof FileValidationError || (error instanceof Error && error.message==='OBJECT_SIZE_LIMIT');
       await this.pool.query(`UPDATE file_objects SET processing_status=$3,processing_error=$4,rejection_code=$5,processing_token=NULL,processing_lease_until=NULL WHERE id=$1 AND processing_token=$2 AND processing_status='SCANNING'`,[file.id,token,permanent?'REJECTED':'QUARANTINED',permanent?'FILE_VALIDATION_FAILED':'FILE_PROCESSING_UNAVAILABLE',permanent?'FILE_VALIDATION_FAILED':null]);
       if(permanent){const code=error instanceof Error&&['FILE_TOO_LARGE','FILE_CANNOT_COMPRESS_TO_LIMIT','FILE_SIGNED_PDF_TOO_LARGE','FILE_COMPRESSION_FAILED','FILE_IMAGE_DIMENSIONS_EXCEEDED','FILE_PDF_TOO_MANY_PAGES'].includes(error.message)?error.message:'FILE_REJECTED';throw new BadRequestException({code});}
-      throw new ServiceUnavailableException({code:'FILE_PROCESSING_UNAVAILABLE'});
+      throw new ServiceUnavailableException({code:error instanceof Error&&error.message==='FILE_SCANNER_QUOTA_EXCEEDED'?error.message:'FILE_PROCESSING_UNAVAILABLE'});
     }
   }
   async validateAttachments(input:{schoolId:string;actorUserId:string;fileIds:string[]}){
@@ -131,5 +131,5 @@ export class FileRepository {
   async renewOutbox(id:string,token:string){return new PgOutbox(this.pool).renew(id,token);}
   async completeOutbox(id:string,success:boolean,token?:string,errorCode?:string){return new PgOutbox(this.pool).complete(id,success,token,errorCode);}
   async eventingDiagnostics(){return {runtime:eventingStatus('publisher:files'),outbox:await new PgOutbox(this.pool).status()};}
-  async onModuleDestroy(){await this.pool.end();}
+  async onModuleDestroy(){await this.pool.end();await this.scanner.close?.();}
 }
