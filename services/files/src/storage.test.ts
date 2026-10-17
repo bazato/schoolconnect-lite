@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createMalwareScanner, createPrivateObjectStorage, DevelopmentCleanScanner } from './storage';
+import { createMalwareScanner, createPrivateObjectStorage, DevelopmentCleanScanner, S3PrivateObjectStorage } from './storage';
 
 const originalEnvironment = process.env.NODE_ENV;
 const originalProvider = process.env.FILE_SCANNER_PROVIDER;
@@ -12,6 +12,16 @@ afterEach(() => {
 });
 
 describe('private file scanner policy', () => {
+  it('signs create-only upload length without an automatic checksum for the missing upload body',async()=>{
+    vi.stubEnv('S3_ACCESS_KEY_ID','fixture-access-key');vi.stubEnv('S3_SECRET_ACCESS_KEY','fixture-secret-not-a-real-key');
+    vi.stubEnv('S3_BUCKET','fixture-private');vi.stubEnv('S3_REGION','auto');vi.stubEnv('S3_ENDPOINT','https://storage.example');vi.stubEnv('S3_FORCE_PATH_STYLE','true');
+    const signed=new URL(await new S3PrivateObjectStorage().createUploadUrl('fixture/report.pdf','application/pdf',123,'a'.repeat(64)));
+    expect([...signed.searchParams.keys()].some(key=>/^x-amz-checksum-/i.test(key))).toBe(false);
+    expect(signed.searchParams.get('X-Amz-SignedHeaders')).toContain('content-length');
+    expect(signed.searchParams.get('X-Amz-SignedHeaders')).toContain('if-none-match');
+    expect(signed.searchParams.get('X-Amz-SignedHeaders')).toContain('content-type');
+    expect(signed.searchParams.get('X-Amz-SignedHeaders')).toContain('x-amz-meta-checksumsha256');
+  });
   it('permits the development adapter only outside production', async () => {
     process.env.NODE_ENV = 'development';
     await expect(new DevelopmentCleanScanner().assertClean()).resolves.toBe('development-only');

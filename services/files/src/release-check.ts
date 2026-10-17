@@ -19,7 +19,7 @@ export async function runFileReleaseCheck(storage:PrivateObjectStorage,scanner:M
     const headers={'content-type':'application/pdf','if-none-match':'*','x-amz-meta-checksumsha256':checksum};
     attempted.add(quarantine);
     const uploaded=await request(url,{method:'PUT',headers,body:new Uint8Array(input)});
-    await uploaded.body?.cancel();if(!uploaded.ok)throw Error('RELEASE_PRESIGNED_UPLOAD_FAILED');checks.push('presigned_upload');
+    await uploaded.body?.cancel();if(!uploaded.ok)throw Object.assign(Error('RELEASE_PRESIGNED_UPLOAD_FAILED'),{httpStatus:uploaded.status});checks.push('presigned_upload');
     step='create_only_upload';const duplicate=await request(url,{method:'PUT',headers,body:new Uint8Array(input)});
     await duplicate.body?.cancel();if(duplicate.status!==412)throw Error('RELEASE_CREATE_ONLY_NOT_ENFORCED');checks.push('create_only_upload');
     step='read_and_validate';const bytes=await storage.read(quarantine,input.length);

@@ -19,13 +19,17 @@ export class S3PrivateObjectStorage implements PrivateObjectStorage {
     region: process.env.S3_REGION ?? 'us-east-1',
     endpoint: process.env.S3_ENDPOINT,
     forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+    // Do not sign an SDK-generated checksum for an absent request body: the mobile/browser
+    // uploads the actual bytes later. Integrity is verified independently on completion.
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
     credentials: process.env.S3_ACCESS_KEY_ID && process.env.S3_SECRET_ACCESS_KEY ? {
       accessKeyId: process.env.S3_ACCESS_KEY_ID,
       secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
     } : undefined,
   });
   async createUploadUrl(objectKey: string, mediaType: string, byteSize: number, checksumSha256: string) {
-    return getSignedUrl(this.client, new PutObjectCommand({ Bucket: this.bucket, Key: objectKey, ContentType: mediaType, ContentLength: byteSize, IfNoneMatch:'*', Metadata: { checksumsha256: checksumSha256 } }), { expiresIn: 300,signableHeaders:new Set(['content-length','if-none-match']) });
+    return getSignedUrl(this.client, new PutObjectCommand({ Bucket: this.bucket, Key: objectKey, ContentType: mediaType, ContentLength: byteSize, IfNoneMatch:'*', Metadata: { checksumsha256: checksumSha256 } }), { expiresIn: 300,signableHeaders:new Set(['content-length','content-type','if-none-match','x-amz-meta-checksumsha256']),unhoistableHeaders:new Set(['x-amz-meta-checksumsha256']) });
   }
   async createDownloadUrl(objectKey: string) {
     return getSignedUrl(this.client, new GetObjectCommand({ Bucket: this.bucket, Key: objectKey, ResponseCacheControl: 'private, no-store',ResponseContentDisposition:'attachment' }), { expiresIn: 60 });
