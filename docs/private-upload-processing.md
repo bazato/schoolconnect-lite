@@ -1,6 +1,6 @@
 # Private document uploads — implementation and release gate
 
-Status (2026-10-17): base upload/compression code and migrations 107–109 are deployed. Cloudmersive integration is implemented with migration 110 and is being released behind a real-engine/R2 acceptance gate. See Render's `file-release-check` result for live verification; configuration alone is not proof. Mock OTP remains unchanged: this is still a trial, not production approval.
+Status (2026-10-17): migrations 107–110 and the Cloudmersive/R2 integration are deployed. Render's live `file-release-check` passed all eight checks for code release `d95817f`. Uploads use the real scanner; no fake-clean provider is enabled. The one-time release-probe flag is now disabled and that configuration deployment is live. Mock OTP remains unchanged: this is still a trial, not production approval.
 
 ## Processing flow
 
@@ -53,6 +53,14 @@ ClamAV's documented Docker minimum is 3 GiB, preferred 4 GiB: https://docs.clama
 - `pnpm test:scanner:gateway`: HTTP authentication, size/concurrency limits and clean/rejected/error response contracts, with a test scanner.
 - `pnpm test:files:db`: creates a uniquely named local disposable PostgreSQL database, applies Files schema + migration 108 and tests transactions, quotas, authorization, recovery and source substitution with storage/scanner test doubles. Only the generated test database is removed afterward.
 - `pnpm --filter @schoolconnect/api test`, `pnpm --filter @schoolconnect/mobile test`, contracts tests, typecheck/lint/build and managed-runtime migration checks cover the affected boundaries.
+
+### Hosted-scanner release verification (2026-10-17)
+
+- Files: 55 tests passed; API: 172; mobile: 91; contracts: 82; migration/startup checks: 10. Files/contracts/mobile lint and mobile typecheck passed. The local disposable-PostgreSQL rerun was unavailable because the local server was stopped; the prior 24-scenario database rehearsal remains the recorded result, not a new pass.
+- A real clean PDF and EICAR detection verified the Cloudmersive key without exposing it. The hosted API's explicit clean verdict may use a null empty virus list; this is normalized only for `CleanResult=true`. Missing/invalid verdicts and the EICAR control still fail closed.
+- The live R2 acceptance check passed create-only signed upload and replay rejection, final-byte scanning, immutable checked storage, signed private download, unsigned S3 API denial and deletion of both exact synthetic keys. No actual school documents or business records were used.
+- Deferred signed PUT requests do not include an SDK-generated checksum for an absent body. Required content type, content length, create-only condition and checksum metadata are explicitly signed. Completion still independently verifies actual size and SHA-256 before scanning and storage.
+- The deployed API readiness endpoint returned HTTP 200 with all ten internal services healthy. This is transport/provider acceptance, not a full authenticated teacher-publish/parent-preview end-to-end run, physical Android test, new APK, load-test result or production sign-off.
 
 Skills used: Cloudflare guidance informed private immutable R2 handling; Render deployment/Docker guidance informed the scanner hosting boundary; Neon guidance kept schema tests isolated and migration-based rather than changing production data during implementation.
 
