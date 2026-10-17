@@ -24,6 +24,12 @@ describe('Cloudmersive adapter (mock HTTP, no external documents sent)',()=>{
     await scanner.health();await scanner.health();expect(fetch).toHaveBeenCalledTimes(2);expect(gate.verified).toHaveBeenCalledWith(fingerprint);
   });
   it('rejects a pretend-clean remote service even if it accepts the clean control',async()=>{vi.stubGlobal('fetch',vi.fn().mockImplementation(async()=>clean()));await expect(new CloudmersiveScanner(key,budget(false)).health()).rejects.toThrow('SELF_TEST_FAILED');});
+  it('accepts a null empty virus collection only for an explicit clean verdict',async()=>{
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response(JSON.stringify({CleanResult:true,FoundViruses:null}))));
+    await expect(new CloudmersiveScanner(key,budget()).assertClean(Buffer.from('file'))).resolves.toMatch(/^Cloudmersive/);
+    vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response(JSON.stringify({CleanResult:false,FoundViruses:null}))));
+    await expect(new CloudmersiveScanner(key,budget()).assertClean(Buffer.from('file'))).rejects.toThrow('INVALID_RESPONSE');
+  });
   it.each([{CleanResult:false,FoundViruses:[{VirusName:'test'}]},{CleanResult:true,FoundViruses:[],ContainsScript:true}])('rejects detected malware or active content',async verdict=>{vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response(JSON.stringify(verdict))));await expect(new CloudmersiveScanner(key,budget()).assertClean(Buffer.from('file'))).rejects.toThrow('MALWARE_DETECTED');});
   it.each([{CleanResult:'true',FoundViruses:[]},{CleanResult:true},{CleanResult:true,FoundViruses:[],ContainsScript:'false'}])('fails closed for incomplete or malformed verdicts',async verdict=>{vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response(JSON.stringify(verdict))));await expect(new CloudmersiveScanner(key,budget()).assertClean(Buffer.from('file'))).rejects.toThrow('INVALID_RESPONSE');});
   it('never sends >3.4 MB to the provider or consumes its request allowance',async()=>{const fetch=vi.fn();vi.stubGlobal('fetch',fetch);const gate=budget();await expect(new CloudmersiveScanner(key,gate).assertClean(Buffer.alloc(3_400_001))).rejects.toThrow('CANNOT_COMPRESS');expect(fetch).not.toHaveBeenCalled();expect(gate.acquire).not.toHaveBeenCalled();});

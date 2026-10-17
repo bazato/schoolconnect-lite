@@ -43,11 +43,12 @@ async function bootstrap(){
       console.info(JSON.stringify({event:'file-release-check',...result}));
     }catch(error){
       const code=error instanceof Error&&/^(RELEASE_[A-Z_]+|FILE_SCANNER_[A-Z_]+)$/.test(error.message)?error.message:'FILE_RELEASE_CHECK_FAILED';
-      const diagnostic=error as {code?:string;name?:string;releaseStep?:string};
+      const diagnostic=error as {code?:string;name?:string;releaseStep?:string;validationReason?:string};
       const detail=['42P01','42501','42703','53300','ETIMEDOUT','ECONNRESET','ECONNREFUSED'].includes(diagnostic.code??'')?diagnostic.code:undefined;
       const errorName=['Error','TypeError','CredentialsProviderError','AccessDenied','SignatureDoesNotMatch','InvalidAccessKeyId','NoSuchBucket','TimeoutError','AbortError'].includes(diagnostic.name??'')?diagnostic.name:undefined;
       const step=['scanner_health','presigned_upload','create_only_upload','read_and_validate','scan_final_bytes','immutable_storage','signed_download','anonymous_denial'].includes(diagnostic.releaseStep??'')?diagnostic.releaseStep:undefined;
-      console.error(JSON.stringify({event:'file-release-check',status:'failed',code,step,detail,errorName}));
+      const validationReason=['invalid_json','invalid_clean_verdict','invalid_virus_collection','invalid_threat_flag'].includes(diagnostic.validationReason??'')?diagnostic.validationReason:undefined;
+      console.error(JSON.stringify({event:'file-release-check',status:'failed',code,step,detail,errorName,validationReason}));
       throw Error('FILE_RELEASE_CHECK_FAILED');
     }
   }

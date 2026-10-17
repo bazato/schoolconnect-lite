@@ -3,7 +3,7 @@ import {PDFDocument} from 'pdf-lib';
 import {FileValidationError,eicar,type MalwareScanner} from './clamav';
 import {fileUploadPolicy} from './file-policy';
 import {PgScannerBudget,type ScannerBudget} from './scanner-budget';
-type Verdict={CleanResult?:boolean;FoundViruses?:Array<{VirusName?:string}>;[key:string]:unknown};
+type Verdict={CleanResult?:boolean;FoundViruses?:Array<{VirusName?:string}>|null;[key:string]:unknown};
 const dangerousFlags=['ContainsExecutable','ContainsInvalidFile','ContainsScript','ContainsPasswordProtectedFile','ContainsMacros','ContainsXmlExternalEntities','ContainsInsecureDeserialization','ContainsHtml','ContainsUnsafeArchive','ContainsOleEmbeddedObject','ContainsUnwantedAction','ContainsRestrictedFileFormat'];
 export class CloudmersiveScanner implements MalwareScanner {
   private pendingHealth:Promise<string>|undefined;
@@ -29,8 +29,14 @@ export class CloudmersiveScanner implements MalwareScanner {
       const reader=response.body?.getReader();if(!reader)throw Error('FILE_SCANNER_INVALID_RESPONSE');
       let raw='';let size=0;const decoder=new TextDecoder();
       try{for(;;){const chunk=await reader.read();if(chunk.done)break;size+=chunk.value.length;if(size>65536){await reader.cancel();throw Error('FILE_SCANNER_INVALID_RESPONSE');}raw+=decoder.decode(chunk.value,{stream:true});}raw+=decoder.decode();}finally{reader.releaseLock();}
-      let result:Verdict;try{result=JSON.parse(raw) as Verdict;}catch{throw Error('FILE_SCANNER_INVALID_RESPONSE');}
-      if(!result||typeof result.CleanResult!=='boolean'||!Array.isArray(result.FoundViruses)||dangerousFlags.some(flag=>result[flag]!==undefined&&typeof result[flag]!=='boolean'))throw Error('FILE_SCANNER_INVALID_RESPONSE');
+      const invalid=(reason:string)=>Object.assign(Error('FILE_SCANNER_INVALID_RESPONSE'),{validationReason:reason});
+      let result:Verdict;try{result=JSON.parse(raw) as Verdict;}catch{throw invalid('invalid_json');}
+      if(!result||typeof result.CleanResult!=='boolean')throw invalid('invalid_clean_verdict');
+      // The hosted API may serialize an empty optional virus collection as null.
+      // Accept it ONLY alongside an explicit clean verdict; the EICAR control still requires a named detection.
+      if(result.CleanResult===true&&result.FoundViruses===null)result.FoundViruses=[];
+      if(!Array.isArray(result.FoundViruses))throw invalid('invalid_virus_collection');
+      if(dangerousFlags.some(flag=>result[flag]!==undefined&&typeof result[flag]!=='boolean'))throw invalid('invalid_threat_flag');
       return result;
     }finally{if(ticket)await this.budget.release(ticket);}
   }
