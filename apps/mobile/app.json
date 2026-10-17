@@ -2,7 +2,7 @@
   "expo": {
     "name": "Nexqon School App",
     "slug": "schoolconnect-lite",
-    "version": "0.1.6",
+    "version": "0.1.7",
     "icon": "./assets/nexqon-icon.png",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
@@ -14,7 +14,7 @@
     },
     "android": {
       "package": "com.schoolconnect.lite",
-      "versionCode": 7,
+      "versionCode": 8,
       "adaptiveIcon": {
         "foregroundImage": "./assets/nexqon-icon.png",
         "backgroundColor": "#5D08C9"
