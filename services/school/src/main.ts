@@ -10,6 +10,7 @@ import { domainEventTypes } from '@schoolconnect/contracts';
 import { generatedCode, subjectCodeFor } from './codes';
 import { PgOutbox, PgConsumerFailures, EventReplayError, parseEventEnvelope, type EventEnvelope, eventingStatus, eventingHealth, bindEventingShutdown, registerApplicationShutdown, startOutboxPublisher, startEventConsumer } from '@schoolconnect/eventing';
 import { applyIdentityEvent, type MembershipState } from './identity-events';
+import { teacherRosterSql } from './teacher-roster';
 
 @Injectable()
 export class SchoolRepository implements OnModuleDestroy {
@@ -351,11 +352,7 @@ export class SchoolRepository implements OnModuleDestroy {
   }
 
   async roster(schoolId: string, classId: string) {
-    const result = await this.pool.query(
-      `SELECT st.id, st.display_name AS "displayName", st.admission_number AS "admissionNumber"
-       FROM enrollments e JOIN students st ON st.id=e.student_id AND st.school_id=e.school_id
-       WHERE e.school_id=$1 AND e.class_id=$2 AND e.status='ACTIVE' AND st.status='ACTIVE' ORDER BY st.display_name`,
-      [schoolId, classId]);
+    const result = await this.pool.query(teacherRosterSql, [schoolId, classId]);
     return result.rows;
   }
 

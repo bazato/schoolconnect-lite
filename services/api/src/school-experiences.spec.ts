@@ -61,6 +61,13 @@ describe('school experience HTTP boundaries (mock downstream services)',()=>{
     principal=teacher;await request(app.getHttpServer()).post('/api/v1/teacher/result-scores').set('Authorization','Bearer x').send({classId:'real-class',studentId:'foreign'}).expect(403);
     expect(clients.request.mock.calls.some(([,path])=>path.endsWith('/bulk-publish'))).toBe(false);
   });
+  it('hides leave entries for students who no longer have an active parent link',async()=>{
+    principal=teacher;
+    const original=clients.request.getMockImplementation()!;
+    clients.request.mockImplementation((service:string,path:string,init?:RequestInit)=>path==='/internal/v1/leave-applications?schoolId=school&classId=real-class'?Promise.resolve([{id:'visible',studentId:'child'},{id:'hidden',studentId:'removed-child'}]):original(service,path,init));
+    const response=await request(app.getHttpServer()).get('/api/v1/teacher/leave-applications?classId=real-class').set('Authorization','Bearer x').expect(200);
+    expect(response.body).toEqual([{id:'visible',studentId:'child',studentName:'Full Student Name'}]);
+  });
   it('parents cannot publish timetables and teachers cannot submit parent leave applications',async()=>{
     await request(app.getHttpServer()).post('/api/v1/teacher/timetable').set('Authorization','Bearer x').send({}).expect(403);
     principal=teacher;await request(app.getHttpServer()).post('/api/v1/parent/leave-applications').set('Authorization','Bearer x').send({}).expect(403);

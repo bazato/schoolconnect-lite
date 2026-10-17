@@ -142,6 +142,30 @@ describe('API gateway authorization and service boundaries', () => {
     const call=serviceClient.request.mock.calls.find(call=>call[1]==='/internal/v1/files/validate-attachments');
     expect(JSON.parse(String(call?.[2]?.body))).toEqual({schoolId:'school-1',actorUserId:'teacher-1',fileIds:['123e4567-e89b-42d3-a456-426614174000']});
   });
+  it('publishes a private result only to the selected student’s active parents',async()=>{
+    await request(app.getHttpServer()).post('/api/v1/posts').set('Authorization','Bearer teacher-token').send({classId:'class-1',postType:'RESULT',targetStudentId:'student-1',examName:'Term 1',title:'Result',body:'Report',attachments:[{fileId:'file-1',studentId:'student-1',privacyClassification:'STUDENT_PRIVATE'}]}).expect(201);
+    const call=serviceClient.request.mock.calls.find(call=>call[0]==='content'&&call[1]==='/internal/v1/posts');
+    expect(JSON.parse(String(call?.[2]?.body))).toMatchObject({audienceType:'STUDENT',recipients:[{studentId:'student-1',guardianUserId:'parent-1'}]});
+  });
+  it('rejects a stale result target whose last parent was removed, rather than reporting a privacy mapping failure',async()=>{
+    const fallback=serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit)=>path.includes('/audience-recipients')?Promise.resolve([{studentId:'another-child',guardianUserId:'another-parent',snapshot:{}}]):fallback(service,path,init));
+    const response=await request(app.getHttpServer()).post('/api/v1/posts').set('Authorization','Bearer teacher-token').send({classId:'class-1',postType:'RESULT',targetStudentId:'student-1',examName:'Term 1',title:'Result',body:'Report',attachments:[{fileId:'file-1',studentId:'student-1',privacyClassification:'STUDENT_PRIVATE'}]}).expect(400);
+    expect(response.body.code).toBe('RESULT_STUDENT_HAS_NO_ACTIVE_PARENT');
+    expect(serviceClient.request.mock.calls.some(call=>call[0]==='content'&&call[1]==='/internal/v1/posts')).toBe(false);
+    expect(serviceClient.request.mock.calls.some(call=>call[1]==='/internal/v1/files/validate-attachments')).toBe(false);
+  });
+  it('still rejects an attachment mapped to a different student even when the selected student has an active parent',async()=>{
+    const response=await request(app.getHttpServer()).post('/api/v1/posts').set('Authorization','Bearer teacher-token').send({classId:'class-1',postType:'RESULT',targetStudentId:'student-1',examName:'Term 1',title:'Result',body:'Report',attachments:[{fileId:'file-1',studentId:'another-child',privacyClassification:'STUDENT_PRIVATE'}]}).expect(400);
+    expect(response.body.code).toBe('RESULT_PRIVACY_MAPPING_REQUIRED');
+    expect(serviceClient.request.mock.calls.some(call=>call[0]==='content'&&call[1]==='/internal/v1/posts')).toBe(false);
+  });
+  it('does not list attendance follow-ups for students excluded from the active-parent roster',async()=>{
+    const fallback=serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit)=>service==='attendance'&&path.includes('/follow-ups?')?Promise.resolve([{studentId:'student-1',attendanceEventId:'visible'},{studentId:'removed-child',attendanceEventId:'hidden'}]):fallback(service,path,init));
+    const response=await request(app.getHttpServer()).get('/api/v1/attendance/follow-ups?classId=class-1&attendanceDate=2026-10-17').set('Authorization','Bearer teacher-token').expect(200);
+    expect(response.body).toEqual([{studentId:'student-1',attendanceEventId:'visible',studentName:'Child One'}]);
+  });
   it('refuses to publish if the Files service does not attest READY/ownership',async()=>{
     const fallback=serviceClient.request.getMockImplementation()!;
     serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit)=>path==='/internal/v1/files/validate-attachments'?Promise.resolve({valid:false}):fallback(service,path,init));

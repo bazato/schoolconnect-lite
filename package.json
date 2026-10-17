@@ -22,6 +22,7 @@
     "test:admin-mobile": "node scripts/admin-mobile-regression.mjs",
     "test:accounts": "node scripts/account-management-regression.mjs",
     "test:experiences": "node scripts/school-experiences-regression.mjs",
+    "test:teacher-roster:db": "pnpm --filter @schoolconnect/school build && node scripts/teacher-roster-regression.mjs",
     "test:files:db": "pnpm --filter @schoolconnect/contracts build && pnpm --filter @schoolconnect/eventing build && pnpm --filter @schoolconnect/files build && node scripts/file-upload-regression.mjs",
     "test:scanner:gateway": "node --test scripts/clamav-gateway.test.mjs",
     "scanner:gateway": "node scripts/clamav-gateway.mjs",

@@ -943,7 +943,8 @@ class ContentController {
     if (body.postType === 'RESULT') {
       if (!body.targetStudentId) throw new BadRequestException({ code: 'RESULT_STUDENT_REQUIRED' });
       recipients = recipients.filter((recipient) => recipient.studentId === body.targetStudentId);
-      if (!recipients.length || !body.attachments?.length || body.attachments.some((attachment) => attachment.studentId !== body.targetStudentId || attachment.privacyClassification !== 'STUDENT_PRIVATE')) throw new BadRequestException({ code: 'RESULT_PRIVACY_MAPPING_REQUIRED' });
+      if (!recipients.length) throw new BadRequestException({ code: 'RESULT_STUDENT_HAS_NO_ACTIVE_PARENT' });
+      if (!body.attachments?.length || body.attachments.some((attachment) => attachment.studentId !== body.targetStudentId || attachment.privacyClassification !== 'STUDENT_PRIVATE')) throw new BadRequestException({ code: 'RESULT_PRIVACY_MAPPING_REQUIRED' });
       audienceType = 'STUDENT';
     }
     if (!recipients.length) throw new BadRequestException({ code: 'AUDIENCE_HAS_NO_ACTIVE_RECIPIENTS' });
@@ -1077,7 +1078,7 @@ class AttendanceController {
       this.clients.request<Array<{ id: string; displayName: string }>>('school', `/internal/v1/schools/${principal.schoolId}/classes/${classId}/roster`),
     ]);
     const names = new Map(roster.map((student) => [student.id, student.displayName]));
-    return followUps.map((item) => ({ ...item, studentName: names.get(item.studentId) ?? 'Student' }));
+    return followUps.filter((item) => names.has(item.studentId)).map((item) => ({ ...item, studentName: names.get(item.studentId)! }));
   }
   @Get('events/:eventId')
   async event(@Param('eventId') eventId: string, @CurrentPrincipal() principal: Principal) {
@@ -1129,7 +1130,8 @@ class SchoolExperiencesController {
       this.clients.request<Array<{studentId:string}>>('attendance',`/internal/v1/leave-applications?schoolId=${principal.schoolId}&classId=${classId}`),
       this.clients.request<Array<{id:string;displayName:string}>>('school',`/internal/v1/schools/${principal.schoolId}/classes/${classId}/roster`),
     ]);
-    return leaves.map((leave)=>({...leave,studentName:roster.find((student)=>student.id===leave.studentId)?.displayName ?? 'Former class student'}));
+    const names=new Map(roster.map((student)=>[student.id,student.displayName]));
+    return leaves.filter((leave)=>names.has(leave.studentId)).map((leave)=>({...leave,studentName:names.get(leave.studentId)!}));
   }
   @Post('teacher/leave-applications/:id/acknowledge') async acknowledgeLeave(@Param('id') id:string,@Body() body:{note?:string},@CurrentPrincipal() principal:Principal) {
     const leave=await this.clients.request<{classId:string}>('attendance',`/internal/v1/leave-applications/${id}?schoolId=${principal.schoolId}`);
