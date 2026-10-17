@@ -23,13 +23,13 @@ describe('web first activation and passcode sign-in', () => {
     expect(host.textContent).not.toContain('Invitation code');
     await input('Mobile number','+919876543210'); await input('4-digit passcode','0123');
     api.loginPasscode.mockResolvedValue({accessToken:'web-session'});
-    await submit(); expect(api.loginPasscode).toHaveBeenCalledWith('+919876543210','0123','SCHOOL_ADMIN'); expect(api.requestOtp).not.toHaveBeenCalled(); expect(signedIn).toHaveBeenCalledOnce();
+    await submit(); expect(api.loginPasscode).toHaveBeenCalledWith('+919876543210','0123'); expect(api.requestOtp).not.toHaveBeenCalled(); expect(signedIn).toHaveBeenCalledOnce();
   });
   it('verifies OTP first, then requires matching passcodes before creating a session', async () => {
     await click('First login / set up passcode');
     await input('Mobile number','+919876543210'); await input('Invitation code','INVITE');
     api.requestOtp.mockResolvedValue({challengeId:'challenge',developmentCode:'123456'}); await submit();
-    expect(api.requestOtp).toHaveBeenCalledWith('+919876543210','INVITE','ACTIVATE','SCHOOL_ADMIN');
+    expect(api.requestOtp).toHaveBeenCalledWith('+919876543210','INVITE','ACTIVATE');
     api.verifyOtp.mockResolvedValue({setupToken:'grant'}); await submit();
     expect(api.verifyOtp).toHaveBeenCalledWith('challenge','123456'); expect(signedIn).not.toHaveBeenCalled();
     await input('New 4-digit passcode','0123'); await input('Confirm passcode','0124'); await submit();
@@ -40,10 +40,10 @@ describe('web first activation and passcode sign-in', () => {
   it('uses a separate recovery purpose without asking for an invitation', async () => {
     await click('Forgot passcode?'); expect(host.textContent).not.toContain('Invitation code');
     await input('Mobile number','+919876543210'); api.requestOtp.mockResolvedValue({challengeId:'reset'}); await submit();
-    expect(api.requestOtp).toHaveBeenCalledWith('+919876543210','','RESET','SCHOOL_ADMIN');
+    expect(api.requestOtp).toHaveBeenCalledWith('+919876543210','','RESET');
   });
-  it('submits the explicitly selected platform-owner role',async()=>{
-    const select=host.querySelector('select')!;await act(async()=>{select.value='PLATFORM_OWNER';select.dispatchEvent(new Event('change',{bubbles:true}));});
-    await input('Mobile number','+919876543210');await input('4-digit passcode','0123');api.loginPasscode.mockResolvedValue({accessToken:'owner-session'});await submit();expect(api.loginPasscode).toHaveBeenCalledWith('+919876543210','0123','PLATFORM_OWNER');
+  it('does not ask users to choose school administrator or owner before authentication',async()=>{
+    expect(host.querySelector('select')).toBeNull();expect(host.textContent).not.toContain('Sign in as');
+    await input('Mobile number','+919876543210');await input('4-digit passcode','0123');api.loginPasscode.mockResolvedValue({accessToken:'owner-session'});await submit();expect(api.loginPasscode).toHaveBeenCalledWith('+919876543210','0123');
   });
 });

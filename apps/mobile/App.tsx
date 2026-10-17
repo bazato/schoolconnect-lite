@@ -19,7 +19,8 @@ import * as DocumentPicker from "expo-document-picker";
 import { uploadPickedAttachment, attachmentErrorMessage, attachmentsDisabledMessage, type FileCapabilities } from './src/attachmentUpload';
 import { AttachmentAvailability } from './src/AttachmentAvailability';
 import { ResultStudentPicker } from './src/ResultStudentPicker';
-import { LoginRoleSelector } from './src/LoginRoleSelector';
+import { useMobileSignIn } from './src/useMobileSignIn';
+import { VerifiedWorkspacePicker } from './src/VerifiedWorkspacePicker';
 import {
   ArrowLeft,
   Bell,
@@ -56,6 +57,7 @@ import {
 import { colors, radius } from "./src/theme";
 import nexqonIcon from './assets/nexqon-icon.png';
 import { TeachingClassSelector } from './src/TeachingClassSelector';
+import { SchoolExperiences } from './src/SchoolExperiences';
 import {
   clearSession,
   demoMode,
@@ -63,11 +65,7 @@ import {
   loadSession,
   mobileApi,
   MobileSession,
-  requestOtp,
   saveSession,
-  verifyOtp,
-  setupPasscode,
-  loginPasscode,
   type ApiDraft,
   type ApiSchool,
   type ApiSchoolClass,
@@ -300,60 +298,8 @@ function LoginScreen({
 }: {
   onSignedIn: (role: Role, session?: MobileSession) => void;
 }) {
-  const [phase, setPhase] = useState<"phone" | "otp" | "setup">("phone");
-  const [mode, setMode] = useState<'login' | 'activate' | 'reset'>('login');
-  const [loginRole,setLoginRole]=useState<Role>('PARENT');
-  const [phone, setPhone] = useState(demoMode ? "+91 98765 43210" : "");
-  const [invitation, setInvitation] = useState("");
-  const [otp, setOtp] = useState("");
-  const [developmentCode, setDevelopmentCode] = useState("");
-  const [passcode, setPasscode] = useState("");
-  const [confirmation, setConfirmation] = useState("");
-  const [setupToken, setSetupToken] = useState("");
-  const [challengeId, setChallengeId] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [serverError, setServerError] = useState("");
-  const changeMode = (value: 'login' | 'activate' | 'reset') => {
-    setMode(value); setPhase('phone'); setPasscode(''); setConfirmation(''); setOtp(''); setInvitation(''); setDevelopmentCode(''); setChallengeId(''); setSetupToken(''); setServerError('');
-  };
-  const submit = async () => {
-    setLoading(true);
-    setServerError("");
-    try {
-      if (phase === "phone") {
-        if (mode === 'login') {
-          if (demoMode) { onSignedIn(loginRole); return; }
-          const session = await loginPasscode(phone, passcode,loginRole);
-          await saveSession(session); onSignedIn(session.memberships.find((membership)=>membership.id===session.activeMembershipId)?.role ?? loginRole, session); return;
-        }
-        if (demoMode) { setDevelopmentCode('123456'); setOtp('123456'); }
-        else {
-          const challenge = await requestOtp(phone, invitation, mode === 'reset' ? 'RESET' : 'ACTIVATE',loginRole);
-          setChallengeId(challenge.challengeId);
-          setDevelopmentCode(challenge.developmentCode ?? ''); setOtp(challenge.developmentCode ?? '');
-        }
-        setPhase("otp");
-      } else if (phase === 'otp') {
-        if (demoMode) { if (otp !== '123456') throw new Error('OTP_INVALID_OR_EXPIRED'); }
-        else { const verified = await verifyOtp(challengeId, otp); setSetupToken(verified.setupToken); }
-        setOtp(''); setPhase('setup');
-      } else {
-        if (passcode !== confirmation) throw new Error('PASSCODES_DO_NOT_MATCH');
-        if (demoMode) { onSignedIn(loginRole); return; }
-        const session = await setupPasscode(setupToken, passcode,loginRole);
-        await saveSession(session);
-        onSignedIn(session.memberships.find((membership)=>membership.id===session.activeMembershipId)?.role ?? loginRole, session);
-      }
-    } catch (error) {
-      setServerError(
-        error instanceof Error
-          ? error.message
-          : "Unable to sign in. Please retry.",
-      );
-    } finally {
-      setLoading(false);
-    }
-  };
+  const {phase,mode,phone,setPhone,invitation,setInvitation,otp,setOtp,developmentCode,passcode,setPasscode,confirmation,setConfirmation,loading,serverError,changeMode,submit,verifiedSession,chooseWorkspace,cancelWorkspace}=useMobileSignIn(onSignedIn);
+  if(verifiedSession) return <VerifiedWorkspacePicker session={verifiedSession} busy={loading} error={serverError} onChoose={(id)=>{void chooseWorkspace(id);}} onCancel={()=>{void cancelWorkspace();}}/>;
   return (
     <SafeAreaView style={styles.safe}>
       <KeyboardAvoidingView
@@ -379,8 +325,6 @@ function LoginScreen({
           </Text>
           {phase === "phone" ? (
             <>
-              <Text style={styles.helper}>Sign in as</Text>
-              <LoginRoleSelector value={loginRole} disabled={loading} onChange={(role)=>{setLoginRole(role);setServerError('');}}/>
               <Field
                 label="Mobile number"
                 value={phone}
@@ -525,6 +469,8 @@ function TeacherHome({
       </View>
       <Text style={styles.sectionTitle}>Quick actions</Text>
       <View style={styles.quickGrid}>
+        {assignment && <><QuickAction icon={CalendarCheck} label="Timetable" onPress={()=>navigate({name:'timetable'})}/><QuickAction icon={FileText} label="Leave requests" onPress={()=>navigate({name:'leave-applications'})}/></>}
+        {assignment?.canPublishResults && <QuickAction icon={GraduationCap} label="Result charts" onPress={()=>navigate({name:'result-charts'})}/>}
         {assignment ? (
           <QuickAction
             icon={BookOpen}
@@ -794,6 +740,11 @@ function ParentHome({
           <Text style={styles.scopeTitle} numberOfLines={2}>{selected.name}</Text>
           <Text style={styles.scopeMeta} numberOfLines={2}>{selected.school}</Text>
         </View>
+      </View>
+      <View style={styles.quickGrid}>
+        <QuickAction icon={FileText} label="Apply for leave" onPress={()=>navigate({name:'leave-applications'})}/>
+        <QuickAction icon={CalendarCheck} label="Timetable" onPress={()=>navigate({name:'timetable'})}/>
+        <QuickAction icon={GraduationCap} label="Result charts" onPress={()=>navigate({name:'result-charts'})}/>
       </View>
       {pendingAbsenceId ? (
         <Pressable
@@ -1069,6 +1020,7 @@ function NotificationsScreen({
       resourceType: string;
       resourceId: string;
       studentId?: string;
+      deepLink?: string;
     }>
   >([]);
   useEffect(() => {
@@ -1086,6 +1038,7 @@ function NotificationsScreen({
               resourceType: item.resourceType,
               resourceId: item.resourceId,
               studentId: item.studentId,
+              deepLink: item.deepLink,
             })),
           ),
         )
@@ -1105,7 +1058,10 @@ function NotificationsScreen({
               ),
             )
             .catch(() => undefined);
-          if (item.resourceType === "ATTENDANCE_EVENT")
+          if(['LEAVE_APPLICATION','TIMETABLE'].includes(item.resourceType) && item.deepLink) {
+            const target=routeFromDeepLink(item.deepLink);if(target) navigate(target);
+          }
+          else if (item.resourceType === "ATTENDANCE_EVENT")
             navigate({ name: "absence", eventId: item.resourceId });
           else if (item.resourceType === "POST")
             navigate({
@@ -1292,24 +1248,20 @@ function Stat({
 
 function ProfileScreen({
   role,
-  setRole,
-  availableRoles,
+  onChangeWorkspace,
+  hasMultipleWorkspaces,
   displayName,
   schoolName,
-  switchingRole,
-  roleError,
   offline,
   setOffline,
   logout,
   session,
 }: {
   role: Role;
-  setRole: (role: Role) => void;
-  availableRoles: Role[];
+  onChangeWorkspace: () => void;
+  hasMultipleWorkspaces: boolean;
   displayName: string;
   schoolName: string;
-  switchingRole: boolean;
-  roleError: string;
   offline: boolean;
   setOffline: (value: boolean) => void;
   logout: () => void;
@@ -1333,36 +1285,11 @@ function ProfileScreen({
           <Text style={styles.scopeMeta}>{schoolName}</Text>
         </View>
       </View>
-      {availableRoles.length > 1 ? (
+      {hasMultipleWorkspaces ? (
         <>
-          <Text style={styles.sectionTitle}>Active role</Text>
-          <View style={styles.roleSwitch}>
-            {availableRoles.map((option) => (
-              <Pressable
-                key={option}
-                disabled={switchingRole}
-                onPress={() => setRole(option)}
-                style={[
-                  styles.roleChoice,
-                  role === option && styles.roleChoiceActive,
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.roleText,
-                    role === option && styles.roleTextActive,
-                  ]}
-                >
-                  {roleLabels[option]}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-          {switchingRole ? <ActivityIndicator color={colors.primary} /> : null}
-          {roleError ? <Text style={styles.errorText}>{roleError}</Text> : null}
+          <PrimaryButton label="Change workspace" secondary onPress={onChangeWorkspace}/>
           <Text style={styles.helper}>
-            Role switching is available only because this account has more than
-            one verified school membership.
+            Open another account linked to your verified mobile number.
           </Text>
         </>
       ) : (
@@ -2655,7 +2582,7 @@ function UploadTile({
         <View style={styles.flex}>
           <Text style={styles.cardTitle}>Add PDF or image</Text>
           <Text style={styles.cardMeta}>
-            Private · up to configured file limit
+            Private · up to 5 MB · optimized before scanning
           </Text>
         </View>
         <ChevronRight size={18} color={colors.muted} />
@@ -3462,6 +3389,8 @@ function MainApp() {
   const [route, setRoute] = useState<Route>(null);
   const [offline, setOffline] = useState(false);
   const [session, setSession] = useState<MobileSession | null>(null);
+  const activeMembershipRef=useRef<string|undefined>(undefined);
+  activeMembershipRef.current=session?.activeMembershipId ?? session?.memberships[0]?.id;
   const [liveChildren, setLiveChildren] = useState<Child[]>([]);
   const [activeSchoolName, setActiveSchoolName] = useState('');
   const [livePosts, setLivePosts] = useState<TimelinePost[]>([]);
@@ -3485,6 +3414,7 @@ function MainApp() {
     }>
   >([]);
   const [switchingRole, setSwitchingRole] = useState(false);
+  const [workspacePickerOpen,setWorkspacePickerOpen]=useState(false);
   const [roleError, setRoleError] = useState("");
   const [restoring, setRestoring] = useState(!demoMode);
 
@@ -3503,7 +3433,7 @@ function MainApp() {
     const open = (url: string | null) => {
       const next = url ? routeFromDeepLink(url) : null;
       if (!next) return;
-      if(role==='TEACHER' && (next.name!=='post-detail' || next.studentId)) return;
+      if(role==='TEACHER' && next.name!=='leave-applications' && (next.name!=='post-detail' || next.studentId)) return;
       if (next.name === "post-detail" && next.studentId)
         setChildId(next.studentId);
       setRoute(next);
@@ -3648,8 +3578,10 @@ function MainApp() {
 
   const refreshTeacherPosts = () => {
     if (!session) return;
+    const membershipId=session.activeMembershipId ?? session.memberships[0]?.id;
     void mobileApi.teacherHome(session)
       .then(({ posts, drafts, teachingScope,schoolAnnouncements }) => {
+        if(activeMembershipRef.current!==membershipId) return;
         setSchoolAnnouncements(schoolAnnouncements ?? []);
         setTeacherPosts(posts);
         setTeacherDrafts(drafts);
@@ -3658,18 +3590,19 @@ function MainApp() {
       .catch(() => undefined);
   };
 
-  const setRole = async (next: Role) => {
-    if (next === role || switchingRole) return;
+  const switchWorkspace = async (membershipId:string) => {
+    if(switchingRole || !session) return;
     setRoleError("");
-    if (session) {
-      const membership = session.memberships.find((item) => item.role === next);
+      const membership = session.memberships.find((item) => item.id === membershipId);
       if (!membership) {
-        setRoleError("This account does not have that role.");
+        setRoleError("This account does not have that workspace.");
         return;
       }
+      if((session.activeMembershipId ?? session.memberships[0]?.id)===membershipId){setWorkspacePickerOpen(false);return;}
       setSwitchingRole(true);
       try {
         const switched = await mobileApi.switchRole(session, membership.id);
+        if(switched.activeMembership.id!==membershipId || switched.activeMembership.role!==membership.role) throw Error('WORKSPACE_SWITCH_INVALID');
         const nextSession = {
           ...session,
           accessToken: switched.accessToken,
@@ -3677,7 +3610,10 @@ function MainApp() {
           activeMembershipId: switched.activeMembership.id,
         };
         await saveSession(nextSession);
+        activeMembershipRef.current=nextSession.activeMembershipId;
+        setLiveChildren([]);setLivePosts([]);setTeacherPosts([]);setTeacherDrafts([]);setSchoolAnnouncements([]);setTeachingScope([]);setAttendanceHistory([]);setSelectedAssignmentId('');setActiveSchoolName('');setChildId('');
         setSession(nextSession);
+        setRoleState(switched.activeMembership.role);setTab('home');setRoute(null);setWorkspacePickerOpen(false);
       } catch (switchFailure) {
         setRoleError(
           switchFailure instanceof Error
@@ -3688,13 +3624,9 @@ function MainApp() {
         return;
       }
       setSwitchingRole(false);
-    }
-    setRoleState(next);
-    setTab("home");
-    setRoute(null);
-    setChildId(session ? (liveChildren[0]?.id ?? "") : children[0]!.id);
   };
   const logout = () => {
+    activeMembershipRef.current=undefined;
     if (session)
       void mobileApi
         .logout(session)
@@ -3713,6 +3645,7 @@ function MainApp() {
     setTab("home");
     setRoute(null);
     setSignedIn(false);
+    setWorkspacePickerOpen(false);
   };
   if (restoring)
     return (
@@ -3730,10 +3663,19 @@ function MainApp() {
         }}
       />
     );
+  if(workspacePickerOpen && session) return <VerifiedWorkspacePicker session={session} busy={switchingRole} error={roleError} onChoose={(id)=>{void switchWorkspace(id);}} onCancel={()=>{setWorkspacePickerOpen(false);setRoleError('');}} cancelLabel="Back"/>;
   if (session && role === "PLATFORM_OWNER")
     return <PlatformOwnerDashboard session={session} logout={logout} />;
   if (session && role === "SCHOOL_ADMIN")
     return <SchoolAdminDashboard session={session} logout={logout} />;
+  if(route && ['leave-applications','timetable','result-charts'].includes(route.name)) {
+    const contextId='contextId' in route ? route.contextId : undefined;
+    const child=liveChildren.find((item)=>item.id===(contextId ?? childId));
+    const assignment=contextId && role==='TEACHER' ? teachingScope.find((item)=>item.classId===contextId) : selectedAssignment;
+    return <SchoolExperiences key={`${route.name}:${role==='TEACHER' ? assignment?.classId : child?.id}`} feature={route.name as 'leave-applications'|'timetable'|'result-charts'} teacher={role==='TEACHER'} session={session}
+      studentId={child?.id ?? ''} studentName={child?.name ?? ''} assignment={assignment} scope={teachingScope} schoolName={role==='TEACHER' ? activeSchoolName : child?.school ?? ''}
+      onSelect={(id)=>{setSelectedAssignmentId(id);setRoute({name:route.name as 'leave-applications'|'timetable'|'result-charts'});}} onBack={()=>{if(role==='TEACHER')refreshTeacherPosts();setRoute(null);}}/>;
+  }
   if (route?.name === "compose") {
     const draft = teacherDrafts.find((item) => item.id === route.draftId);
     const assignment = draft
@@ -3933,24 +3875,12 @@ function MainApp() {
           <ProfileScreen
             schoolName={session ? (activeSchoolName || liveChildren.find((child) => child.id === childId)?.school || 'Loading school…') : 'Demo school'}
             role={role}
-            setRole={(next) => {
-              void setRole(next);
-            }}
-            availableRoles={
-              session
-                ? Array.from(
-                    new Set(
-                      session.memberships.map((membership) => membership.role),
-                    ),
-                  )
-                : ["TEACHER", "PARENT"]
-            }
+            onChangeWorkspace={()=>{setRoleError('');setWorkspacePickerOpen(true);}}
+            hasMultipleWorkspaces={Boolean(session && session.memberships.length>1)}
             displayName={
               session?.user.displayName ??
               (role === "TEACHER" ? "Ms. Priya" : "Ahmed Ali")
             }
-            switchingRole={switchingRole}
-            roleError={roleError}
             offline={offline}
             setOffline={setOffline}
             logout={logout}
@@ -4475,26 +4405,6 @@ const styles = StyleSheet.create({
     gap: 13,
     paddingVertical: 8,
   },
-  roleSwitch: {
-    flexDirection: "row",
-    backgroundColor: colors.background,
-    borderRadius: 14,
-    padding: 4,
-  },
-  roleChoice: {
-    flex: 1,
-    minHeight: 44,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 11,
-  },
-  roleChoiceActive: { backgroundColor: colors.primary },
-  roleText: {
-    fontFamily: "Poppins_500Medium",
-    fontSize: 13,
-    color: colors.muted,
-  },
-  roleTextActive: { color: "#fff" },
   settingRow: {
     minHeight: 68,
     paddingVertical: 10,

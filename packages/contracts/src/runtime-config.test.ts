@@ -67,12 +67,21 @@ describe('managed runtime production settings', () => {
   });
   it('rejects an unconfigured or development production scanner', () => {
     expect(() => validateManagedRuntime({ ...environment(), FILE_STORAGE_PROVIDER: 's3', S3_BUCKET: 'private', S3_REGION: 'auto', FILE_SCANNER_PROVIDER: 'development-clean' })).toThrow('REAL_SCANNER_REQUIRED');
-    expect(() => validateManagedRuntime({ ...environment(), FILE_STORAGE_PROVIDER: 's3', S3_BUCKET: 'private', S3_REGION: 'auto', FILE_SCANNER_PROVIDER: 'not-implemented' })).toThrow('PRODUCTION_SCANNER_NOT_IMPLEMENTED');
+    expect(() => validateManagedRuntime({ ...environment(), FILE_STORAGE_PROVIDER: 's3', S3_BUCKET: 'private', S3_REGION: 'auto', FILE_SCANNER_PROVIDER: 'not-implemented' })).toThrow('REAL_SCANNER_REQUIRED');
   });
   it('does not generate or alter the effective existing passcode pepper', () => {
     const env = environment(); const before = { ...env };
     validateManagedRuntime(env);
     expect(env).toEqual(before); expect(env.PASSCODE_PEPPER).toBeUndefined();
+  });
+  it('allows a real authenticated HTTPS scanner only with explicit storage budgets',()=>{
+    const env={...environment(),FILE_STORAGE_PROVIDER:'s3',S3_BUCKET:'private',S3_REGION:'auto',FILE_SCANNER_PROVIDER:'clamav-http',FILE_SCANNER_URL:'https://scanner.school.example',FILE_SCANNER_TOKEN:'c'.repeat(40),FILE_STORAGE_BUDGET_BYTES:'8000000000',FILE_SCHOOL_BUDGET_BYTES:'2000000000'};
+    expect(validateManagedRuntime(env).attachmentsEnabled).toBe(true);
+    expect(()=>validateManagedRuntime({...env,FILE_SCANNER_URL:'http://scanner.school.example'})).toThrow('HTTPS_REQUIRED');
+    expect(()=>validateManagedRuntime({...env,FILE_SCANNER_TOKEN:'short'})).toThrow('PROTECTED_SECRET_REQUIRED');
+    expect(()=>validateManagedRuntime({...env,FILE_STORAGE_BUDGET_BYTES:undefined})).toThrow('STORAGE_BUDGET_REQUIRED');
+    expect(()=>validateManagedRuntime({...env,FILE_SCHOOL_BUDGET_BYTES:'9000000000'})).toThrow('EXCEEDS_GLOBAL_BUDGET');
+    expect(()=>validateManagedRuntime({...env,FILE_SIGNATURE_MAX_AGE_HOURS:'NaN'})).toThrow('POSITIVE_INTEGER_REQUIRED');
   });
   it('rejects invalid rate, timeout and token lifetime settings', () => {
     expect(() => validateManagedRuntime({ ...environment(), DB_STATEMENT_TIMEOUT_MS: 'NaN' })).toThrow('POSITIVE_INTEGER_REQUIRED');

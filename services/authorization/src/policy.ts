@@ -1,5 +1,5 @@
 export type Principal = { userId: string; membershipId: string; schoolId: string | null; role: 'PLATFORM_OWNER' | 'SCHOOL_ADMIN' | 'TEACHER' | 'PARENT' };
-export type ResourceDecision = { action: 'TEACHER_CLASS' | 'GUARDIAN_CHILD'; principal: Principal; classId?: string; studentId?: string; capability?: 'RESULTS' | 'ANNOUNCEMENTS' | 'ATTENDANCE' };
+export type ResourceDecision = { action: 'TEACHER_CLASS' | 'GUARDIAN_CHILD'; principal: Principal; classId?: string; studentId?: string; capability?: 'RESULTS' | 'ANNOUNCEMENTS' | 'ATTENDANCE' | 'CLASS' };
 export type RelationshipClient = (path: string) => Promise<{ allowed: boolean; guardianUserIds?:string[] }>;
 export type RouteRule = { methods: string[]; pattern: string; roles: Principal['role'][]; selectableSchoolRoles?: Principal['role'][] };
 
@@ -9,6 +9,10 @@ export const defaultRouteRules: RouteRule[] = [
   { methods: ['GET'], pattern: '^/api/v1/me/context$', roles: allRoles },
   { methods: ['GET'], pattern: '^/api/v1/me/teaching-scope$', roles: ['TEACHER'] },
   { methods: ['GET'], pattern: '^/api/v1/me/children$', roles: ['PARENT'] },
+  { methods: ['GET','POST'], pattern: '^/api/v1/parent/leave-applications$', roles: ['PARENT'] },
+  { methods: ['GET'], pattern: '^/api/v1/parent/(timetable|result-charts)$', roles: ['PARENT'] },
+  { methods: ['GET'], pattern: '^/api/v1/teacher/(leave-applications|timetable|result-charts|result-roster)$', roles: ['TEACHER'] },
+  { methods: ['POST'], pattern: '^/api/v1/teacher/(leave-applications/[^/]+/acknowledge|timetable|result-scores)$', roles: ['TEACHER'] },
   { methods: ['GET'], pattern: '^/api/v1/bff/parent/home$', roles: ['PARENT'] },
   { methods: ['GET'], pattern: '^/api/v1/bff/teacher/home$', roles: ['TEACHER'] },
   { methods: ['GET'], pattern: '^/api/v1/bff/admin/home$', roles: ['SCHOOL_ADMIN'] },
@@ -81,7 +85,7 @@ export class PolicyEngine {
     if (!principal?.userId || !principal.membershipId || !principal.schoolId || !this.roleRules[input.action]?.includes(principal.role)) return { allowed: false, reason: 'ROLE_OR_SCHOOL_DENIED' };
     let path: string;
     if (input.action === 'TEACHER_CLASS') {
-      if (!input.classId || !['RESULTS', 'ANNOUNCEMENTS', 'ATTENDANCE'].includes(String(input.capability))) return { allowed: false, reason: 'RESOURCE_CONTEXT_MISSING' };
+      if (!input.classId || !['RESULTS', 'ANNOUNCEMENTS', 'ATTENDANCE', 'CLASS'].includes(String(input.capability))) return { allowed: false, reason: 'RESOURCE_CONTEXT_MISSING' };
       path = `/internal/v1/authorization/teacher?schoolId=${encodeURIComponent(principal.schoolId)}&membershipId=${encodeURIComponent(principal.membershipId)}&classId=${encodeURIComponent(input.classId)}&capability=${encodeURIComponent(input.capability!)}`;
     } else if (input.action === 'GUARDIAN_CHILD') {
       if (!input.studentId) return { allowed: false, reason: 'RESOURCE_CONTEXT_MISSING' };

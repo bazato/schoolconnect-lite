@@ -14,7 +14,7 @@ afterEach(() => {
 describe('private file scanner policy', () => {
   it('permits the development adapter only outside production', async () => {
     process.env.NODE_ENV = 'development';
-    await expect(new DevelopmentCleanScanner().assertClean()).resolves.toBeUndefined();
+    await expect(new DevelopmentCleanScanner().assertClean()).resolves.toBe('development-only');
     process.env.NODE_ENV = 'production';
     await expect(new DevelopmentCleanScanner().assertClean()).rejects.toThrow('DEVELOPMENT_SCANNER_FORBIDDEN_IN_PRODUCTION');
   });
@@ -33,9 +33,9 @@ describe('private file scanner policy', () => {
     vi.stubEnv('FILE_STORAGE_PROVIDER', 'disabled');
     const storage = createPrivateObjectStorage();
     await expect(storage.createUploadUrl('key', 'application/pdf', 1, 'checksum')).rejects.toThrow();
-    await expect(storage.verifyUpload('key', 1)).rejects.toThrow();
-    await expect(storage.promote('source', 'target')).rejects.toThrow();
+    await expect(storage.read('key',1)).rejects.toThrow();
+    await expect(storage.putChecked('key',Buffer.from('x'),'application/pdf','checksum')).rejects.toThrow();
     await expect(storage.createDownloadUrl('key')).rejects.toThrow();
-    await expect(createMalwareScanner().assertClean('key')).rejects.toThrow();
+    await expect(createMalwareScanner().assertClean(Buffer.from('key'))).rejects.toThrow();
   });
 });

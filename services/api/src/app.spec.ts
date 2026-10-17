@@ -15,6 +15,19 @@ describe('API gateway authorization and service boundaries', () => {
   let app: INestApplication;
   const serviceClient = { request: vi.fn() };
   afterEach(async () => { await app?.close(); });
+  it('labels only the authenticated user’s verified school workspaces without a public role lookup',async()=>{
+    const fallback=serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit)=>{
+      if(service==='identity' && path==='/internal/v1/users/parent-1/memberships') return Promise.resolve([{id:'parent-school-1',role:'PARENT',schoolId:'school-1'},{id:'teacher-school-2',role:'TEACHER',schoolId:'school-2'}]);
+      if(service==='school' && path==='/internal/v1/schools/school-1')return Promise.resolve({id:'school-1',active:true,displayName:'First School'});
+      if(service==='school' && path==='/internal/v1/schools/school-2')return Promise.resolve({id:'school-2',active:true,displayName:'Second School'});
+      return fallback(service,path,init);
+    });
+    const response=await request(app.getHttpServer()).get('/api/v1/me/context').set('Authorization','Bearer parent-token').expect(200);
+    expect(response.body.memberships).toEqual([{id:'parent-school-1',role:'PARENT',schoolId:'school-1',schoolName:'First School'},{id:'teacher-school-2',role:'TEACHER',schoolId:'school-2',schoolName:'Second School'}]);
+    expect(serviceClient.request.mock.calls.filter((call)=>call[1]==='/internal/v1/users/parent-1/memberships')).toHaveLength(1);
+    expect(serviceClient.request.mock.calls.some((call)=>call[1]==='/internal/v1/schools')).toBe(false);
+  });
 
   it('denies fee uploads and reports to parent, teacher and platform-only roles', async () => {
     for (const token of ['parent-token','teacher-token','owner-token']) for (const path of ['import-preview','import-commit','search']) await request(app.getHttpServer()).post(`/api/v1/admin/fees/${path}`).set('Authorization',`Bearer ${token}`).send({}).expect(403);
@@ -101,6 +114,7 @@ describe('API gateway authorization and service boundaries', () => {
       if (service === 'attendance' && path.startsWith('/internal/v1/students/')) return Promise.resolve([{ id: 'event-1', attendanceStatus: 'PRESENT' }]);
       if (service === 'attendance' && path.startsWith('/internal/v1/attendance/projection-consistency')) return Promise.resolve({ consistent: true, mismatches: [] });
       if (service === 'notifications' && path.startsWith('/internal/v1/notifications?')) return Promise.resolve([{ id: 'notice-1' }]);
+      if(service==='files' && path==='/internal/v1/files/validate-attachments')return Promise.resolve({valid:true});
       if (service === 'content' && path === '/internal/v1/posts') return Promise.resolve({ id: 'post-created', status: 'PUBLISHED' });
       if (service === 'content' && path === '/internal/v1/results/bulk-publish') return Promise.resolve({ batchId: '123e4567-e89b-42d3-a456-426614174000', published: 1, results: [{ admissionNumber: 'A-001', studentId: 'student-1', postId: 'result-post-1', recipientCount: 1 }] });
       if (service === 'content' && path.startsWith('/internal/v1/posts/post-owned?')) return Promise.resolve({ id: 'post-owned', classId: 'class-1', postType: 'ANNOUNCEMENT', authorMembershipId: 'membership-teacher' });
@@ -122,6 +136,17 @@ describe('API gateway authorization and service boundaries', () => {
     const response = await request(app.getHttpServer()).get('/api/v1/health').expect(200);
     expect(response.body.status).toBe('ok');
     expect(response.body.services).toHaveLength(10);
+  });
+  it('checks attachment ownership and readiness using the verified school/user before publishing',async()=>{
+    await request(app.getHttpServer()).post('/api/v1/posts').set('Authorization','Bearer teacher-token').send({classId:'class-1',postType:'HOMEWORK',title:'Practice',body:'Read',attachments:[{fileId:'123e4567-e89b-42d3-a456-426614174000',privacyClassification:'GENERAL'}]}).expect(201);
+    const call=serviceClient.request.mock.calls.find(call=>call[1]==='/internal/v1/files/validate-attachments');
+    expect(JSON.parse(String(call?.[2]?.body))).toEqual({schoolId:'school-1',actorUserId:'teacher-1',fileIds:['123e4567-e89b-42d3-a456-426614174000']});
+  });
+  it('refuses to publish if the Files service does not attest READY/ownership',async()=>{
+    const fallback=serviceClient.request.getMockImplementation()!;
+    serviceClient.request.mockImplementation((service:string,path:string,init?:RequestInit)=>path==='/internal/v1/files/validate-attachments'?Promise.resolve({valid:false}):fallback(service,path,init));
+    await request(app.getHttpServer()).post('/api/v1/posts').set('Authorization','Bearer teacher-token').send({classId:'class-1',postType:'HOMEWORK',title:'Practice',body:'Read',attachments:[{fileId:'123e4567-e89b-42d3-a456-426614174000',privacyClassification:'GENERAL'}]}).expect(403);
+    expect(serviceClient.request.mock.calls.some(call=>call[0]==='content'&&call[2]?.method==='POST')).toBe(false);
   });
   it('accepts school creation without a manually entered school code',async()=>{
     await request(app.getHttpServer()).post('/api/v1/admin/schools').set('Authorization','Bearer owner-token').send({displayName:'New School',timezone:'UTC',adminDisplayName:'Admin',adminPhoneE164:'+919876543210'}).expect(201);

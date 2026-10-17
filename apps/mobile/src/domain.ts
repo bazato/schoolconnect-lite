@@ -7,6 +7,7 @@ export type Route =
   | { name: 'edit-post'; postId: string }
   | { name: 'teacher-attendance' }
   | { name: 'follow-ups' }
+  | { name: 'leave-applications' | 'timetable' | 'result-charts'; contextId?: string }
   | { name: 'post-detail'; postId: string; studentId?: string }
   | { name: 'absence'; eventId: string }
   | { name: 'file-preview'; fileName: string; fileId?: string; studentId?: string }

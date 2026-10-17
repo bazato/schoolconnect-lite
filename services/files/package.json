@@ -7,21 +7,23 @@
     "start:dev": "tsx watch src/main.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
-    "test": "vitest run --dir src --passWithNoTests",
+    "test": "pnpm build && vitest run --dir src --passWithNoTests",
     "build": "tsc"
   },
   "dependencies": {
-    "@schoolconnect/contracts": "workspace:*",
-    "@schoolconnect/eventing": "workspace:*",
     "@aws-sdk/client-s3": "3.1141.0",
     "@aws-sdk/s3-request-presigner": "3.1141.0",
     "@nestjs/common": "12.0.3",
     "@nestjs/core": "12.0.3",
     "@nestjs/platform-express": "12.0.3",
+    "@schoolconnect/contracts": "workspace:*",
+    "@schoolconnect/eventing": "workspace:*",
     "dotenv": "17.2.2",
+    "pdf-lib": "1.17.1",
     "pg": "8.16.3",
     "reflect-metadata": "0.2.2",
-    "rxjs": "7.8.2"
+    "rxjs": "7.8.2",
+    "sharp": "0.35.5"
   },
   "devDependencies": {
     "@eslint/js": "9.35.0",

@@ -13,6 +13,21 @@ it('configures file availability centrally and never grants uploads to parents',
 });
 
 describe('resource policy', () => {
+  it('checks live class assignment for timetable and leave rather than requiring attendance permission',async()=>{
+    const relationships=vi.fn().mockResolvedValue({allowed:true});
+    expect((await new PolicyEngine(relationships).decide({action:'TEACHER_CLASS',principal:teacher,classId:'c1',capability:'CLASS'})).allowed).toBe(true);
+    expect(relationships).toHaveBeenCalledWith('/internal/v1/authorization/teacher?schoolId=s1&membershipId=m1&classId=c1&capability=CLASS');
+  });
+  it('limits parent and teacher experience routes to their respective roles',()=>{
+    const policy=new RoutePolicy();
+    for(const path of ['leave-applications','timetable','result-charts']) {
+      expect(policy.decide('GET',`/api/v1/parent/${path}`,'PARENT').allowed).toBe(true);
+      expect(policy.decide('GET',`/api/v1/parent/${path}`,'TEACHER').allowed).toBe(false);
+      expect(policy.decide('GET',`/api/v1/teacher/${path}`,'PARENT').allowed).toBe(false);
+    }
+    expect(policy.decide('POST','/api/v1/teacher/leave-applications/request/acknowledge','TEACHER').allowed).toBe(true);
+    expect(policy.decide('POST','/api/v1/teacher/timetable','SCHOOL_ADMIN').allowed).toBe(false);
+  });
   it.each([null, {}, { allowed:'true' }, { allowed:1 }, { allowed:false }])('never approves malformed School relationship facts: %j', async (fact) => {
     const policy = new PolicyEngine(vi.fn().mockResolvedValue(fact));
     expect(await policy.decide({ action:'GUARDIAN_CHILD',principal:parent,studentId:'st1' })).toEqual({ allowed:false,reason:'RELATIONSHIP_DENIED' });

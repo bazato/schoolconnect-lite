@@ -136,9 +136,16 @@ export function validateManagedRuntime(env: RuntimeEnvironment, service: Runtime
     if (env.FILE_STORAGE_PROVIDER === 's3') {
       if (!env.S3_BUCKET || !env.S3_REGION) fail('S3_BUCKET', 'BUCKET_AND_REGION_REQUIRED');
       if (env.S3_ENDPOINT && !env.S3_ENDPOINT.startsWith('https://')) fail('S3_ENDPOINT', 'HTTPS_REQUIRED');
-      if (!env.FILE_SCANNER_PROVIDER || ['development-clean', 'disabled'].includes(env.FILE_SCANNER_PROVIDER)) fail('FILE_SCANNER_PROVIDER', 'REAL_SCANNER_REQUIRED');
-      // There is deliberately no pretend-clean production scanner.
-      fail('FILE_SCANNER_PROVIDER', 'PRODUCTION_SCANNER_NOT_IMPLEMENTED');
+      if (!['clamd','clamav-http'].includes(env.FILE_SCANNER_PROVIDER ?? '')) fail('FILE_SCANNER_PROVIDER', 'REAL_SCANNER_REQUIRED');
+      if(env.FILE_SCANNER_PROVIDER==='clamav-http'){
+        let scannerUrl:URL;try{scannerUrl=new URL(env.FILE_SCANNER_URL??'');}catch{fail('FILE_SCANNER_URL','HTTPS_REQUIRED');}
+        if(scannerUrl!.protocol!=='https:'||scannerUrl!.username||scannerUrl!.password||scannerUrl!.search||scannerUrl!.hash)fail('FILE_SCANNER_URL','HTTPS_REQUIRED');
+        secret(env,'FILE_SCANNER_TOKEN');
+      }else if(!['localhost','127.0.0.1','::1','clamav'].includes(env.CLAMAV_HOST??'127.0.0.1'))fail('CLAMAV_HOST','REMOTE_CLAMD_REQUIRES_AUTHENTICATED_HTTPS_GATEWAY');
+      positive(env,'FILE_SIGNATURE_MAX_AGE_HOURS',72,168);
+      positive(env,'FILE_SCAN_TIMEOUT_MS',40000,60000);
+      for(const key of ['FILE_STORAGE_BUDGET_BYTES','FILE_SCHOOL_BUDGET_BYTES'])if(!Number.isSafeInteger(Number(env[key]))||Number(env[key])<1)fail(key,'EXPLICIT_STORAGE_BUDGET_REQUIRED');
+      if(Number(env.FILE_SCHOOL_BUDGET_BYTES)>Number(env.FILE_STORAGE_BUDGET_BYTES))fail('FILE_SCHOOL_BUDGET_BYTES','EXCEEDS_GLOBAL_BUDGET');
     }
     if (env.DEPLOYMENT_STAGE === 'production' && env.FILE_STORAGE_PROVIDER === 'disabled') fail('FILE_STORAGE_PROVIDER', 'ATTACHMENTS_DISABLED_NOT_PRODUCTION_READY');
   }

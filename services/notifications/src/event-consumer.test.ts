@@ -2,6 +2,21 @@ import { describe, expect, it, vi } from 'vitest';
 import { applyNotificationEvent } from './event-consumer';
 
 describe('notification event consumer', () => {
+  it('deduplicates class teachers and never includes leave reasons in notices',async()=>{
+    const enqueue=vi.fn().mockResolvedValue({});
+    await applyNotificationEvent({source:'attendance',event:{id:'event',eventType:'attendance.leave-application-submitted.v1',aggregateId:'leave',occurredAt:'2026-10-17',payload:{schoolId:'school',classId:'class',teacherUserIds:['teacher','teacher'],reason:'PRIVATE'}}},enqueue);
+    expect(enqueue).toHaveBeenCalledOnce();expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({recipientUserId:'teacher',deepLink:'schoolconnect://leave-applications/class'}),'event');expect(JSON.stringify(enqueue.mock.calls)).not.toContain('PRIVATE');
+  });
+  it('returns a teacher acknowledgement to the applying parent',async()=>{
+    const enqueue=vi.fn().mockResolvedValue({});
+    await applyNotificationEvent({source:'attendance',event:{id:'event',eventType:'attendance.leave-application-acknowledged.v1',aggregateId:'leave',occurredAt:'2026-10-17',payload:{schoolId:'school',studentId:'child',guardianUserId:'parent'}}},enqueue);
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({recipientUserId:'parent',studentId:'child',notificationType:'LEAVE_ACKNOWLEDGED',deepLink:'schoolconnect://leave-applications/child'}),'event');
+  });
+  it('sends one timetable notice per guardian when siblings share a class',async()=>{
+    const enqueue=vi.fn().mockResolvedValue({});
+    await applyNotificationEvent({source:'content',event:{id:'event',eventType:'content.timetable-published.v1',aggregateId:'schedule',occurredAt:'2026-10-17',payload:{schoolId:'school',recipients:[{guardianUserId:'parent',studentId:'one'},{guardianUserId:'parent',studentId:'two'}]}}},enqueue);
+    expect(enqueue).toHaveBeenCalledOnce();expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({notificationType:'TIMETABLE_PUBLISHED',resourceType:'TIMETABLE'}),'event');
+  });
   it('notifies teachers once per event without a student ID and keeps parent-child deliveries',async()=>{
     const enqueue=vi.fn().mockResolvedValue({id:'n'});
     await applyNotificationEvent({source:'content',event:{id:'e',eventType:'content.post-published.v1',aggregateId:'holiday',occurredAt:new Date().toISOString(),payload:{schoolId:'s1',notification:{title:'Holiday',body:'School is closed'},recipients:[{guardianUserId:'parent',studentId:'kid'}],staffRecipients:['teacher','teacher']}}},enqueue);

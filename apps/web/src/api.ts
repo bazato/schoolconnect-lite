@@ -1,6 +1,6 @@
 import { portalMemberships } from './portal-roles';
 export type Role = 'PLATFORM_OWNER' | 'SCHOOL_ADMIN' | 'TEACHER' | 'PARENT';
-export type Membership = { id: string; schoolId: string | null; role: Role };
+export type Membership = { id: string; schoolId: string | null; role: Role; schoolName?:string };
 export type Session = {
   accessToken: string;
   refreshToken: string;

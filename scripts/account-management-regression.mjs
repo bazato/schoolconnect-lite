@@ -62,6 +62,14 @@ try {
   await assert.rejects(identity.requestOtp('+991230000006',pendingParent.invitationCode,'ACTIVATE','TEACHER'));ok('revoking one role preserves another role’s separate pending registration and activation code');
   const assignment=await school.assignTeacher({schoolId:first.id,teacherMembershipId:teacher.membershipId,classId:classroom.id,subjectName:'Mathematics',canPublishResults:true,canPublishAnnouncements:true,canRecordAttendance:true});
   assert.match(assignment.subjectCode,/^SUB-[A-F0-9]{20}$/);
+  assert.equal(await school.teacherAuthorized(first.id,teacher.membershipId,classroom.id,'CLASS'),true);
+  assert.equal(await school.teacherAuthorized(second.id,teacher.membershipId,classroom.id,'CLASS'),false);
+  assert.equal(await school.teacherAuthorized(first.id,teacher.membershipId,classroom.id,'UNRECOGNIZED'),false);
+  const extraClass=await school.createClass({schoolId:first.id,displayName:'Class without attendance permission',academicYear:'2026-2027'});
+  await school.assignTeacher({schoolId:first.id,teacherMembershipId:teacher.membershipId,classId:extraClass.id,subjectName:'English',canPublishResults:true,canPublishAnnouncements:false,canRecordAttendance:false});
+  assert.equal(await school.teacherAuthorized(first.id,teacher.membershipId,extraClass.id,'CLASS'),true);
+  assert.equal(await school.teacherAuthorized(first.id,teacher.membershipId,extraClass.id,'ATTENDANCE'),false);
+  ok('class experiences use live assignments without granting attendance permission');
   const child=await school.createStudentAndGuardian({schoolId:first.id,classId:classroom.id,guardianUserId:parent.userId,studentDisplayName:'Synthetic Child One'});
   const sibling=await school.createStudentAndGuardian({schoolId:first.id,classId:classroom.id,guardianUserId:parent.userId,studentDisplayName:'Synthetic Child Two',admissionNumber:'PREDEFINED-001'});
   assert.match(child.admissionNumber,/^STU-[A-F0-9]{32}$/);assert.equal(sibling.admissionNumber,'PREDEFINED-001');assert.equal((await school.children(first.id,parent.userId)).length,2);

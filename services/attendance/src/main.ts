@@ -10,6 +10,7 @@ import { Pool } from 'pg';
 import { domainEventTypes } from '@schoolconnect/contracts';
 import { PgOutbox, eventingStatus, eventingHealth, bindEventingShutdown, registerApplicationShutdown, startOutboxPublisher } from '@schoolconnect/eventing';
 import { validateAttendanceSubmission, type AttendanceStatus } from './validation';
+import { LeaveApplications } from './leave-applications';
 
 type AttendanceBatchRequest = {
   schoolId: string; classId: string; attendanceDate: string; actorUserId: string; actorMembershipId: string;
@@ -19,8 +20,9 @@ type AttendanceBatchRequest = {
 const requestHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 @Injectable()
-class AttendanceRepository implements OnModuleDestroy {
+export class AttendanceRepository implements OnModuleDestroy {
   private readonly pool = new Pool({ connectionString: process.env.ATTENDANCE_DATABASE_URL ?? 'postgresql://schoolconnect:schoolconnect@localhost:5432/schoolconnect_attendance', max: Number(process.env.ATTENDANCE_DB_POOL_MAX ?? 10), connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS ?? 3000), statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS ?? 5000) });
+  readonly applications = new LeaveApplications(this.pool);
   async health() { const result = await this.pool.query<{ now: Date }>('SELECT now() AS now'); return result.rows[0]; }
 
   async submit(input: AttendanceBatchRequest) {
@@ -297,6 +299,10 @@ class AttendanceRepository implements OnModuleDestroy {
 @Controller('internal/v1')
 class AttendanceController {
   constructor(@Inject(AttendanceRepository) private readonly repository: AttendanceRepository) {}
+  @Post('leave-applications') apply(@Body() body: Parameters<LeaveApplications['submit']>[0]) { return this.repository.applications.submit(body); }
+  @Get('leave-applications') applications(@Query('schoolId') schoolId:string,@Query('classId') classId?:string,@Query('studentId') studentId?:string) { return this.repository.applications.list(schoolId,{classId,studentId}); }
+  @Get('leave-applications/:id') applicationContext(@Param('id') id:string,@Query('schoolId') schoolId:string) { return this.repository.applications.context(schoolId,id); }
+  @Post('leave-applications/:id/acknowledge') acknowledgeApplication(@Param('id') id:string,@Body() body:{schoolId:string;actorMembershipId:string;note:string;correlationId?:string}) { return this.repository.applications.acknowledge(body.schoolId,id,body.actorMembershipId,body.note,body.correlationId); }
   @Get('health') async health() { return { status:eventingHealth('publisher:attendance'), service: 'attendance', database: await this.repository.health() }; }
   @Get('events/status') eventsStatus() { return this.repository.eventingDiagnostics(); }
   @Post('attendance/batches') batch(@Body() body: AttendanceBatchRequest) { return this.repository.submit(body); }
@@ -318,4 +324,4 @@ class AttendanceController {
 @Module({ controllers: [AttendanceController], providers: [AttendanceRepository] })
 class AttendanceModule {}
 async function bootstrap() { const app = await NestFactory.create(AttendanceModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.ATTENDANCE_PORT ?? 3104), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); const repository=app.get(AttendanceRepository); bindEventingShutdown(repository,await startOutboxPublisher('attendance',repository)); registerApplicationShutdown(app); }
-void bootstrap();
+if(process.env.ATTENDANCE_SKIP_BOOTSTRAP!=='true') void bootstrap();

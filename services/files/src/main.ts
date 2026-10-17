@@ -3,99 +3,47 @@ import { config } from 'dotenv';
 import { resolve } from 'node:path';
 config({ path: resolve(__dirname, '../../../.env') });
 import 'reflect-metadata';
-import { BadRequestException, Body, Controller, Get, Headers, Inject, Injectable, Module, NotFoundException, OnModuleDestroy, Param, Post, Query, ServiceUnavailableException } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Inject, Module, Param, Post, Query } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { randomUUID } from 'node:crypto';
-import { Pool } from 'pg';
-import { domainEventTypes, validateManagedRuntime } from '@schoolconnect/contracts';
-import { PgOutbox, eventingStatus, eventingHealth, bindEventingShutdown, registerApplicationShutdown, startOutboxPublisher } from '@schoolconnect/eventing';
-import { createMalwareScanner, createPrivateObjectStorage, MalwareScanner, PrivateObjectStorage } from './storage';
-import { fileCapabilities, fileUploadPolicy } from './file-policy';
-
-@Injectable()
-class FileRepository implements OnModuleDestroy {
-  private readonly pool = new Pool({ connectionString: process.env.FILE_DATABASE_URL ?? 'postgresql://schoolconnect:schoolconnect@localhost:5432/schoolconnect_files', max: Number(process.env.FILES_DB_POOL_MAX ?? 6), connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS ?? 3000), statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS ?? 5000) });
-  async health() { const result = await this.pool.query<{ now: Date }>('SELECT now() AS now'); return result.rows[0]; }
-  constructor(private readonly storage: PrivateObjectStorage, private readonly scanner: MalwareScanner) {}
-  async createUpload(input: { schoolId: string; ownerType: 'POST' | 'LEAVE_REQUEST'; ownerId: string; actorUserId: string; fileName: string; mediaType: string; byteSize: number; checksumSha256: string }) {
-    if (process.env.FILE_STORAGE_PROVIDER === 'disabled') throw new ServiceUnavailableException({ code: 'FILE_ATTACHMENTS_DISABLED' });
-    if (!fileUploadPolicy.mediaTypes.includes(input.mediaType) || input.byteSize <= 0 || input.byteSize > fileUploadPolicy.maxByteSize || !/^[a-f0-9]{64}$/i.test(input.checksumSha256)) {
-      throw new BadRequestException({ code: 'FILE_POLICY_REJECTED' });
-    }
-    const fileId = randomUUID(); const uploadSessionId = randomUUID();
-    const quarantineKey = `${input.schoolId}/quarantine/${fileId}`;
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-      await client.query(
-        `INSERT INTO file_objects (id, school_id, owner_type, owner_id, uploaded_by_user_id, original_file_name, media_type, byte_size, checksum_sha256, quarantine_object_key)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [fileId, input.schoolId, input.ownerType, input.ownerId, input.actorUserId, input.fileName, input.mediaType, input.byteSize, input.checksumSha256.toLowerCase(), quarantineKey]);
-      await client.query(`INSERT INTO upload_sessions (id, school_id, file_id, expires_at) VALUES ($1,$2,$3,now()+interval '5 minutes')`, [uploadSessionId, input.schoolId, fileId]);
-      await client.query('COMMIT');
-      const url = await this.storage.createUploadUrl(quarantineKey, input.mediaType, input.byteSize, input.checksumSha256.toLowerCase());
-      return { fileId, uploadSessionId, status: 'QUARANTINED', upload: { mode: 'S3_PRESIGNED_PUT', url, objectKey: quarantineKey, expiresInSeconds: Number(process.env.FILE_URL_TTL_SECONDS ?? 300), requiredHeaders: { 'content-type': input.mediaType, 'x-amz-meta-checksumsha256': input.checksumSha256.toLowerCase() } } };
-    } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
-  }
-  async completeUpload(uploadSessionId: string, actorUserId: string, schoolId: string, correlationId?: string) {
-    if (process.env.FILE_STORAGE_PROVIDER === 'disabled') throw new ServiceUnavailableException({ code: 'FILE_ATTACHMENTS_DISABLED' });
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-      const session = await client.query<{ file_id: string; quarantine_object_key: string; byte_size: string }>(`UPDATE upload_sessions s SET status='UPLOADED', completed_at=now() FROM file_objects f WHERE s.id=$1 AND s.file_id=f.id AND f.uploaded_by_user_id=$2 AND s.school_id=$3 AND f.school_id=$3 AND s.status IN ('CREATED','UPLOADING') AND s.expires_at>now() RETURNING s.file_id,f.quarantine_object_key,f.byte_size`, [uploadSessionId, actorUserId, schoolId]);
-      if (!session.rowCount) throw new NotFoundException({ code: 'UPLOAD_SESSION_NOT_FOUND_OR_EXPIRED' });
-      await this.storage.verifyUpload(session.rows[0]!.quarantine_object_key, Number(session.rows[0]!.byte_size));
-      await client.query(`UPDATE file_objects SET processing_status='SCANNING' WHERE id=$1`, [session.rows[0]!.file_id]);
-      await client.query(`INSERT INTO outbox_events (event_type, aggregate_id, payload) VALUES ($1,$2,$3)`, [domainEventTypes.fileUploadCompleted, session.rows[0]!.file_id, { fileId: session.rows[0]!.file_id, schoolId, actorUserId, correlationId }]);
-      await client.query('COMMIT');
-      const fileId = session.rows[0]!.file_id;
-      const privateKey = `${fileId.slice(0, 2)}/${fileId}`;
-      try {
-        await this.scanner.assertClean(session.rows[0]!.quarantine_object_key);
-        await this.storage.promote(session.rows[0]!.quarantine_object_key, privateKey);
-        await this.pool.query(`UPDATE file_objects SET processing_status='READY',private_object_key=$1,ready_at=now() WHERE id=$2`, [privateKey, fileId]);
-        return { fileId, status: 'READY' };
-      } catch (error) {
-        await this.pool.query(`UPDATE file_objects SET processing_status='REJECTED',rejection_code=$1 WHERE id=$2`, [error instanceof Error ? error.message.slice(0, 80) : 'SCAN_FAILED', fileId]);
-        throw new BadRequestException({ code: 'FILE_REJECTED_OR_SCAN_FAILED' });
-      }
-    } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
-  }
-  async access(fileId: string, input: { schoolId: string; actorUserId: string; studentId?: string; authorized: boolean; reason?: string }) {
-    if (process.env.FILE_STORAGE_PROVIDER === 'disabled') throw new ServiceUnavailableException({ code: 'FILE_ATTACHMENTS_DISABLED' });
-    const file = await this.pool.query<{ private_object_key: string | null; processing_status: string }>(`SELECT private_object_key, processing_status FROM file_objects WHERE id=$1 AND school_id=$2`, [fileId, input.schoolId]);
-    if (!file.rowCount) throw new NotFoundException({ code: 'FILE_NOT_FOUND' });
-    const allowed = input.authorized && file.rows[0]!.processing_status === 'READY';
-    await this.pool.query(
-      `INSERT INTO file_access_events (school_id, file_id, actor_user_id, student_id, access_mode, decision, decision_reason) VALUES ($1,$2,$3,$4,'AUTHENTICATED_STREAM',$5,$6)`,
-      [input.schoolId, fileId, input.actorUserId, input.studentId ?? null, allowed ? 'ALLOWED' : 'DENIED', allowed ? null : input.reason ?? 'NOT_READY_OR_UNAUTHORIZED']);
-    if (!allowed) throw new BadRequestException({ code: 'FILE_NOT_READY_OR_UNAUTHORIZED' });
-    return { mode: 'S3_PRESIGNED_GET', url: await this.storage.createDownloadUrl(file.rows[0]!.private_object_key!), expiresInSeconds: Number(process.env.FILE_URL_TTL_SECONDS ?? 60), cacheControl: 'private, no-store' };
-  }
-  async claimOutbox(limit: number) { return new PgOutbox(this.pool).claim(limit); }
-  async renewOutbox(id: string, token: string) { return new PgOutbox(this.pool).renew(id,token); }
-  async completeOutbox(id: string, success: boolean, token?: string, errorCode?: string) { return new PgOutbox(this.pool).complete(id,success,token,errorCode); }
-  async eventingDiagnostics() { return { runtime:eventingStatus('publisher:files'),outbox:await new PgOutbox(this.pool).status() }; }
-
-  async onModuleDestroy() { await this.pool.end(); }
-}
+import { validateManagedRuntime } from '@schoolconnect/contracts';
+import { eventingHealth, bindEventingShutdown, registerApplicationShutdown, startOutboxPublisher } from '@schoolconnect/eventing';
+import { createMalwareScanner, createPrivateObjectStorage, type MalwareScanner, type PrivateObjectStorage } from './storage';
+import { FileRepository } from './repository';
+import { fileCapabilities } from './file-policy';
+export { FileRepository } from './repository';
 
 @Controller('internal/v1')
 class FileController {
-  constructor(@Inject(FileRepository) private readonly repository: FileRepository) {}
-  @Get('files/capabilities') capabilities() { return fileCapabilities(); }
-  @Get('health') async health() { return { status:eventingHealth('publisher:files'), service: 'files', database: await this.repository.health(), capabilities: { attachmentsEnabled: process.env.FILE_STORAGE_PROVIDER !== 'disabled' } }; }
-  @Get('events/status') eventsStatus() { return this.repository.eventingDiagnostics(); }
-  @Post('uploads') upload(@Body() body: Parameters<FileRepository['createUpload']>[0]) { return this.repository.createUpload(body); }
-  @Post('uploads/:uploadSessionId/complete') complete(@Param('uploadSessionId') id: string, @Body() body: { actorUserId: string; schoolId: string }, @Headers('x-correlation-id') correlationId?: string) { return this.repository.completeUpload(id, body.actorUserId, body.schoolId, correlationId); }
-  @Post('files/:fileId/access') access(@Param('fileId') fileId: string, @Body() body: Parameters<FileRepository['access']>[1]) { return this.repository.access(fileId, body); }
-  @Get('outbox') outbox(@Query('limit') limit = '25') { return this.repository.claimOutbox(Number(limit)); }
-  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') eventId: string, @Body() body: { success?: boolean; claimToken?: string }) { return this.repository.completeOutbox(eventId, body.success === true,body.claimToken); }
+  constructor(@Inject(FileRepository) private readonly repository:FileRepository) {}
+  @Get('files/capabilities') capabilities(){return this.repository.capabilities();}
+  @Get('health') async health(){return {status:eventingHealth('publisher:files'),service:'files',database:await this.repository.health(),configuration:fileCapabilities(),scannerReadinessPath:'/internal/v1/files/capabilities'};}
+  @Get('events/status') eventsStatus(){return this.repository.eventingDiagnostics();}
+  @Post('uploads') upload(@Body() body:Parameters<FileRepository['createUpload']>[0]){return this.repository.createUpload(body);}
+  @Post('uploads/:uploadSessionId/complete') complete(@Param('uploadSessionId') id:string,@Body() body:{actorUserId:string;schoolId:string},@Headers('x-correlation-id') correlationId?:string){return this.repository.completeUpload(id,body.actorUserId,body.schoolId,correlationId);}
+  @Post('files/validate-attachments') validate(@Body() body:Parameters<FileRepository['validateAttachments']>[0]){return this.repository.validateAttachments(body);}
+  @Post('files/:fileId/access') access(@Param('fileId') id:string,@Body() body:Parameters<FileRepository['access']>[1]){return this.repository.access(id,body);}
+  @Get('outbox') outbox(@Query('limit') limit='25'){return this.repository.claimOutbox(Number(limit));}
+  @Post('outbox/:eventId/complete') completeOutbox(@Param('eventId') id:string,@Body() body:{success?:boolean;claimToken?:string}){return this.repository.completeOutbox(id,body.success===true,body.claimToken);}
 }
-@Module({ controllers: [FileController], providers: [
-  { provide: 'PRIVATE_OBJECT_STORAGE', useFactory: () => createPrivateObjectStorage() },
-  { provide: 'MALWARE_SCANNER', useFactory: () => createMalwareScanner() },
-  { provide: FileRepository, useFactory: (storage: PrivateObjectStorage, scanner: MalwareScanner) => new FileRepository(storage, scanner), inject: ['PRIVATE_OBJECT_STORAGE', 'MALWARE_SCANNER'] },
-] }) class FileModule {}
-async function bootstrap() { if (process.env.NODE_ENV === 'production') validateManagedRuntime(process.env, 'files'); const app = await NestFactory.create(FileModule); const token=process.env.INTERNAL_SERVICE_TOKEN; if (process.env.NODE_ENV==='production' && (!token || token.length<32)) throw new Error('INTERNAL_SERVICE_TOKEN_REQUIRED'); if(token) app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'})); await app.listen(Number(process.env.FILE_PORT ?? 3105), process.env.SERVICE_BIND_HOST ?? '127.0.0.1'); const repository=app.get(FileRepository); bindEventingShutdown(repository,await startOutboxPublisher('files',repository)); registerApplicationShutdown(app); }
-void bootstrap();
+@Module({controllers:[FileController],providers:[
+  {provide:'PRIVATE_OBJECT_STORAGE',useFactory:()=>createPrivateObjectStorage()},
+  {provide:'MALWARE_SCANNER',useFactory:()=>createMalwareScanner()},
+  {provide:FileRepository,useFactory:(storage:PrivateObjectStorage,scanner:MalwareScanner)=>new FileRepository(storage,scanner),inject:['PRIVATE_OBJECT_STORAGE','MALWARE_SCANNER']},
+]})class FileModule {}
+async function bootstrap(){
+  if(process.env.NODE_ENV==='production')validateManagedRuntime(process.env,'files');
+  const app=await NestFactory.create(FileModule),token=process.env.INTERNAL_SERVICE_TOKEN;
+  if(process.env.NODE_ENV==='production'&&(!token||token.length<32))throw Error('INTERNAL_SERVICE_TOKEN_REQUIRED');
+  if(token)app.use((request:{headers:Record<string,string|string[]|undefined>},response:{status:(code:number)=>{json:(body:unknown)=>void}},next:()=>void)=>request.headers['x-internal-service-token']===token?next():response.status(401).json({code:'INTERNAL_AUTHENTICATION_REQUIRED'}));
+  await app.listen(Number(process.env.FILE_PORT??3105),process.env.SERVICE_BIND_HOST??'127.0.0.1');
+  const repository=app.get(FileRepository);
+  const publisher=await startOutboxPublisher('files',repository);
+  let cleaning=false;
+  const timer=setInterval(()=>{
+    if(cleaning||process.env.FILE_STORAGE_PROVIDER!=='s3')return;cleaning=true;
+    void repository.cleanupExpired().catch(()=>console.warn('files: expired-object cleanup will retry')).finally(()=>{cleaning=false;});
+  },300000);timer.unref();
+  bindEventingShutdown(repository,async()=>{clearInterval(timer);await publisher();});
+  registerApplicationShutdown(app);
+}
+if(process.env.FILE_SKIP_BOOTSTRAP!=='true')void bootstrap();

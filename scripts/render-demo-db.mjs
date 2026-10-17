@@ -27,7 +27,7 @@ export const MIGRATIONS = [
   '070-audit.sql', '080-admin-provisioning.sql',
   '095-security-and-scale.sql', '096-product-workflows.sql',
   '097-publishing-permissions.sql',
-  '098-observability.sql', '099-notification-lifecycle.sql', '100-read-model.sql', '101-read-model-backfill.sql', '102-fees.sql', '103-passcode-auth.sql', '104-event-recovery.sql', '105-account-management.sql', '106-school-announcements.sql',
+  '098-observability.sql', '099-notification-lifecycle.sql', '100-read-model.sql', '101-read-model-backfill.sql', '102-fees.sql', '103-passcode-auth.sql', '104-event-recovery.sql', '105-account-management.sql', '106-school-announcements.sql', '107-school-experiences.sql', '108-secure-file-processing.sql', '109-compressed-private-files.sql',
 ];
 
 export function databaseUrl(baseUrl, databaseName) {

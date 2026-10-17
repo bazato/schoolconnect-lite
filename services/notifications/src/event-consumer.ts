@@ -32,6 +32,21 @@ export async function applyNotificationEvent(envelope: EventEnvelope, enqueue: (
   if (!schoolId) return;
   const correlationId = typeof payload.correlationId === 'string' ? payload.correlationId : event.id;
   const write = (input: Omit<NotificationInput, 'sourceEventId' | 'schoolId'>) => enqueue({ ...input, sourceEventId: event.id, schoolId }, correlationId);
+  if(event.eventType===domainEventTypes.leaveApplicationSubmitted) {
+    const staff=Array.isArray(payload.teacherUserIds) ? [...new Set(payload.teacherUserIds.filter((id):id is string=>typeof id==='string'))] : [];
+    await finishFanout(staff.map((recipientUserId)=>write({recipientUserId,notificationType:'LEAVE_SUBMITTED',resourceType:'LEAVE_APPLICATION',resourceId:event.aggregateId,
+      title:'New parent leave application',body:'Open your class leave requests to acknowledge it.',deepLink:`schoolconnect://leave-applications/${String(payload.classId)}`})));
+  }
+  if(event.eventType===domainEventTypes.leaveApplicationAcknowledged) {
+    await write({recipientUserId:String(payload.guardianUserId),studentId:String(payload.studentId),notificationType:'LEAVE_ACKNOWLEDGED',resourceType:'LEAVE_APPLICATION',resourceId:event.aggregateId,
+      title:'Teacher acknowledged your leave application',body:'Open leave applications to see the teacher’s reply.',deepLink:`schoolconnect://leave-applications/${String(payload.studentId)}`});
+  }
+  if(event.eventType===domainEventTypes.timetablePublished) {
+    // One notice per guardian, even when siblings share a class.
+    const unique=new Map(recipients(payload).map((recipient)=>[recipient.guardianUserId,recipient]));
+    await finishFanout([...unique.values()].map(({guardianUserId,studentId})=>write({recipientUserId:guardianUserId,studentId,notificationType:'TIMETABLE_PUBLISHED',resourceType:'TIMETABLE',resourceId:event.aggregateId,
+      title:'Class timetable updated',body:'The latest timetable is always available from your dashboard.',deepLink:`schoolconnect://timetable/${studentId}`})));
+  }
   if (event.eventType === domainEventTypes.postPublished || event.eventType === domainEventTypes.postUpdated) {
     let snapshot = payload.notification as { title?: unknown; body?: unknown } | undefined;
     if (!snapshot) snapshot = await legacyLookup<{ title: string; body: string }>(process.env.CONTENT_SERVICE_URL ?? 'http://127.0.0.1:3103', `/internal/v1/posts/${encodeURIComponent(event.aggregateId)}?schoolId=${encodeURIComponent(schoolId)}`);

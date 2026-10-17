@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import type { Role } from './domain';
+import type { LeaveApplication, PublishedTimetable, ResultChartPoint, TimetableSlot } from '../../../packages/contracts/src/school-experiences';
 import { isDemoMode, resolveApiUrl } from './config';
 import { assertSecureStoreKey, SESSION_SECURE_KEY } from './secureStoreKeys';
 import { withReturningMemberFallback } from './otp-request';
@@ -17,7 +18,7 @@ export type MobileSession = {
   refreshToken: string;
   expiresInSeconds: number;
   user: { id: string; displayName: string };
-  memberships: Array<{ id: string; schoolId: string | null; role: Role }>;
+  memberships: Array<{ id: string; schoolId: string | null; role: Role; schoolName?:string }>;
   activeMembershipId?: string;
 };
 
@@ -130,7 +131,7 @@ export const isNetworkError = (error: unknown) => error instanceof TypeError || 
 
 async function transport(path: string, init: RequestInit): Promise<{ response: Response; payload: unknown }> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15_000);
+  const timer = setTimeout(() => controller.abort(), /\/files\/uploads\/[^/]+\/complete$/.test(path) ? 245_000 : ['/files/capabilities','/files/uploads'].includes(path) ? 130_000 : 15_000);
   try {
     const response = await fetch(`${API_URL}${path}`, { ...init,signal: init.signal ?? controller.signal });
     const payload = await response.json().catch((error: unknown) => { if (isNetworkError(error)) throw error; return { code: 'INVALID_SERVER_RESPONSE' }; });
@@ -198,9 +199,10 @@ export function loginPasscode(phoneE164: string, passcode: string,role?:Role) {
     .then((session)=>completeMobileSignIn(session,role));
 }
 async function completeMobileSignIn(session:MobileSession,role?:Role):Promise<MobileSession> {
-  const preferred=role ? session.memberships.find((membership)=>membership.role===role) : session.memberships.find((membership)=>['TEACHER','PARENT'].includes(membership.role)) ?? session.memberships[0];
+  const currentId=session.activeMembershipId ?? session.memberships[0]?.id;
+  const preferred=role ? session.memberships.find((membership)=>membership.role===role) : session.memberships.find((membership)=>membership.id===currentId);
   if(!preferred) throw new Error('NO_ACTIVE_MEMBERSHIP');
-  if(preferred.id!==session.memberships[0]?.id) {
+  if(preferred.id!==currentId) {
     const switched=await request<{accessToken:string;expiresInSeconds:number;activeMembership:{id:string}}>('/auth/switch-role',{method:'POST',body:JSON.stringify({membershipId:preferred.id})},session);
     return {...session,accessToken:switched.accessToken,expiresInSeconds:switched.expiresInSeconds,activeMembershipId:switched.activeMembership.id};
   }
@@ -257,7 +259,7 @@ async function scopedRead<T>(session: MobileSession, path: string, permittedCach
 export const mobileApi = {
   schoolAnnouncements: (session:MobileSession)=>request<Array<ApiTeacherPost & {authorMembershipId:string;teacherCount:number}>>('/admin/announcements',undefined,session),
   announceSchool: (session:MobileSession,payload:{title:string;body:string;idempotencyKey:string})=>request('/admin/announcements',{method:'POST',body:JSON.stringify(payload)},session),
-  context: (session: MobileSession) => request<{ principal: { role: Role }; school: ApiSchool | null; memberships: MobileSession['memberships'] }>('/me/context', undefined, session),
+  context: (session: MobileSession) => request<{ principal: { role: Role; membershipId?:string }; school: ApiSchool | null; memberships: MobileSession['memberships'] }>('/me/context', undefined, session),
   switchRole: (session: MobileSession, membershipId: string) => request<{ accessToken: string; expiresInSeconds: number; activeMembership: MobileSession['memberships'][number] }>('/auth/switch-role', {
     method: 'POST', body: JSON.stringify({ membershipId }),
   }, session),
@@ -297,6 +299,14 @@ export const mobileApi = {
   drafts: (session: MobileSession) => scopedRead<ApiDraft[]>(session, '/drafts', (items) => items.filter((item) => item.postType !== 'RESULT')),
   deleteDraft: (session: MobileSession, draftId: string) => request<{ deleted: boolean }>(`/drafts/${draftId}/delete`, { method: 'POST' }, session),
   submitAttendance: (session: MobileSession, payload: Record<string, unknown>) => resilientMutation(session, '/attendance/batches', payload, true),
+  leaveApplications: (session:MobileSession,teacher:boolean,id:string) => request<LeaveApplication[]>(`/${teacher ? 'teacher' : 'parent'}/leave-applications?${teacher ? 'classId' : 'studentId'}=${encodeURIComponent(id)}`,undefined,session),
+  applyLeave: (session:MobileSession,payload:{studentId:string;startDate:string;endDate:string;reason:string}) => request('/parent/leave-applications',{method:'POST',body:JSON.stringify(payload)},session),
+  acknowledgeLeave: (session:MobileSession,id:string,note:string) => request(`/teacher/leave-applications/${id}/acknowledge`,{method:'POST',body:JSON.stringify({note})},session),
+  timetable: (session:MobileSession,teacher:boolean,id:string) => request<PublishedTimetable|null>(`/${teacher ? 'teacher' : 'parent'}/timetable?${teacher ? 'classId' : 'studentId'}=${encodeURIComponent(id)}`,undefined,session),
+  publishTimetable: (session:MobileSession,payload:{classId:string;title:string;slots:TimetableSlot[];expectedVersion:number}) => request('/teacher/timetable',{method:'POST',body:JSON.stringify(payload)},session),
+  resultCharts: (session:MobileSession,teacher:boolean,id:string) => request<{points:ResultChartPoint[];description:string}>(`/${teacher ? 'teacher' : 'parent'}/result-charts?${teacher ? 'classId' : 'studentId'}=${encodeURIComponent(id)}`,undefined,session),
+  resultRoster: (session:MobileSession,classId:string) => request<ApiRosterStudent[]>(`/teacher/result-roster?classId=${encodeURIComponent(classId)}`,undefined,session),
+  recordResultScore: (session:MobileSession,payload:{classId:string;studentId:string;examName:string;subjectName:string;marksObtained:number;maxMarks:number;resultDate:string;idempotencyKey:string}) => request('/teacher/result-scores',{method:'POST',body:JSON.stringify(payload)},session),
   acknowledgeAbsence: (session: MobileSession, eventId: string, payload: Record<string, unknown>) => resilientMutation(session, `/attendance/events/${eventId}/acknowledgements`, payload, true),
   attendanceRoster: (session: MobileSession, classId: string) => scopedRead<ApiRosterStudent[]>(session, `/attendance/roster?classId=${encodeURIComponent(classId)}`),
   attendanceVersion: (session: MobileSession, classId: string, attendanceDate: string) => scopedRead<{ version: number }>(session, `/attendance/version?classId=${encodeURIComponent(classId)}&attendanceDate=${encodeURIComponent(attendanceDate)}`),
@@ -307,7 +317,7 @@ export const mobileApi = {
   markNotificationRead: (session: MobileSession, id: string) => request<{ id: string; readAt: string }>(`/notifications/${id}/read`, { method: 'POST' }, session),
   createFileUpload: (session: MobileSession, payload: { ownerId: string; fileName: string; mediaType: string; byteSize: number; checksumSha256: string }) => request<{ fileId: string; uploadSessionId: string; upload: { url: string; requiredHeaders: Record<string, string> } }>('/files/uploads', { method: 'POST', body: JSON.stringify({ ...payload, ownerType: 'POST' }) }, session),
   fileCapabilities: (session: MobileSession) => request<{ attachmentsEnabled: boolean; maxByteSize: number; mediaTypes: string[] }>('/files/capabilities', undefined, session),
-  completeFileUpload: (session: MobileSession, uploadSessionId: string) => request<{ fileId: string; status: string }>(`/files/uploads/${uploadSessionId}/complete`, { method: 'POST' }, session),
+  completeFileUpload: (session: MobileSession, uploadSessionId: string) => request<{ fileId: string; status: string;byteSize?:number;originalByteSize?:number }>(`/files/uploads/${uploadSessionId}/complete`, { method: 'POST' }, session),
   fileAccess: (session: MobileSession, fileId: string, studentId?: string) => request<{ url: string; expiresInSeconds: number }>(`/files/${fileId}/access`, { method: 'POST', body: JSON.stringify({ studentId }) }, session),
   schools: (session: MobileSession) => request<ApiSchool[]>('/admin/schools', undefined, session),
   createSchool: (session: MobileSession, payload: Record<string, unknown>) => request<{ school: ApiSchool & { created: boolean }; administrator: ProvisionedAccount }>('/admin/schools', { method: 'POST', body: JSON.stringify(payload) }, session),

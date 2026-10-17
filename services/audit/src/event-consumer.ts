@@ -11,7 +11,9 @@ export function auditFromEvent({ event }: EventEnvelope): AuditInput | null {
   const schoolId = typeof payload.schoolId === 'string' ? payload.schoolId :
     event.eventType.startsWith('identity.') ? '00000000-0000-0000-0000-000000000000' : '';
   if (!schoolId) return null;
-  const resourceType = event.eventType.startsWith('fees.') ? 'FEE_IMPORT' : event.eventType.startsWith('identity.') ? 'MEMBERSHIP' : event.eventType.startsWith('content.') ? 'POST' :
+  const resourceType = event.eventType===domainEventTypes.timetablePublished ? 'TIMETABLE' :
+    [domainEventTypes.leaveApplicationSubmitted,domainEventTypes.leaveApplicationAcknowledged].includes(event.eventType as typeof domainEventTypes.leaveApplicationSubmitted) ? 'LEAVE_APPLICATION' :
+    event.eventType.startsWith('fees.') ? 'FEE_IMPORT' : event.eventType.startsWith('identity.') ? 'MEMBERSHIP' : event.eventType.startsWith('content.') ? 'POST' :
     event.eventType.startsWith('notifications.') ? 'NOTIFICATION' : event.eventType.startsWith('files.') ? 'FILE' :
       event.eventType === domainEventTypes.attendanceProjectionRebuilt ? 'ATTENDANCE_PROJECTION' :
         [domainEventTypes.schoolCreated, domainEventTypes.schoolUpdated, domainEventTypes.academicYearRolledOver].includes(event.eventType as typeof domainEventTypes.schoolCreated) ? 'SCHOOL' :

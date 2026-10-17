@@ -341,10 +341,11 @@ export class SchoolRepository implements OnModuleDestroy {
   }
 
   async teacherAuthorized(schoolId: string, membershipId: string, classId: string, capability: string) {
+    if(!['RESULTS','ANNOUNCEMENTS','ATTENDANCE','CLASS'].includes(capability)) return false;
     const column = capability === 'RESULTS' ? 'can_publish_results' : capability === 'ANNOUNCEMENTS' ? 'can_publish_announcements' : 'can_record_attendance';
     const result = await this.pool.query(
       `SELECT EXISTS(SELECT 1 FROM teacher_assignments a JOIN school_classes c ON c.id=a.class_id AND c.school_id=a.school_id
-        WHERE a.school_id=$1 AND a.teacher_membership_id=$2 AND a.class_id=$3 AND a.status='ACTIVE' AND c.status='ACTIVE' AND a.${column}=true) AS allowed`,
+        WHERE a.school_id=$1 AND a.teacher_membership_id=$2 AND a.class_id=$3 AND a.status='ACTIVE' AND c.status='ACTIVE' AND ${capability==='CLASS' ? 'true' : `a.${column}=true`}) AS allowed`,
       [schoolId, membershipId, classId]);
     return Boolean(result.rows[0]?.allowed);
   }
@@ -356,6 +357,12 @@ export class SchoolRepository implements OnModuleDestroy {
        WHERE e.school_id=$1 AND e.class_id=$2 AND e.status='ACTIVE' AND st.status='ACTIVE' ORDER BY st.display_name`,
       [schoolId, classId]);
     return result.rows;
+  }
+
+  async classTeacherMemberships(schoolId:string,classId:string) {
+    const result=await this.pool.query(`SELECT DISTINCT a.teacher_membership_id AS "membershipId" FROM teacher_assignments a
+      JOIN school_classes c ON c.id=a.class_id AND c.school_id=a.school_id
+      WHERE a.school_id=$1 AND a.class_id=$2 AND a.status='ACTIVE' AND c.status='ACTIVE'`,[schoolId,classId]);return result.rows;
   }
 
   async recipients(schoolId: string, classId: string) {
@@ -576,6 +583,7 @@ class SchoolController {
   @Get('schools/:schoolId/guardians/:guardianUserId/children') children(@Param('schoolId') schoolId: string, @Param('guardianUserId') guardianUserId: string) { return this.repository.children(schoolId, guardianUserId); }
   @Get('schools/:schoolId/teachers/:membershipId/scope') scope(@Param('schoolId') schoolId: string, @Param('membershipId') membershipId: string) { return this.repository.teachingScope(schoolId, membershipId); }
   @Get('schools/:schoolId/classes/:classId/roster') roster(@Param('schoolId') schoolId: string, @Param('classId') classId: string) { return this.repository.roster(schoolId, classId); }
+  @Get('schools/:schoolId/classes/:classId/teacher-memberships') classTeachers(@Param('schoolId') schoolId:string,@Param('classId') classId:string) {return this.repository.classTeacherMemberships(schoolId,classId);}
   @Get('schools/:schoolId/classes/:classId/recipients') recipients(@Param('schoolId') schoolId: string, @Param('classId') classId: string) { return this.repository.recipients(schoolId, classId); }
   @Get('schools/:schoolId/classes/:classId/audience-recipients') audienceRecipients(@Param('schoolId') schoolId: string, @Param('classId') classId: string, @Query('audienceType') audienceType: 'CLASS' | 'GRADE' | 'SCHOOL') { return this.repository.audienceRecipients(schoolId, classId, audienceType); }
   @Get('schools/:schoolId/students/:studentId/guardians') guardians(@Param('schoolId') schoolId: string, @Param('studentId') studentId: string) { return this.repository.guardiansForStudent(schoolId, studentId); }

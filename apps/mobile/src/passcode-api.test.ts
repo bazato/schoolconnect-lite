@@ -19,11 +19,12 @@ describe('mobile account authentication API', () => {
     const session=await loginPasscode('+919876543210','0123',role);
     expect(session.activeMembershipId).toBe(role);expect(session.accessToken).toBe(`token-${role}`);
   });
-  it('opens a mobile role for a shared admin/teacher phone using a server-authorized switch',async()=>{
-    const fetchMock=vi.fn(async(url:string,init?:RequestInit)=>url.endsWith('/auth/switch-role') ?
-      (expect(JSON.parse(String(init?.body))).toEqual({membershipId:'teacher'}),expect((init?.headers as Record<string,string>).authorization).toBe('Bearer initial'),new Response(JSON.stringify({accessToken:'teacher-token',expiresInSeconds:600,activeMembership:{id:'teacher'}}))) :
-      new Response(JSON.stringify({accessToken:'initial',memberships:[{id:'admin',role:'SCHOOL_ADMIN'},{id:'teacher',role:'TEACHER'}]})));
-    vi.stubGlobal('fetch',fetchMock);const result=await loginPasscode('+919876543210','0123');expect(result.activeMembershipId).toBe('teacher');expect(result.accessToken).toBe('teacher-token');expect(fetchMock).toHaveBeenCalledTimes(2);
+  it('does not silently pick a different role before a verified multi-workspace user chooses',async()=>{
+    const fetchMock=vi.fn(async(_url:string,init?:RequestInit)=>{
+      expect(JSON.parse(String(init?.body))).not.toHaveProperty('role');
+      return new Response(JSON.stringify({accessToken:'initial',memberships:[{id:'admin',role:'SCHOOL_ADMIN'},{id:'teacher',role:'TEACHER'}]}));
+    });
+    vi.stubGlobal('fetch',fetchMock);const result=await loginPasscode('+919876543210','0123');expect(result.activeMembershipId).toBe('admin');expect(result.accessToken).toBe('initial');expect(fetchMock).toHaveBeenCalledOnce();
   });
   it('uses the shared login endpoint with phone and four-digit passcode only', async () => {
     const fetchMock=vi.fn(async (_url:string,init?:RequestInit) => {

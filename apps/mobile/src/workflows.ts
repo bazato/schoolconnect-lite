@@ -46,6 +46,8 @@ export function routeFromDeepLink(value: string): Route {
     if (url.protocol !== 'schoolconnect:') return null;
     const id = url.pathname.replace(/^\//, '');
     if (!/^[a-f\d-]{36}$/i.test(id)) return null;
+    if (url.hostname === 'leave-applications') return {name:'leave-applications',contextId:id};
+    if (url.hostname === 'timetable') return {name:'timetable',contextId:id};
     if (url.hostname === 'posts') return { name: 'post-detail', postId: id, studentId: url.searchParams.get('studentId') ?? undefined };
     if (url.hostname === 'attendance') return { name: 'absence', eventId: id };
     return null;

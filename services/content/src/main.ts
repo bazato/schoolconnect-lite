@@ -3,11 +3,12 @@ import { config } from 'dotenv';
 import { resolve } from 'node:path';
 config({ path: resolve(__dirname, '../../../.env') });
 import 'reflect-metadata';
+import { AcademicExperiences } from './academic-experiences';
 import { BadRequestException, Body, ConflictException, Controller, ForbiddenException, Get, Inject, Injectable, Module, NotFoundException, OnModuleDestroy, Param, Post, Query } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { createHash, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
-import { domainEventTypes } from '@schoolconnect/contracts';
+import { domainEventTypes, validSchoolDate } from '@schoolconnect/contracts';
 import { PgOutbox, eventingStatus, eventingHealth, bindEventingShutdown, registerApplicationShutdown, startOutboxPublisher } from '@schoolconnect/eventing';
 import { ScheduledPostRunner } from './scheduled-runner';
 
@@ -75,6 +76,7 @@ const requestHash = (value: unknown) => createHash('sha256').update(JSON.stringi
 @Injectable()
 export class ContentRepository implements OnModuleDestroy {
   private readonly pool = new Pool({ connectionString: process.env.CONTENT_DATABASE_URL ?? 'postgresql://schoolconnect:schoolconnect@localhost:5432/schoolconnect_content', max: Number(process.env.CONTENT_DB_POOL_MAX ?? 10), connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS ?? 3000), statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS ?? 5000) });
+  readonly academics = new AcademicExperiences(this.pool);
   async health() { const result = await this.pool.query<{ now: Date }>('SELECT now() AS now'); return result.rows[0]; }
   async nextScheduledAt() {
     const result = await this.pool.query<{ nextAt: Date | null }>(`SELECT MIN(scheduled_for) AS "nextAt" FROM posts WHERE status='SCHEDULED'`);
@@ -217,18 +219,24 @@ export class ContentRepository implements OnModuleDestroy {
   }
 
   async publishResultBatch(input: BulkResultInput) {
-    if (!input.idempotencyKey || !input.rows?.length || input.rows.length > 200) throw new BadRequestException({ code: 'RESULT_BATCH_INVALID' });
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.idempotencyKey ?? '') || !Array.isArray(input.rows) || !input.rows.length || input.rows.length > 200) throw new BadRequestException({ code: 'RESULT_BATCH_INVALID' });
+    const seen=new Set<string>();
     for (const row of input.rows) {
-      if (!row.studentId || !row.classId || !row.admissionNumber || !row.examName || !row.subjectName ||
+      if (!row.studentId || !row.classId || !row.admissionNumber || typeof row.examName!=='string' || !row.examName.trim() || row.examName.length>160 || typeof row.subjectName!=='string' || !row.subjectName.trim() || row.subjectName.length>160 ||
           !Number.isFinite(row.marksObtained) || !Number.isFinite(row.maxMarks) || row.marksObtained < 0 ||
-          row.maxMarks <= 0 || row.marksObtained > row.maxMarks || !row.recipients.length ||
+          row.maxMarks <= 0 || row.maxMarks>99999999.99 || row.marksObtained > row.maxMarks ||
+          Math.abs(Math.round(row.marksObtained*100)-row.marksObtained*100)>0.000001 || Math.abs(Math.round(row.maxMarks*100)-row.maxMarks*100)>0.000001 ||
+          row.resultDate!==undefined && !validSchoolDate(row.resultDate) || !Array.isArray(row.recipients) || !row.recipients.length ||
           row.recipients.some((recipient) => recipient.studentId !== row.studentId || !recipient.guardianUserId)) {
         throw new BadRequestException({ code: 'RESULT_BATCH_ROW_INVALID' });
       }
+      const key=`${row.studentId}:${row.examName.trim().toLowerCase()}:${row.subjectName.trim().toLowerCase()}`;
+      if(seen.has(key)) throw new BadRequestException({code:'RESULT_BATCH_DUPLICATE_ROW'});seen.add(key);
     }
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))',[input.actorUserId,`RESULT_BATCH:${input.idempotencyKey}`]);
       const hash = requestHash({ ...input, correlationId: undefined });
       const existing = await client.query<{ request_hash: string; response_body: unknown }>(
         `SELECT request_hash,response_body FROM idempotency_keys WHERE actor_id=$1 AND operation='PUBLISH_RESULT_BATCH' AND idempotency_key=$2 AND expires_at>now() FOR UPDATE`,
@@ -254,6 +262,8 @@ export class ContentRepository implements OnModuleDestroy {
           VALUES ($1,$2,$3,$4,'RESULT','PUBLISHED',now(),$5)`, [postId,input.schoolId,input.authorMembershipId,row.classId,input.correlationId ?? null]);
         await client.query(`INSERT INTO post_revisions (id,post_id,revision_number,title,body,subject_code,exam_name,audience_type,created_by_membership_id)
           VALUES ($1,$2,1,$3,$4,$5,$6,'STUDENT',$7)`, [revisionId,postId,title,resultBody,row.subjectCode ?? null,row.examName,input.authorMembershipId]);
+        await client.query(`INSERT INTO result_scores(post_id,school_id,class_id,student_id,exam_name,subject_name,marks_obtained,max_marks,result_date)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[postId,input.schoolId,row.classId,row.studentId,row.examName.trim(),row.subjectName.trim(),row.marksObtained,row.maxMarks,row.resultDate ?? null]);
         for (const recipient of row.recipients) {
           await client.query(`INSERT INTO post_recipients (post_id,school_id,student_id,guardian_user_id,recipient_snapshot)
             VALUES ($1,$2,$3,$4,$5)`, [postId,input.schoolId,recipient.studentId,recipient.guardianUserId,recipient.snapshot ?? {}]);
@@ -262,7 +272,7 @@ export class ContentRepository implements OnModuleDestroy {
         // Result marks stay in the content database. The read-model consumer
         // fetches this snapshot over the authenticated internal service link.
         await client.query(`INSERT INTO outbox_events (id,event_type,aggregate_id,payload) VALUES ($1,$2,$3,$4)`,
-          [eventId,domainEventTypes.postPublished,postId,{ schoolId: input.schoolId,postId,postType: 'RESULT',correlationId: input.correlationId,
+          [eventId,domainEventTypes.postPublished,postId,{ schoolId: input.schoolId,postId,postType: 'RESULT',actorUserId:input.actorUserId,actorMembershipId:input.authorMembershipId,correlationId: input.correlationId,
             recipients: row.recipients, notification: { title: 'New academic result available', body: `${row.examName} result is ready to view.` } }]);
         publishedRows.push({ admissionNumber: row.admissionNumber,studentId: row.studentId,postId,recipientCount: row.recipients.length });
       }
@@ -474,6 +484,9 @@ export class ContentRepository implements OnModuleDestroy {
 @Controller('internal/v1')
 class ContentController {
   constructor(@Inject(ContentRepository) private readonly repository: ContentRepository) {}
+  @Get('timetable') timetable(@Query('schoolId') schoolId:string,@Query('classId') classId:string) { return this.repository.academics.timetable(schoolId,classId); }
+  @Post('timetable') publishTimetable(@Body() body:Parameters<AcademicExperiences['publishTimetable']>[0]) { return this.repository.academics.publishTimetable(body); }
+  @Get('result-charts') resultCharts(@Query('schoolId') schoolId:string,@Query('classId') classId?:string,@Query('studentId') studentId?:string,@Query('guardianUserIds') guardianUserIds?:string) { return this.repository.academics.resultCharts(schoolId,{classId,studentId,guardianUserIds:guardianUserIds?.split(',')}); }
   @Get('school-announcements') announcements(@Query('schoolId') schoolId:string,@Query('includeArchived') includeArchived?:string) { return this.repository.schoolAnnouncements(schoolId,includeArchived==='true'); }
   @Get('health') async health() { return { status:eventingHealth('publisher:content'), service: 'content', database: await this.repository.health() }; }
   @Get('events/status') eventsStatus() { return this.repository.eventingDiagnostics(); }

@@ -37,6 +37,8 @@ describe('role-aware workflow routing', () => {
     const id = '30000000-0000-4000-8000-000000000001';
     expect(routeFromDeepLink(`schoolconnect://posts/${id}?studentId=child-b`)).toEqual({ name: 'post-detail', postId: id, studentId: 'child-b' });
     expect(routeFromDeepLink(`schoolconnect://attendance/${id}`)).toEqual({ name: 'absence', eventId: id });
+    expect(routeFromDeepLink(`schoolconnect://leave-applications/${id}`)).toEqual({name:'leave-applications',contextId:id});
+    expect(routeFromDeepLink(`schoolconnect://timetable/${id}`)).toEqual({name:'timetable',contextId:id});
     expect(routeFromDeepLink(`https://example.com/posts/${id}`)).toBeNull();
     expect(routeFromDeepLink('schoolconnect://posts/invalid')).toBeNull();
   });

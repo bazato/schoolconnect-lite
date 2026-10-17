@@ -1,4 +1,5 @@
 export * from './fees';
+export * from './school-experiences';
 export * from './runtime-config';
 export type Role = 'PLATFORM_OWNER' | 'SCHOOL_ADMIN' | 'TEACHER' | 'PARENT';
 
@@ -36,6 +37,9 @@ export const domainEventTypes = {
   attendanceProjectionRebuilt: 'attendance.projection-rebuilt.v1',
   absenceAcknowledged: 'attendance.absence-acknowledged.v1',
   leaveReviewed: 'attendance.leave-reviewed.v1',
+  leaveApplicationSubmitted: 'attendance.leave-application-submitted.v1',
+  leaveApplicationAcknowledged: 'attendance.leave-application-acknowledged.v1',
+  timetablePublished: 'content.timetable-published.v1',
   accountProvisioned: 'identity.account-provisioned.v1',
   membershipUpdated: 'identity.membership-updated.v1',
   membershipRevoked: 'identity.membership-revoked.v1',

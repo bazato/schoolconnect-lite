@@ -22,6 +22,7 @@ type Page = 'Overview' | 'Schools' | 'Owners' | 'Administrators' | 'Parents' | '
 const roleLabel: Record<Role, string> = { PLATFORM_OWNER: 'Platform owner', SCHOOL_ADMIN: 'School administrator', TEACHER: 'Teacher', PARENT: 'Parent' };
 const displayError = (error: unknown) => error instanceof Error ? error.message.replaceAll('_', ' ').toLowerCase() : 'Something went wrong. Please try again.';
 const localDate = () => new Date().toLocaleDateString('en-CA');
+const workspaceLabel=(membership:Membership)=>`${roleLabel[membership.role]}${membership.schoolId ? ` · ${membership.schoolName ?? 'School workspace'}` : ''}`;
 
 function BrandMark() {
   return <span className="brand-mark"><img src="/nexqon-icon.png" alt="Nexqon School App logo" /></span>;
@@ -32,6 +33,7 @@ export function App() {
   const [context, setContext] = useState<AppContext | null>(null);
   const [loading, setLoading] = useState(Boolean(readSession()));
   const [error, setError] = useState('');
+  const [choosingWorkspace,setChoosingWorkspace]=useState(false);
 
   const updateSession = useCallback((value: Session | null) => { setSession(value); saveSession(value); }, []);
   const request = useCallback(<T,>(path: string, init: RequestInit = {}) => apiRequest<T>(path, session, (value) => updateSession(value), init), [session, updateSession]);
@@ -55,10 +57,11 @@ export function App() {
     return () => { active = false; };
   }, [session?.accessToken, request, updateSession]);
 
-  if (!session) return <SignIn onSignedIn={updateSession} />;
+  if (!session) return <SignIn onSignedIn={(value)=>{setChoosingWorkspace(portalMemberships(value.memberships).length>1);updateSession(value);}} />;
   if (loading || !context) return <div className="boot-screen"><BrandMark /><div className="spinner" /><p>{error || 'Opening your secure school workspace…'}</p><button className="button quiet" onClick={() => { updateSession(null); setError(''); }}>Sign in again</button></div>;
   const signOut = () => { void apiRequest('/auth/logout', session, () => undefined, { method: 'POST' }, false).catch(() => undefined); updateSession(null); };
   if (!['PLATFORM_OWNER', 'SCHOOL_ADMIN'].includes(context.principal.role)) return <div className="boot-screen"><p>Please use the mobile app for teacher or parent access. This portal is for school administrators and application owners.</p><button className="button primary" onClick={signOut}>Sign out</button></div>;
+  if(choosingWorkspace) return <main className="boot-screen"><BrandMark/><h1>Choose your workspace</h1><p>Your verified number has multiple web memberships.</p>{portalMemberships(context.memberships).map((membership)=><button className="button secondary" key={membership.id} onClick={async()=>{setError('');try{const result=await request<{accessToken:string;activeMembership:Membership}>('/auth/switch-role',{method:'POST',body:JSON.stringify({membershipId:membership.id})});updateSession({...session,accessToken:result.accessToken,activeMembershipId:result.activeMembership.id});setChoosingWorkspace(false);}catch(failure){setError(displayError(failure));}}}>{workspaceLabel(membership)}</button>)}{error && <p role="alert">{error}</p>}<button className="button quiet" onClick={signOut}>Sign out</button></main>;
   return <Portal key={context.principal.membershipId} context={context} session={session} onSession={updateSession} request={request} onSignOut={signOut} />;
 }
 
@@ -69,7 +72,6 @@ export function SignIn({ onSignedIn }: { onSignedIn: (session: Session) => void 
   const [otp, setOtp] = useState('');
   const [developmentCode, setDevelopmentCode] = useState('');
   const [mode, setMode] = useState<'login' | 'activate' | 'reset'>('login');
-  const [loginRole,setLoginRole]=useState<Role>('SCHOOL_ADMIN');
   const [passcode, setPasscode] = useState('');
   const [confirmation, setConfirmation] = useState('');
   const [setupToken, setSetupToken] = useState('');
@@ -82,8 +84,8 @@ export function SignIn({ onSignedIn }: { onSignedIn: (session: Session) => void 
   const sendCode = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError('');
     try {
-      if (mode === 'login') { onSignedIn(await loginPasscode(phone, passcode,loginRole)); return; }
-      const result = await requestOtp(phone, invitation, mode === 'reset' ? 'RESET' : 'ACTIVATE',loginRole);
+      if (mode === 'login') { onSignedIn(await loginPasscode(phone, passcode)); return; }
+      const result = await requestOtp(phone, invitation, mode === 'reset' ? 'RESET' : 'ACTIVATE');
       setChallengeId(result.challengeId); setDevelopmentCode(result.developmentCode ?? '');
       if (result.developmentCode) setOtp(result.developmentCode);
     } catch (failure) { setError(displayError(failure)); }
@@ -115,7 +117,6 @@ export function SignIn({ onSignedIn }: { onSignedIn: (session: Session) => void 
         <h2>{setupToken ? 'Set your 4-digit passcode' : challengeId ? 'Verify your number' : mode === 'login' ? 'Sign in to your workspace' : mode === 'reset' ? 'Reset your passcode' : 'Activate your account'}</h2>
         <p className="muted">{setupToken ? 'Use this same passcode for future web and mobile logins.' : challengeId ? `Enter the one-time code for ${phone}.` : mode === 'login' ? 'Use your registered mobile number and 4-digit passcode.' : mode === 'reset' ? 'Verify your mobile number to choose a new passcode. Existing sessions will be signed out.' : 'Invitation and OTP are needed only for first-time activation. Already activated? Leave the invitation empty to set up your passcode.'}</p>
         {!challengeId ? <form onSubmit={(event) => { void sendCode(event); }} className="stack-form">
-          <label>Sign in as<select aria-label="Sign in as" value={loginRole} disabled={busy} onChange={(event)=>{setLoginRole(event.target.value as Role);setError('');}}><option value="SCHOOL_ADMIN">School administrator</option><option value="PLATFORM_OWNER">Platform owner</option></select></label>
           <label>Mobile number<input autoComplete="tel" inputMode="tel" placeholder="+966 5X XXX XXXX" value={phone} onChange={(event) => setPhone(event.target.value)} required /></label>
           {mode === 'activate' && <label>Invitation code <span className="optional">(first sign-in only)</span><input autoComplete="off" placeholder="Provided by your school" value={invitation} onChange={(event) => setInvitation(event.target.value.trim())} /></label>}
           {mode === 'login' && <label>4-digit passcode<input type="password" autoComplete="current-password" inputMode="numeric" maxLength={4} pattern="[0-9]{4}" value={passcode} onChange={(event) => setPasscode(event.target.value.replace(/\D/g, '').slice(0,4))} required /></label>}
@@ -143,7 +144,7 @@ function Portal({ context, session, onSession, request: baseRequest, onSignOut }
   context: AppContext; session: Session; onSession: (session: Session) => void;
   request: <T>(path: string, init?: RequestInit) => Promise<T>; onSignOut: () => void;
 }) {
-  const adminMemberships = portalMemberships(session.memberships);
+  const adminMemberships = portalMemberships(context.memberships);
   const owner = context.principal.role === 'PLATFORM_OWNER';
   const admin = context.principal.role === 'SCHOOL_ADMIN';
   const [page, setPage] = useState<Page>('Overview');
@@ -155,7 +156,7 @@ function Portal({ context, session, onSession, request: baseRequest, onSignOut }
   const [members, setMembers] = useState<MemberRow[]>([]);
   const [selectedSchool, setSelectedSchool] = useState('');
   const allowedPages: Page[] = owner ? ['Overview','Schools','Owners',...(selectedSchool ? ['Classes','Teachers','Students','Parents','Announcements','Results','Fees'] as Page[] : [])] : admin ? ['Overview','Classes','Teachers','Students','Parents','Administrators','Announcements','Results','Fees'] : ['Overview'];
-  const request=useCallback(<T,>(path:string,init:RequestInit={})=>baseRequest<T>(path,owner && selectedSchool && !/^\/admin\/(schools|platform-owners|reports\/platform-summary|operations)(?:\/|$)/.test(path) ? {...init,headers:{...init.headers,'x-schoolconnect-school-id':selectedSchool}} : init),[baseRequest,owner,selectedSchool]);
+  const request=useCallback(<T,>(path:string,init:RequestInit={})=>baseRequest<T>(path,owner && selectedSchool && path.startsWith('/admin/') && !/^\/admin\/(schools|platform-owners|reports\/platform-summary|operations)(?:\/|$)/.test(path) ? {...init,headers:{...init.headers,'x-schoolconnect-school-id':selectedSchool}} : init),[baseRequest,owner,selectedSchool]);
   const schoolContext=owner ? schools.find((school)=>school.id===selectedSchool) : context.school;
   const [invitation, setInvitation] = useState<Invitation | null>(null);
   const [busy, setBusy] = useState(false);
@@ -163,6 +164,10 @@ function Portal({ context, session, onSession, request: baseRequest, onSignOut }
   const [notice, setNotice] = useState('');
   const [formOpen, setFormOpen] = useState(false);
   const reloadGeneration = useRef(0);
+  const chooseSchool=useCallback((id:string)=>{
+    if(id!==selectedSchool){setClasses([]);setTeachers([]);setStudents([]);setMembers([]);setSummary(null);setInvitation(null);setFormOpen(false);}
+    setSelectedSchool(id);
+  },[selectedSchool]);
 
   const reload = useCallback(async () => {
     const generation = ++reloadGeneration.current;
@@ -189,8 +194,7 @@ function Portal({ context, session, onSession, request: baseRequest, onSignOut }
 
   useEffect(() => { void reload(); return () => { reloadGeneration.current++; }; }, [reload]);
 
-  const switchRole = async (event: FormEvent<HTMLSelectElement>) => {
-    const membershipId = event.currentTarget.value;
+  const switchRole = async (membershipId:string) => {
     if (!membershipId || membershipId === context.principal.membershipId) return;
     setBusy(true); setError('');
     try {
@@ -218,10 +222,8 @@ function Portal({ context, session, onSession, request: baseRequest, onSignOut }
     </aside>
     <main className="main-area">
       <header className="topbar"><div className="breadcrumb"><span>Nexqon School App</span><b>/</b><strong>{page}</strong></div><div className="topbar-actions">
-        {owner && <label className="role-switch"><span>Manage school</span><select aria-label="Select school to manage" value={selectedSchool} disabled={busy} onChange={(event)=>{setSelectedSchool(event.target.value);setClasses([]);setTeachers([]);setStudents([]);setMembers([]);setFormOpen(false);setPage('Overview');setInvitation(null);}}><option value="">Platform only</option>{schools.map((school)=><option key={school.id} value={school.id}>{school.displayName}</option>)}</select></label>}
-        {adminMemberships.length > 1 && <label className="role-switch"><span>View as</span><select aria-label="Switch role" value={context.principal.membershipId} onChange={(event) => { void switchRole(event); }}>
-          {adminMemberships.map((membership) => <option key={membership.id} value={membership.id}>{roleLabel[membership.role]}{membership.schoolId && membership.schoolId !== context.principal.schoolId ? ' · another school' : ''}</option>)}
-        </select></label>}
+        {owner && <><span>{schoolContext?.displayName ?? 'Platform workspace'}</span><button className="button quiet small" disabled={busy} onClick={()=>{setSelectedSchool('');setClasses([]);setTeachers([]);setStudents([]);setMembers([]);setFormOpen(false);setPage('Schools');setInvitation(null);}}>Choose school</button></>}
+        {adminMemberships.length > 1 && <div aria-label="Web workspaces">{adminMemberships.map((membership)=><button key={membership.id} disabled={busy || membership.id===context.principal.membershipId} className="button quiet small" onClick={()=>{void switchRole(membership.id);}}>{workspaceLabel(membership)}</button>)}</div>}
         <span className="topbar-divider" /><div className="online-state"><i /> Connected</div><button className="round-button" title="Refresh data" onClick={() => { void reload(); }}>↻</button><button className="signout-action" onClick={onSignOut}>Sign out</button>
       </div></header>
       <section className="page-wrap">
@@ -234,7 +236,7 @@ function Portal({ context, session, onSession, request: baseRequest, onSignOut }
         {notice && <div className="alert success">{notice}</div>}
         {invitation && <div className="invitation-banner"><div className="invite-icon">✓</div><div className="invite-copy"><strong>{invitation.role} account is ready</strong><span>Send this one-time invitation to {invitation.phone}. The user will set up access on first sign-in.</span></div><code>{invitation.code}</code><button className="button secondary small" onClick={() => { void navigator.clipboard?.writeText(invitation.code ?? ''); announce('Invitation copied. Share it securely with the invited user.'); }}>Copy code</button><button className="icon-button" onClick={() => setInvitation(null)} aria-label="Dismiss invitation">×</button></div>}
         {page === 'Overview' && <Overview owner={owner} context={context} schools={schools} classes={classes} teachers={teachers} students={students} summary={summary} busy={busy} onNavigate={setPage} />}
-        {page === 'Schools' && <OwnerSchools schools={schools} request={request} selectedSchool={selectedSchool} setSelectedSchool={setSelectedSchool} members={members} setMembers={setMembers} formOpen={formOpen} setFormOpen={setFormOpen} onInvite={invite} onMessage={announce} onSaved={()=>{void reload();}} />}
+        {page === 'Schools' && <OwnerSchools schools={schools} request={request} selectedSchool={selectedSchool} setSelectedSchool={chooseSchool} members={members} setMembers={setMembers} formOpen={formOpen} setFormOpen={setFormOpen} onInvite={invite} onMessage={announce} onSaved={()=>{void reload();}} />}
         {page === 'Owners' && <MemberDirectory title="Platform owners" listPath="/admin/platform-owners" memberPath="/admin/platform-owners" createPath="/admin/platform-owners" request={request}/>}
         {page === 'Parents' && <MemberDirectory key={selectedSchool} title="Parent accounts" listPath="/admin/parents" memberPath="/admin/members" request={request}/>}
         {page === 'Administrators' && <MemberDirectory title="School administrators" listPath="/admin/administrators" memberPath="/admin/administrators" request={request} statusEditable={false} deletable={false}/>}
